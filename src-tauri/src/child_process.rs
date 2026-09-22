@@ -100,14 +100,25 @@ fn hide_console_window(_command: &mut Command) {}
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        path::PathBuf,
+        process::Command,
+        time::{Duration, Instant},
+    };
 
     use super::{background_command, output_with_timeout};
 
+    fn powershell_command() -> Command {
+        // Developer shells may omit Windows PowerShell from PATH.
+        let program = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        background_command(&program.to_string_lossy())
+    }
+
     #[test]
     fn background_console_process_has_no_console_window() {
-        let script = r#"Add-Type -Name NativeMethods -Namespace TokenLedger OMP -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();'; [TokenLedger OMP.NativeMethods]::GetConsoleWindow().ToInt64()"#;
-        let output = background_command("powershell")
+        let script = r#"Add-Type -Name NativeMethods -Namespace TokenLedgerOmp -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();'; [TokenLedgerOmp.NativeMethods]::GetConsoleWindow().ToInt64()"#;
+        let output = powershell_command()
             .args([
                 "-NoLogo",
                 "-NoProfile",
@@ -118,7 +129,11 @@ mod tests {
             .output()
             .expect("PowerShell should be available on supported Windows installations");
 
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "PowerShell console probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
     }
 
@@ -126,7 +141,7 @@ mod tests {
     fn background_command_deadline_terminates_a_slow_process() {
         let started = Instant::now();
         let error = output_with_timeout(
-            background_command("powershell").args([
+            powershell_command().args([
                 "-NoLogo",
                 "-NoProfile",
                 "-Command",

@@ -45,6 +45,8 @@ corepack pnpm build:installer
 
 ### 上游与发布边界
 
+0.5.3 修复 Windows 测试构建：正式程序与测试程序共用 Common Controls 6 清单，解决库测试启动时找不到 `TaskDialogIndirect` 的 `0xc0000139` 错误。无需手动修改测试 EXE。OMP 与 Codex 用量逻辑保持不变。
+
 2026-09-22 核对 OpenQuota `main` 为 [`0b21b35`](https://github.com/deviffyy/OpenQuota/commit/0b21b354e1a0)，当前基线已包含它。近期依赖升级、多账号和命令行功能仍是未合并 PR，没有当作稳定修复直接引入。见 [上游核对记录](docs/upstream-review.md)。
 
 目前通过 Releases 手动更新；签名更新源未配置，应用检查更新会返回 `not_configured`。Windows 文件未做 Authenticode 签名。验证范围以 Release 说明为准，见 [发布说明](docs/releasing.md)。
@@ -79,6 +81,8 @@ It does not migrate or share other TokenLedger/OpenQuota installations' data, ca
 Requires Node.js 22+, pnpm 11.11.0, stable Rust and [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/). Windows builds use the Rust GNU target and MinGW. Use the clone, development, check and installer commands above.
 
 ### Upstream and release boundaries
+
+0.5.3 fixes Windows test builds: application and test executables share a Common Controls 6 manifest, resolving the library-test startup error `0xc0000139` caused by an unavailable `TaskDialogIndirect`. Test executables no longer need manual patching. OMP and Codex usage logic is unchanged.
 
 On 2026-09-22, OpenQuota `main` was [`0b21b35`](https://github.com/deviffyy/OpenQuota/commit/0b21b354e1a0), already in this source baseline. Recent dependency updates, multi-account support and CLI changes are unmerged PRs, not imported as stable fixes. See the [upstream review](docs/upstream-review.md).
 

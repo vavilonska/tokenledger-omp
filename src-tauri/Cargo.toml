@@ -1,6 +1,6 @@
 [package]
 name = "tokenledger-omp"
-version = "0.5.2"
+version = "0.5.3"
 description = "Cross-platform AI quota tracker"
 authors = ["OpenQuota contributors", "TokenLedger OMP contributors"]
 edition = "2021"
@@ -12,6 +12,7 @@ name = "tokenledger_omp_lib"
 crate-type = ["rlib"]
 
 [build-dependencies]
+embed-resource = "3"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
