@@ -1,4 +1,4 @@
-//! Codex credit rate card, verified 2026-09-07:
+//! Codex credit rate card, verified 2026-09-23:
 //! https://learn.chatgpt.com/docs/pricing#token-rates
 //! https://learn.chatgpt.com/docs/agent-configuration/speed
 //! Kept separate from API catalogs, promotions, Batch/Flex and API Fast rates.
@@ -18,10 +18,13 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
     let base = DATED.replace(base, "");
     let (input, cached, output, fast_multiplier) = match base.as_ref() {
         "gpt-6-astra" => (250.0, 25.0, 1250.0, 2.5),
+        "gpt-6-sol" => (50.0, 5.0, 250.0, 2.5),
+        "gpt-6-luna" => (2.5, 0.25, 12.5, 2.5),
         "gpt-5.6-sol" => (100.0, 10.0, 500.0, 2.5),
         "gpt-5.6-terra" => (50.0, 5.0, 300.0, 2.5),
         "gpt-5.6-luna" => (5.0, 0.5, 30.0, 2.5),
         "gpt-5.6-cyber" => (312.5, 31.25, 1875.0, 2.5),
+        "gpt-rosalind-research" => (125.0, 12.5, 625.0, 1.0),
         "gpt-5.5" => (125.0, 12.5, 750.0, 2.5),
         "gpt-5.4" => (62.5, 6.25, 375.0, 2.0),
         "gpt-5.4-mini" => (18.75, 1.875, 113.0, 2.0),
@@ -45,9 +48,14 @@ mod tests {
     use crate::pricing::test_bundled_pricing;
 
     #[test]
-    fn astra_and_sol_credit_fast_differ_from_api_fast() {
+    fn gpt_6_and_5_6_credit_fast_differ_from_api_fast() {
         let pricing = test_bundled_pricing();
-        for (model, api, credit) in [("gpt-6-astra", 20.0, 25.0), ("gpt-5.6-sol", 8.0, 10.0)] {
+        for (model, api, credit) in [
+            ("gpt-6-astra", 20.0, 25.0),
+            ("gpt-6-sol", 4.0, 5.0),
+            ("gpt-6-luna", 0.2, 0.25),
+            ("gpt-5.6-sol", 8.0, 10.0),
+        ] {
             let tokens = TokenBreakdown {
                 input: 1_000_000,
                 is_fast: true,
@@ -59,6 +67,33 @@ mod tests {
             );
             assert_eq!(equivalent_usd(&pricing, model, tokens), Some(credit));
         }
+    }
+
+    #[test]
+    fn new_models_and_daybreak_alias_use_the_published_credit_card() {
+        let pricing = test_bundled_pricing();
+        let tokens = TokenBreakdown {
+            input: 1_000_000,
+            cache_read: 1_000_000,
+            output: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            equivalent_usd(&pricing, "gpt-6-sol-high", tokens),
+            Some(12.2)
+        );
+        assert_eq!(
+            equivalent_usd(&pricing, "gpt-6-luna-high", tokens),
+            Some(0.61)
+        );
+        assert_eq!(
+            equivalent_usd(&pricing, "gpt-daybreak-red-latest", tokens),
+            Some(88.75)
+        );
+        assert_eq!(
+            equivalent_usd(&pricing, "gpt-rosalind-research", tokens),
+            Some(30.5)
+        );
     }
 
     #[test]

@@ -100,6 +100,9 @@ mod bundled_resource_tests {
             50.0
         );
         assert_rates("gpt-5.6-high-fast", [8.0, 10.0, 0.8, 40.0]);
+        assert_rates("gpt-6-sol-high-fast", [4.0, 5.0, 0.4, 20.0]);
+        assert_rates("gpt-6-luna-medium-fast", [0.2, 0.25, 0.02, 1.0]);
+        assert_rates("gpt-daybreak-red-latest", [12.5, 15.625, 1.25, 75.0]);
         assert_rates("gpt-daybreak-blue-latest", [4.0, 5.0, 0.4, 20.0]);
         assert_rates("daybreak-blue-latest", [4.0, 5.0, 0.4, 20.0]);
         assert_rates("gpt-5.6-terra-max-fast", [4.0, 5.0, 0.4, 24.0]);
@@ -152,5 +155,31 @@ mod bundled_resource_tests {
             )
             .unwrap();
         assert!(cost > 0.0);
+    }
+
+    #[test]
+    fn gpt_6_and_5_6_long_context_uses_published_request_wide_rates() {
+        let pricing = test_bundled_pricing();
+        for (model, input_rate, output_rate) in [
+            ("gpt-6-sol", 2.0, 10.0),
+            ("gpt-6-luna", 0.1, 0.5),
+            ("gpt-5.6-terra", 2.0, 12.0),
+        ] {
+            let tokens = TokenBreakdown {
+                input: 272_000,
+                output: 1_000_000,
+                ..TokenBreakdown::default()
+            };
+            let short = pricing.estimated_cost_dollars(model, tokens, true).unwrap();
+            assert!((short - (0.272 * input_rate + output_rate)).abs() < 1e-9);
+            let long_tokens = TokenBreakdown {
+                input: 272_001,
+                ..tokens
+            };
+            let long = pricing
+                .estimated_cost_dollars(model, long_tokens, true)
+                .unwrap();
+            assert!((long - (0.272_001 * input_rate * 2.0 + output_rate * 1.5)).abs() < 1e-9);
+        }
     }
 }

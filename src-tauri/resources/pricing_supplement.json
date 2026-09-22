@@ -1,6 +1,6 @@
 {
   "$comment": "OpenQuota pricing supplement. Prices models that no public catalog carries, supplies fast-variant multipliers the catalogs omit, and maps provider log model slugs to canonical pricing keys (LiteLLM keys, models.dev ids, or entries in this file). The raw main-branch file is refreshed by installed apps, so merged corrections arrive without an app release. Rates are USD per million tokens.",
-  "updated_at": "2026-09-07T00:00:00Z",
+  "updated_at": "2026-09-23T00:00:00Z",
   "pricing": {
     "auto": {
       "input_per_million": 1.25,
@@ -133,7 +133,7 @@
       "output_per_million": 22.5
     },
     "gpt-6-astra": {
-      "$comment": "Published Standard API price, verified 2026-09-07. API Fast is 2x; Codex credits use an independent rate card (Fast 2.5x). Batch/Flex excluded.",
+      "$comment": "Published Standard API price, verified 2026-09-23. API Fast is 2x; Codex credits use an independent rate card (Fast 2.5x). Batch/Flex excluded.",
       "input_per_million": 10.0,
       "cache_write_per_million": 12.5,
       "cache_read_per_million": 1.0,
@@ -144,24 +144,75 @@
       "cache_write_above_200k_per_million": 25.0,
       "output_above_200k_per_million": 75.0
     },
+    "gpt-6-sol": {
+      "input_per_million": 2.0,
+      "cache_write_per_million": 2.5,
+      "cache_read_per_million": 0.2,
+      "output_per_million": 10.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 4.0,
+      "cache_read_above_200k_per_million": 0.4,
+      "cache_write_above_200k_per_million": 5.0,
+      "output_above_200k_per_million": 15.0
+    },
+    "gpt-6-luna": {
+      "input_per_million": 0.1,
+      "cache_write_per_million": 0.125,
+      "cache_read_per_million": 0.01,
+      "output_per_million": 0.5,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 0.2,
+      "cache_read_above_200k_per_million": 0.02,
+      "cache_write_above_200k_per_million": 0.25,
+      "output_above_200k_per_million": 0.75
+    },
     "gpt-5.6-sol": {
-      "$comment": "OpenAI API list pricing verified 2026-08-30; promotional pricing is published through at least 2026-11-21.",
+      "$comment": "OpenAI API list pricing verified 2026-09-23; promotional pricing is published through at least 2026-11-21.",
       "input_per_million": 4.0,
       "cache_write_per_million": 5.0,
       "cache_read_per_million": 0.4,
-      "output_per_million": 20.0
+      "output_per_million": 20.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 8.0,
+      "cache_read_above_200k_per_million": 0.8,
+      "cache_write_above_200k_per_million": 10.0,
+      "output_above_200k_per_million": 30.0
     },
     "gpt-5.6-terra": {
       "input_per_million": 2.0,
       "cache_write_per_million": 2.5,
       "cache_read_per_million": 0.2,
-      "output_per_million": 12.0
+      "output_per_million": 12.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 4.0,
+      "cache_read_above_200k_per_million": 0.4,
+      "cache_write_above_200k_per_million": 5.0,
+      "output_above_200k_per_million": 18.0
     },
     "gpt-5.6-luna": {
       "input_per_million": 0.2,
       "cache_write_per_million": 0.25,
       "cache_read_per_million": 0.02,
-      "output_per_million": 1.2
+      "output_per_million": 1.2,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 0.4,
+      "cache_read_above_200k_per_million": 0.04,
+      "cache_write_above_200k_per_million": 0.5,
+      "output_above_200k_per_million": 1.8
+    },
+    "gpt-5.6-cyber": {
+      "$comment": "Published Daybreak Red Standard API rate. No long-context tier is listed.",
+      "input_per_million": 12.5,
+      "cache_write_per_million": 15.625,
+      "cache_read_per_million": 1.25,
+      "output_per_million": 75.0
+    },
+    "gpt-rosalind-research": {
+      "$comment": "Published API rate; billing starts 2026-10-05. Cache writes have no separate price.",
+      "input_per_million": 5.0,
+      "cache_write_per_million": 5.0,
+      "cache_read_per_million": 0.5,
+      "output_per_million": 25.0
     }
   },
   "fast_multipliers": {
@@ -175,6 +226,8 @@
     "gpt-5.4": 2.0,
     "gpt-5.5": 2.5,
     "gpt-6-astra": 2.0,
+    "gpt-6-sol": 2.0,
+    "gpt-6-luna": 2.0,
     "gpt-5.6-sol": 2.0,
     "gpt-5.6-terra": 2.0,
     "gpt-5.6-luna": 2.0
@@ -183,6 +236,12 @@
     {"pattern": "^(?:openai/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-astra-fast"},
     {"pattern": "^(?:openai/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6-astra-fast"},
     {"pattern": "^(?:openai/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-astra"},
+    {"pattern": "^(?:openai/)?gpt-6-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6-sol-fast"},
+    {"pattern": "^(?:openai/)?gpt-6-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-sol-fast"},
+    {"pattern": "^(?:openai/)?gpt-6-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-sol"},
+    {"pattern": "^(?:openai/)?gpt-6-luna(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6-luna-fast"},
+    {"pattern": "^(?:openai/)?gpt-6-luna(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-luna-fast"},
+    {"pattern": "^(?:openai/)?gpt-6-luna(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-luna"},
     { "pattern": "^agent_review$", "canonical": "gpt-5.4" },
     { "pattern": "^default$", "canonical": "auto" },
     { "pattern": "^auto$", "canonical": "auto" },
@@ -258,6 +317,7 @@
     { "pattern": "^gpt-5\\.5(?:-(?:low|medium|high|xhigh|extra-high))?-fast$", "canonical": "gpt-5.5-fast" },
     { "pattern": "^gpt-5\\.5(?:-(?:low|medium|high|xhigh|extra-high))?$", "canonical": "gpt-5.5" },
     { "pattern": "^(?:gpt-)?daybreak-blue-latest$", "canonical": "gpt-5.6-sol" },
+    { "pattern": "^(?:gpt-)?daybreak-red-latest$", "canonical": "gpt-5.6-cyber" },
     { "pattern": "^gpt-5\\.6(?:-(?:none|low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-5.6-sol-fast" },
     { "pattern": "^gpt-5\\.6(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-5.6-sol" },
     { "pattern": "^gpt-5\\.6-sol(?:-(?:none|low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-5.6-sol-fast" },

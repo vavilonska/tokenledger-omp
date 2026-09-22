@@ -13,7 +13,7 @@ TokenLedger OMP tracks Codex subscription limits and usage recorded by the Codex
 | Rate Limit Resets                | Available reset credits                                      |
 | 5h / Weekly API Value            | Current-cycle spend and inferred allowance at API list price |
 | Weekly cycle history             | Actual server-observed windows, including early resets       |
-| Today / Yesterday / Last 30 Days | Combined Codex and Oh My Pi local usage            |
+| Today / Yesterday / Last 30 Days | Combined Codex and Oh My Pi local usage                      |
 | Usage Trend                      | Recent local usage over time                                 |
 
 ## Sign-in and local data
@@ -49,7 +49,6 @@ week. TokenLedger OMP preserves those reconstructed cycles in its account-scoped
 guess whether a reset was automatic, global, or banked, and does not upload local records or
 credentials.
 
-
 ## API USD and Codex credits
 
 Use the **API USD / Codex credits** switch above the overview, or **Settings → Usage Display →
@@ -57,25 +56,35 @@ Cost Display**. The choice is saved and applies to Codex usage rows, model detai
 pinned usage metrics and shared screenshots. In credit mode, the overview includes only providers
 with a credit estimate; other providers' dollar costs are not converted into Codex credits.
 
-Prices verified on 2026-09-07, per million tokens:
+Prices verified against official OpenAI documentation on 2026-09-23, per million tokens:
 
 | Model         | Standard API input / cached / output (USD) | Codex input / cached / output (credits) | API Fast | Codex Fast |
 | ------------- | ------------------------------------------ | --------------------------------------- | -------- | ---------- |
 | GPT-6 Astra   | 10 / 1 / 50                                | 250 / 25 / 1,250                        | 2×       | 2.5×       |
+| GPT-6 Sol     | 2 / 0.2 / 10                               | 50 / 5 / 250                            | 2×       | 2.5×       |
+| GPT-6 Luna    | 0.1 / 0.01 / 0.5                           | 2.5 / 0.25 / 12.5                       | 2×       | 2.5×       |
 | GPT-5.6 Sol   | 4 / 0.4 / 20                               | 100 / 10 / 500                          | 2×       | 2.5×       |
 | GPT-5.6 Terra | 2 / 0.2 / 12                               | 50 / 5 / 300                            | 2×       | 2.5×       |
 | GPT-5.6 Luna  | 0.2 / 0.02 / 1.2                           | 5 / 0.5 / 30                            | 2×       | 2.5×       |
 
 API USD uses the currently published Standard API price, excluding Batch/Flex reductions and
-third-party or carried client discounts. Sol's published Standard price currently includes OpenAI's
+third-party or carried client discounts. GPT-5.6 Sol's published Standard price includes OpenAI's
 promotion through at least 2026-11-21; no unpublished post-promotion price is invented. API Fast
-uses its own multiplier. Astra requests above 272,000 prompt tokens use the published long-context
-API rates for the entire request (20 / 2 / 75 USD), before any Fast multiplier.
+uses its own multiplier. For GPT-6 and GPT-5.6, requests above 272,000 prompt tokens use the
+published long-context API rates for the entire request: 2× input and cache rates, 1.5× output,
+before any Fast multiplier. API cache writes cost 1.25× uncached input.
 
 Codex credit estimates use the independent published token credit card. They do not inherit API
 Batch/Flex discounts, API Fast multipliers, API-only long-context surcharges or cache-write charges.
 Hover a credit value to see its USD equivalent at the fixed display anchor **2,500 credits = $100**
 (1 credit = $0.04). This equivalent is not the API list-price estimate or a subscription invoice.
+At Standard speed, the six models in the table have the same input, cached-input and output
+numbers after this display conversion. Their Fast rates differ: API 2× versus Codex credits 2.5×.
+GPT-5.4 mini is also a small published exception: its output is 113 credits per million versus
+the API equivalent of 112.5 credits. At the display conversion, GPT-Image-2 image-token credits
+cost 2× its API image-token rates;
+image tokens are outside this local text-token estimator. Purchased credit prices and included
+subscription allowances depend on the plan and are not inferred from this display conversion.
 `cr` is the compact display unit. Unknown/unpublished rates, including Spark research preview,
 remain unpriced and partial periods are marked. Missing recorded Fast metadata is estimated at
 Standard speed. Estimates cover locally available Codex and same-account Oh My Pi logs, not
@@ -88,6 +97,8 @@ their existing keys. Model details retain sub-cent precision until display forma
 
 Sources: [API pricing](https://developers.openai.com/api/docs/pricing),
 [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),
+[Sol](https://developers.openai.com/api/docs/models/gpt-6-sol),
+[Luna](https://developers.openai.com/api/docs/models/gpt-6-luna),
 [Codex credit card](https://learn.chatgpt.com/docs/pricing#token-rates),
 [Codex Fast](https://learn.chatgpt.com/docs/agent-configuration/speed).
 
