@@ -1,5 +1,15 @@
 # TokenLedger OMP
 
+**A Windows AI usage dashboard with Oh My Pi / Codex usage merging, token tracking, and weekly quota estimates.**
+
+集中查看 AI 用量、费用估算，以及 OMP / Codex 同账号的周额度估算。
+
+[快速安装](#下载与安装) · [English setup](#download-and-install) · [Download / 下载](https://github.com/vavilonska/tokenledger-omp/releases/latest) · [MIT](LICENSE)
+
+![TokenLedger OMP — conceptual workflow / 功能流程示意](docs/assets/overview.svg)
+
+> Independent OpenQuota fork. Estimates are not official balances. / 独立分支；估算不等于官方余额。
+
 [中文](#中文) · [English](#english)
 
 ## 中文
@@ -89,3 +99,7 @@ On 2026-09-22, OpenQuota `main` was [`0b21b35`](https://github.com/deviffyy/Open
 Update manually through Releases. A signed in-app feed is unconfigured; checks return `not_configured`. Windows binaries are not Authenticode-signed. See each release for its actual validation scope and [release documentation](docs/releasing.md).
 
 [MIT](LICENSE), retaining the OpenQuota copyright. This is an independent fork, not an official OpenQuota, OpenAI or Oh My Pi product. [Issues and pull requests](https://github.com/vavilonska/tokenledger-omp) are welcome.
+
+## Related projects / 相关项目
+
+[OMPmail](https://github.com/vavilonska/OMPmail) · [OMP Pet](https://github.com/vavilonska/omp-pet) · [All projects / 全部项目](https://github.com/vavilonska#projects--项目)
