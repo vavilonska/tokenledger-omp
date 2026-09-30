@@ -17,7 +17,7 @@ updates:
     schedule:
       interval: weekly
     # These expose Tauri's raw WebView2 types. Upgrade them together with Tauri,
-    # whose current Windows dependency graph uses webview2-com 0.38 / windows 0.61.
+    # whose current Windows dependency graph uses webview2-com 0.39 / windows 0.62.
     ignore:
       - dependency-name: webview2-com
         update-types: ['version-update:semver-minor']
