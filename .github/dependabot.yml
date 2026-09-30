@@ -24,6 +24,13 @@ updates:
       - dependency-name: windows
         update-types: ['version-update:semver-minor']
     groups:
+      # Review stable Tauri components together instead of opening one PR per crate.
+      tauri-minor-and-patch:
+        applies-to: version-updates
+        patterns: ['tauri', 'tauri-*']
+        update-types:
+          - minor
+          - patch
       # Cargo 0.x minor releases may contain breaking API changes, so only patches are grouped.
       rust-patches:
         applies-to: version-updates
