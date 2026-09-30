@@ -8,10 +8,9 @@ use std::{
 use rusqlite::{types::ValueRef, Connection, OpenFlags, Row};
 use serde_json::Value;
 
-use crate::pricing::ModelPricing;
-
 use super::record::{
-    parse_message, parse_part, ParsedMessage, ParsedPart, UsageRecord, EPOCH_MILLISECONDS_THRESHOLD,
+    parse_message, parse_part, OpenCodeUsageEvent, ParsedMessage, ParsedPart,
+    EPOCH_MILLISECONDS_THRESHOLD,
 };
 
 const PROVIDER_JSON: &str = "COALESCE(\
@@ -22,7 +21,7 @@ const PROVIDER_JSON: &str = "COALESCE(\
     json_extract(m.data,'$.model.providerId'))";
 #[derive(Debug, Default)]
 pub(crate) struct DatabaseUsage {
-    pub(crate) records: Vec<UsageRecord>,
+    pub(crate) events: Vec<OpenCodeUsageEvent>,
 }
 
 pub(crate) enum DatabaseRead {
@@ -30,11 +29,7 @@ pub(crate) enum DatabaseRead {
     Usable(DatabaseUsage),
 }
 
-pub(crate) fn read_database(
-    path: &Path,
-    cutoff_ms: i64,
-    pricing: &ModelPricing,
-) -> Result<DatabaseRead, ()> {
+pub(crate) fn read_database(path: &Path, cutoff_ms: i64) -> Result<DatabaseRead, ()> {
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(()),
@@ -46,18 +41,18 @@ pub(crate) fn read_database(
 
     let connection = open_read_only(path)?;
     let schema = inspect_schema(&connection)?;
-    let mut messages = load_messages(&connection, &schema, cutoff_ms)?;
-    let parts = load_parts(&connection, &schema, cutoff_ms, &messages)?;
+    let messages = load_messages(&connection, &schema, cutoff_ms)?;
+    let mut parts = load_parts(&connection, &schema, cutoff_ms, &messages)?;
 
-    let mut records = Vec::with_capacity(messages.len());
-    for message in messages.drain(..) {
-        let message_parts = parts
-            .get(&message.message_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        records.push(message.into_usage(message_parts, pricing));
+    let mut events = Vec::with_capacity(messages.len());
+    for message in messages {
+        let message_parts = parts.remove(&message.message_id).unwrap_or_default();
+        events.push(OpenCodeUsageEvent {
+            message,
+            parts: message_parts,
+        });
     }
-    Ok(DatabaseRead::Usable(DatabaseUsage { records }))
+    Ok(DatabaseRead::Usable(DatabaseUsage { events }))
 }
 
 pub(crate) fn has_hosted_usage(path: &Path) -> Result<bool, ()> {

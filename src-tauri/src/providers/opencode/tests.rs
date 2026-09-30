@@ -42,6 +42,10 @@ fn pricing() -> ModelPricing {
     )
 }
 
+fn usage_storage(directory: &Path) -> Arc<crate::storage::Storage> {
+    Arc::new(crate::storage::Storage::open(&directory.join("ledger-test.db")).unwrap())
+}
+
 fn pricing_store(directory: &Path) -> Arc<PricingStore> {
     Arc::new(PricingStore::new(directory.join("pricing")).unwrap())
 }
@@ -145,10 +149,68 @@ fn exact_message(provider: &str, model: &str, cost: f64, input: u64, output: u64
 }
 
 fn scan(paths: Vec<PathBuf>) -> super::scanner::OpenCodeUsageScan {
-    OpenCodeUsageScanner::for_paths(paths.clone())
-        .scan_paths(paths, now(), &pricing())
+    let ledger_directory = tempdir().unwrap();
+    OpenCodeUsageScanner::new(
+        OpenCodePaths::for_data_directory(ledger_directory.path().to_path_buf()),
+        usage_storage(ledger_directory.path()),
+    )
+    .scan_paths(paths, now(), &pricing())
+    .unwrap()
+    .unwrap()
+}
+
+#[test]
+fn retained_usage_survives_deleted_messages_and_reprices_estimates() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("opencode.db");
+    let connection = create_database(&path, false);
+    insert_message(
+        &connection,
+        "session-retained",
+        "message-estimated",
+        timestamp(),
+        r#"{"role":"assistant","providerID":"opencode","modelID":"priced-model","tokens":{"input":100,"output":10,"total":110}}"#,
+    );
+    insert_message(
+        &connection,
+        "session-retained",
+        "message-exact",
+        timestamp(),
+        &exact_message("opencode-go", "priced-model", 0.5, 200, 20),
+    );
+    let scanner = OpenCodeUsageScanner::for_paths(vec![path.clone()]);
+    let initial = scanner
+        .scan_paths(vec![path.clone()], now(), &pricing())
         .unwrap()
+        .unwrap();
+    let initial_period = initial.usage.last_30_days.unwrap();
+    assert_eq!(initial_period.tokens, 330);
+    assert!((initial_period.estimated_cost_usd.unwrap() - 0.50012).abs() < 1e-9);
+    connection
+        .execute_batch("DELETE FROM message; DELETE FROM session;")
+        .unwrap();
+    drop(connection);
+    let changed_pricing = ModelPricing::new(
+        PricingSupplement::default(),
+        PricingCatalog {
+            entries: HashMap::from([("priced-model".into(), ModelRates::new(2.0, 4.0))]),
+            retrieved_at: None,
+        },
+        PricingCatalog::default(),
+    );
+    let retained = scanner
+        .scan_paths(vec![path.clone()], now(), &changed_pricing)
         .unwrap()
+        .unwrap();
+    let period = retained.usage.last_30_days.unwrap();
+    assert_eq!(period.tokens, 330);
+    assert!((period.estimated_cost_usd.unwrap() - 0.50024).abs() < 1e-9);
+    fs::remove_file(&path).unwrap();
+    let reopened = OpenCodeUsageScanner::for_paths(vec![path.clone()])
+        .scan_paths(vec![path], now(), &changed_pricing)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.usage.last_30_days.unwrap(), period);
 }
 
 #[test]
@@ -534,6 +596,7 @@ fn local_detection_requires_a_key_or_a_readable_hosted_usage_row() {
     let provider = OpenCodeProvider::with_dependencies(
         paths.clone(),
         test_client("http://127.0.0.1:1"),
+        usage_storage(data_directory),
         pricing_store(data_directory),
         now(),
     );
@@ -584,6 +647,7 @@ fn malformed_auth_does_not_blank_valid_database_usage() {
     let provider = OpenCodeProvider::with_dependencies(
         OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
         test_client("http://127.0.0.1:1"),
+        usage_storage(directory.path()),
         pricing_store(directory.path()),
         now(),
     );
@@ -599,6 +663,7 @@ fn absent_and_unreadable_sources_map_to_distinct_safe_categories() {
     let absent = OpenCodeProvider::with_dependencies(
         OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
         test_client("http://127.0.0.1:1"),
+        usage_storage(directory.path()),
         pricing_store(directory.path()),
         now(),
     )
@@ -610,6 +675,7 @@ fn absent_and_unreadable_sources_map_to_distinct_safe_categories() {
     let unreadable = OpenCodeProvider::with_dependencies(
         OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
         test_client("http://127.0.0.1:1"),
+        usage_storage(directory.path()),
         pricing_store(directory.path()),
         now(),
     )
@@ -641,6 +707,7 @@ fn account_usage_endpoint_populates_quotas_without_local_history() {
     let provider = OpenCodeProvider::with_dependencies(
         OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
         test_client(&url),
+        usage_storage(directory.path()),
         pricing_store(directory.path()),
         now(),
     );
@@ -678,6 +745,7 @@ fn unavailable_account_quota_keeps_local_history_and_explains_the_error() {
     let provider = OpenCodeProvider::with_dependencies(
         OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
         test_client(&url),
+        usage_storage(directory.path()),
         pricing_store(directory.path()),
         now(),
     );
@@ -711,6 +779,7 @@ fn empty_readable_database_does_not_hide_missing_go_subscription() {
     let provider = OpenCodeProvider::with_dependencies(
         OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
         test_client(&url),
+        usage_storage(directory.path()),
         pricing_store(directory.path()),
         now(),
     );
@@ -742,6 +811,7 @@ fn transient_account_quota_failure_is_propagated_with_local_history() {
     let provider = OpenCodeProvider::with_dependencies(
         OpenCodePaths::for_data_directory(directory.path().to_path_buf()),
         test_client(&url),
+        usage_storage(directory.path()),
         pricing_store(directory.path()),
         now(),
     );

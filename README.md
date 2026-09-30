@@ -31,9 +31,12 @@
 
 - 读取 OMP 会话 JSONL，通过同一 Codex OAuth 账号校验后合并用量；账号不匹配时跳过。明细保留 **Oh My Pi** 来源。
 - 保留 5 小时／周周期用量、服务端观察到的重置时间、历史周周期，以及折叠模型的来源明细。
+- 在独立 SQLite 的 `local_usage_events` 薄账本中留存已采集用量；归档、移动、截断或删除对话后不再丢失，重复扫描不重复计数。不保存对话正文或凭据，展示时间窗口保持不变。
 - **API USD** 与 **Codex credits** 使用独立估算和缓存，不能视为同一账单。
 - 周额度金额根据可用本地用量和服务端额度占比估算。缺失日志、未知模型、未记录的云端活动影响完整性；估算不是官方余额或实际扣费。
 - 保留其他提供商、托盘／浮动窗口、主题、用量历史和设置功能。详见 [Codex 提供商文档](docs/providers/codex.md)。
+
+首次更新后请先完成一次完整刷新，再删除希望保留统计的日志。未被采集且没有可恢复解析缓存的历史无法还原；账本保留首次观察时的账号归属，不事后猜测旧日志所属账号。
 
 ### 开发与验证
 
@@ -54,6 +57,8 @@ corepack pnpm build:installer
 ```
 
 ### 上游与发布边界
+
+**0.5.4** 更新价格目录并纳入 GPT-6.1 Sol（每百万 tokens：输入 $2、缓存读取 $0.10、缓存写入 $2.50、输出 $10），支持 Fast 与长上下文计价。Codex credits 按购买积分／PAYG 费率独立估算，不代表套餐内额度消耗。新增本地用量薄账本，覆盖 Codex、OMP、Claude、pi、Grok 和 OpenCode 的已采集用量。
 
 0.5.3 修复 Windows 测试构建：正式程序与测试程序共用 Common Controls 6 清单，解决库测试启动时找不到 `TaskDialogIndirect` 的 `0xc0000139` 错误。无需手动修改测试 EXE。OMP 与 Codex 用量逻辑保持不变。
 
@@ -82,15 +87,20 @@ It does not migrate or share other TokenLedger/OpenQuota installations' data, ca
 
 - Reads OMP session JSONL and merges usage only after matching the Codex OAuth account. Mismatched accounts are skipped; breakdowns retain **Oh My Pi** source labels.
 - Preserves five-hour/weekly usage, server-observed reset times, historical weekly cycles and source labels inside folded model groups.
+- Retains observed usage in the independent SQLite `local_usage_events` ledger. Archiving, moving, truncating or deleting conversations does not erase collected usage, and repeat scans do not double-count it. Conversation text and credentials are not stored; rolling display windows are unchanged.
 - **API USD** and **Codex credits** have separate estimates and caches; they are not interchangeable bills.
 - Weekly monetary capacity is estimated from available local usage and the server quota percentage. Missing logs, unknown models and unrecorded cloud activity affect completeness. Estimates are not official balances or actual charges.
 - Retains other providers, tray/floating modes, themes, history and settings. See the [Codex provider guide](docs/providers/codex.md).
+
+Complete a full refresh after updating before deleting logs you want to retain. Unobserved history without a recoverable parsed cache cannot be restored; retained events keep their first-observed account scope rather than guessing old logs' ownership.
 
 ### Development and validation
 
 Requires Node.js 22+, pnpm 11.11.0, stable Rust and [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/). Windows builds use the Rust GNU target and MinGW. Use the clone, development, check and installer commands above.
 
 ### Upstream and release boundaries
+
+**0.5.4** refreshes price catalogs and adds GPT-6.1 Sol (USD per million tokens: input $2, cached input $0.10, cache writes $2.50, output $10), including Fast and long-context pricing. Codex credits independently estimate purchased-credit/PAYG rates, not included plan-limit consumption. A compact local ledger retains observed Codex, OMP, Claude, pi, Grok and OpenCode usage.
 
 0.5.3 fixes Windows test builds: application and test executables share a Common Controls 6 manifest, resolving the library-test startup error `0xc0000139` caused by an unavailable `TaskDialogIndirect`. Test executables no longer need manual patching. OMP and Codex usage logic is unchanged.
 

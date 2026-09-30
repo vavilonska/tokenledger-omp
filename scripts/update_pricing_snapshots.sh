@@ -12,8 +12,9 @@
 #
 # The compact format must stay in sync with src-tauri/src/pricing/codecs.rs (compact codec + the
 # defaulting rules of the LiteLLM/models.dev parsers): per-million rates, cache write defaults to
-# the input rate, cache read to a tenth of it. After regenerating, `cargo test` exercises the
-# snapshots via the pricing resolution tests.
+# the input rate, cache read to a tenth of it. Missing cache-read prices must carry `cre: false`,
+# so Codex can distinguish a feed's explicit discount from the generic fallback.
+# After regenerating, `cargo test` exercises the snapshots via the pricing resolution tests.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -39,8 +40,10 @@ tmpdir, resources = sys.argv[1], sys.argv[2]
 retrieved_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def compact_model(input_pm, output_pm, cache_write_pm, cache_read_pm,
-                  ia=None, oa=None, cwa=None, cra=None, fast=None):
+                  ia=None, oa=None, cwa=None, cra=None, fast=None, cache_read_explicit=True):
     model = {"i": input_pm, "o": output_pm, "cw": cache_write_pm, "cr": cache_read_pm}
+    if not cache_read_explicit:
+        model["cre"] = False
     for key, value in (("ia", ia), ("oa", oa), ("cwa", cwa), ("cra", cra), ("fast", fast)):
         if value is not None:
             model[key] = value
@@ -71,6 +74,7 @@ for key, entry in litellm.items():
         cwa=(lambda v: v * 1e6 if v is not None else None)(number(entry.get("cache_creation_input_token_cost_above_200k_tokens"))),
         cra=(lambda v: v * 1e6 if v is not None else None)(number(entry.get("cache_read_input_token_cost_above_200k_tokens"))),
         fast=number(provider_specific.get("fast")) if isinstance(provider_specific, dict) else None,
+        cache_read_explicit=cr is not None,
     )
 if not models:
     sys.exit("LiteLLM feed produced no usable entries - aborting.")
@@ -98,6 +102,7 @@ for provider_name in sorted(models_dev):
             i, o,
             cw if cw is not None else i,
             cr if cr is not None else i * 0.1,
+            cache_read_explicit=cr is not None,
         )
 if not models:
     sys.exit("models.dev feed produced no usable entries - aborting.")

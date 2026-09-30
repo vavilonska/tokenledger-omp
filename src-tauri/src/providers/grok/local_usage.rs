@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -13,14 +13,14 @@ use crate::{
     pricing::{ModelPricing, TokenBreakdown},
     providers::{
         daily_usage::DailyUsageAccumulator,
-        log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+        log_usage::{parse_log_timestamp, LogCacheError},
     },
     storage::Storage,
 };
 
 use super::GrokError;
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 1;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
 const SOURCE_NOTE: &str = "From your Grok logs (estimated)";
 
 #[derive(Debug, Clone)]
@@ -59,6 +59,8 @@ impl GrokLogUsageScanner {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct TokenEvent {
+    #[serde(default)]
+    source_pid: Option<i64>,
     timestamp: DateTime<Utc>,
     model: Option<String>,
     prompt: u64,
@@ -79,23 +81,35 @@ fn scan_path(
             crate::app_warn!("plugin:grok", "local usage log path is not a file");
             return Err(GrokError::LocalUsage);
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            storage.prune_log_events("grok", &HashSet::new())?;
-            return Ok(UsageHistory::default());
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => {
             crate::app_warn!("plugin:grok", "local usage log metadata could not be read");
             return Err(GrokError::LocalUsage);
         }
     }
 
-    let events = load_or_parse_log(storage, "grok", path, LOG_CACHE_SCHEMA_VERSION, parse_jsonl)
-        .map_err(|error| match error {
-            LogCacheError::Storage(_) => GrokError::Storage,
-            LogCacheError::Encode(_) => GrokError::LocalUsage,
-        })?
-        .ok_or(GrokError::LocalUsage)?;
-    storage.prune_log_events("grok", &HashSet::from([path.to_path_buf()]))?;
+    let events = crate::providers::log_usage::retain_log_usage(
+        storage,
+        "grok",
+        "",
+        "grok",
+        LOG_CACHE_SCHEMA_VERSION,
+        1,
+        &[path.to_path_buf()],
+        parse_jsonl,
+        |event: &TokenEvent| {
+            crate::providers::log_usage::usage_event_key(&(
+                event.source_pid,
+                event.timestamp,
+                &event.model,
+            ))
+        },
+        |_| true,
+    )
+    .map_err(|error| match error {
+        LogCacheError::Storage(_) => GrokError::Storage,
+        LogCacheError::Encode(_) => GrokError::LocalUsage,
+    })?;
     Ok(aggregate(events, now, pricing))
 }
 
@@ -160,6 +174,7 @@ fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
             .unwrap_or_default()
             .min(prompt);
         events.push(TokenEvent {
+            source_pid: pid,
             timestamp,
             model: pid.and_then(|pid| model_by_pid.get(&pid).cloned()),
             prompt,
@@ -252,10 +267,33 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{aggregate, log_path, parse_jsonl, GrokLogUsageScanner};
-    use crate::{pricing::test_bundled_pricing, providers::grok::GrokError, storage::Storage};
+    use crate::{
+        pricing::{ModelPricing, ModelRates, PricingCatalog, PricingSupplement},
+        providers::grok::GrokError,
+        storage::Storage,
+    };
 
     fn now() -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 18, 12, 0, 0).unwrap()
+    }
+
+    fn fixture_pricing() -> ModelPricing {
+        // Fixed rates isolate process/model tracking and cache accounting from feed updates.
+        let mut build = ModelRates::new(1.0, 2.0);
+        build.cache_read_per_million = 0.2;
+        let mut composer = ModelRates::new(3.0, 15.0);
+        composer.cache_read_per_million = 0.5;
+        ModelPricing::new(
+            PricingSupplement::default(),
+            PricingCatalog {
+                entries: std::collections::HashMap::from([
+                    ("grok-build".into(), build),
+                    ("grok-composer-2.5-fast".into(), composer),
+                ]),
+                ..PricingCatalog::default()
+            },
+            PricingCatalog::default(),
+        )
     }
 
     #[test]
@@ -263,7 +301,7 @@ mod tests {
         let history = aggregate(
             parse_jsonl(include_str!("fixtures/usage.jsonl")),
             now(),
-            &test_bundled_pricing(),
+            &fixture_pricing(),
         );
 
         let today = history.today.unwrap();
@@ -281,7 +319,7 @@ mod tests {
 {"ts":"2026-06-18T09:00:00Z","pid":7,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000,"cached_prompt_tokens":800000,"completion_tokens":0}}
 {"ts":"2026-06-18T10:00:00Z","pid":7,"msg":"backend_search: model switch","ctx":{"model_id":"grok-composer-2.5-fast"}}
 {"ts":"2026-06-18T11:00:00Z","pid":7,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000,"completion_tokens":0}}"#;
-        let history = aggregate(parse_jsonl(content), now(), &test_bundled_pricing());
+        let history = aggregate(parse_jsonl(content), now(), &fixture_pricing());
 
         assert!((history.today.unwrap().estimated_cost_usd.unwrap() - 3.36).abs() < 0.000_001);
     }
@@ -293,7 +331,7 @@ mod tests {
 {"ts":"2026-06-18T10:00:00Z","pid":2,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000}}
 {"ts":"2026-06-18T11:00:00Z","pid":3,"msg":"model changed","ctx":{"model":"grok-build"}}
 {"ts":"2026-06-18T12:00:00Z","pid":3,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":500000}}"#;
-        let history = aggregate(parse_jsonl(content), now(), &test_bundled_pricing());
+        let history = aggregate(parse_jsonl(content), now(), &fixture_pricing());
 
         assert_eq!(history.today.as_ref().unwrap().tokens, 500_000);
         assert_eq!(history.unknown_models, ["grok-unknown-model"]);
@@ -305,7 +343,7 @@ mod tests {
         let content = r#"{"ts":"2026-05-01T08:00:00Z","pid":1,"msg":"model changed","ctx":{"model":"grok-build"}}
 {"ts":"2026-05-01T09:00:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":1000000}}
 {"ts":"2026-06-18T09:00:00Z","pid":1,"msg":"shell.turn.inference_done","ctx":{"loop_index":3}}"#;
-        let history = aggregate(parse_jsonl(content), now(), &test_bundled_pricing());
+        let history = aggregate(parse_jsonl(content), now(), &fixture_pricing());
         assert!(history.today.is_none());
         assert!(history.daily.is_empty());
     }
@@ -323,19 +361,57 @@ mod tests {
     }
 
     #[test]
+    fn truncated_and_deleted_grok_log_reprices_retained_usage() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("usage.jsonl");
+        let database = directory.path().join("usage.db");
+        fs::write(&path, r#"{"ts":"2026-06-18T08:00:00Z","pid":7,"msg":"model changed","ctx":{"model":"grok-build"}}
+{"ts":"2026-06-18T09:00:00Z","pid":7,"msg":"shell.turn.inference_done","ctx":{"prompt_tokens":100,"completion_tokens":10}}"#).unwrap();
+        let prices = |input, output| {
+            crate::pricing::ModelPricing::new(
+                crate::pricing::PricingSupplement::default(),
+                crate::pricing::PricingCatalog {
+                    entries: std::collections::HashMap::from([(
+                        "grok-build".into(),
+                        crate::pricing::ModelRates::new(input, output),
+                    )]),
+                    ..crate::pricing::PricingCatalog::default()
+                },
+                crate::pricing::PricingCatalog::default(),
+            )
+        };
+        let scanner = GrokLogUsageScanner::for_path(path.clone());
+        let storage = Storage::open(&database).unwrap();
+        let original = scanner.scan(&storage, now(), &prices(2.0, 4.0)).unwrap();
+        assert_eq!(original.today.as_ref().unwrap().tokens, 110);
+        assert!(
+            (original.today.as_ref().unwrap().estimated_cost_usd.unwrap() - 0.00024).abs() < 1e-12
+        );
+        fs::write(&path, "").unwrap();
+        assert_eq!(
+            scanner.scan(&storage, now(), &prices(2.0, 4.0)).unwrap(),
+            original
+        );
+        fs::remove_file(&path).unwrap();
+        drop(storage);
+        let restarted = Storage::open(&database).unwrap();
+        let repriced = scanner.scan(&restarted, now(), &prices(4.0, 8.0)).unwrap();
+        assert_eq!(repriced.today.as_ref().unwrap().tokens, 110);
+        assert!((repriced.today.unwrap().estimated_cost_usd.unwrap() - 0.00048).abs() < 1e-12);
+    }
+
+    #[test]
     fn missing_log_is_honest_no_data_while_non_file_path_fails() {
         let directory = tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
         let log = directory.path().join("logs").join("unified.jsonl");
         let scanner = GrokLogUsageScanner::for_path(log.clone());
-        let missing = scanner
-            .scan(&storage, now(), &test_bundled_pricing())
-            .unwrap();
+        let missing = scanner.scan(&storage, now(), &fixture_pricing()).unwrap();
         assert!(missing.daily.is_empty());
 
         fs::create_dir_all(&log).unwrap();
         let error = scanner
-            .scan(&storage, now(), &test_bundled_pricing())
+            .scan(&storage, now(), &fixture_pricing())
             .unwrap_err();
         assert!(matches!(error, GrokError::LocalUsage));
     }

@@ -10,6 +10,12 @@ use super::super::log_usage::parse_log_timestamp;
 pub(super) struct SessionUsageEvent {
     pub(super) id: Option<String>,
     pub(super) response_id: Option<String>,
+    #[serde(default)]
+    pub(super) session_id: Option<String>,
+    /// One-based occurrence within this session's anonymous calls at the same time/model.
+    /// Zero denotes a legacy cache; normalization restores the ordinal before journaling.
+    #[serde(default)]
+    pub(super) anonymous_occurrence: u64,
     pub(super) timestamp: DateTime<Utc>,
     pub(super) model: String,
     pub(super) input: u64,
@@ -25,6 +31,7 @@ pub(super) struct SessionUsageEvent {
 pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
     let mut events = Vec::new();
     let mut has_header = false;
+    let mut session_id = None;
     let mut branch_tiers = HashMap::<String, bool>::new();
 
     for line in content.lines() {
@@ -35,6 +42,7 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
         let entry_type = entry.get("type").and_then(Value::as_str);
         if entry_type == Some("session") {
             has_header = true;
+            session_id = entry.get("id").and_then(Value::as_str).map(str::to_owned);
             branch_tiers.clear();
             continue;
         }
@@ -117,6 +125,8 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
             .or_else(|| message.get("service_tier").and_then(explicit_tier))
             .unwrap_or(branch_tier);
         events.push(SessionUsageEvent {
+            session_id: session_id.clone(),
+            anonymous_occurrence: 0,
             id: entry
                 .get("id")
                 .and_then(Value::as_str)
@@ -144,6 +154,20 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
         });
     }
     events
+}
+
+pub(super) fn normalize_anonymous_occurrences(events: &mut [SessionUsageEvent]) {
+    let mut occurrences = HashMap::new();
+    for event in events {
+        if event.id.is_some() || event.response_id.is_some() {
+            continue;
+        }
+        let occurrence = occurrences
+            .entry((&event.session_id, event.timestamp, &event.model))
+            .or_insert(0_u64);
+        *occurrence += 1;
+        event.anonymous_occurrence = *occurrence;
+    }
 }
 
 fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {

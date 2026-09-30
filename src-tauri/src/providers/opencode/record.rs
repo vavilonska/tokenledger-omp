@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::pricing::{ModelPricing, TokenBreakdown};
@@ -16,7 +17,6 @@ pub(crate) enum CostProvenance {
 
 #[derive(Debug, Clone)]
 pub(crate) struct UsageRecord {
-    pub(crate) key: (String, String),
     pub(crate) timestamp: DateTime<Utc>,
     pub(crate) model: String,
     pub(crate) tokens: u64,
@@ -25,7 +25,7 @@ pub(crate) struct UsageRecord {
     pub(crate) incomplete_cost: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ParsedMessage {
     pub(super) message_id: String,
     session_id: String,
@@ -37,7 +37,11 @@ pub(super) struct ParsedMessage {
 }
 
 impl ParsedMessage {
-    pub(super) fn into_usage(self, parts: &[ParsedPart], pricing: &ModelPricing) -> UsageRecord {
+    fn pricing_details(
+        &self,
+        parts: &[ParsedPart],
+        pricing: &ModelPricing,
+    ) -> (ParsedTokens, Option<f64>, CostProvenance, bool) {
         let part_tokens = parts
             .iter()
             .filter_map(|part| part.tokens)
@@ -46,8 +50,7 @@ impl ParsedMessage {
             .tokens
             .filter(|tokens| tokens.total > 0 || part_tokens.total == 0)
             .unwrap_or(part_tokens);
-
-        let (cost, cost_provenance, incomplete_cost) = match self.cost {
+        let (cost, provenance, incomplete) = match self.cost {
             StoredCost::Exact(cost) => (Some(cost), CostProvenance::Exact, false),
             StoredCost::Invalid | StoredCost::Missing if !parts.is_empty() => {
                 cost_from_parts(parts, &self.provider_id, &self.model, pricing)
@@ -60,9 +63,13 @@ impl ParsedMessage {
                 )
             }
         };
+        (tokens, cost, provenance, incomplete)
+    }
+
+    pub(super) fn into_usage(self, parts: &[ParsedPart], pricing: &ModelPricing) -> UsageRecord {
+        let (tokens, cost, cost_provenance, incomplete_cost) = self.pricing_details(parts, pricing);
 
         UsageRecord {
-            key: (self.session_id, self.message_id),
             timestamp: self.timestamp,
             model: self.model,
             tokens: tokens.total,
@@ -73,7 +80,43 @@ impl ParsedMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+/// Numeric billing fields only; never retains a message's text or authentication data.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct OpenCodeUsageEvent {
+    pub(super) message: ParsedMessage,
+    pub(super) parts: Vec<ParsedPart>,
+}
+
+impl OpenCodeUsageEvent {
+    pub(super) fn key(&self) -> (&str, &str) {
+        (&self.message.session_id, &self.message.message_id)
+    }
+
+    pub(super) fn event_key(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_vec(&self.key()).map(|key| crate::hashing::sha256_hex(&key))
+    }
+
+    pub(super) fn is_better_than(&self, current: &Self, pricing: &ModelPricing) -> bool {
+        let quality = |event: &Self| {
+            let (tokens, cost, provenance, incomplete) =
+                event.message.pricing_details(&event.parts, pricing);
+            (
+                cost.is_some() && !incomplete,
+                cost.is_some(),
+                tokens.total,
+                provenance == CostProvenance::Exact,
+                cost.unwrap_or_default(),
+            )
+        };
+        quality(self) > quality(current)
+    }
+
+    pub(super) fn into_usage(self, pricing: &ModelPricing) -> UsageRecord {
+        self.message.into_usage(&self.parts, pricing)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 struct ParsedTokens {
     breakdown: TokenBreakdown,
     total: u64,
@@ -104,14 +147,14 @@ impl ParsedTokens {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum StoredCost {
     Missing,
     Invalid,
     Exact(f64),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(super) struct ParsedPart {
     tokens: Option<ParsedTokens>,
     cost: StoredCost,

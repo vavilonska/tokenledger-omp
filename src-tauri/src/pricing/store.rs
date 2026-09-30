@@ -357,10 +357,11 @@ fn load_pricing(
     let supplement = match fs::read(cache_directory.join(SourceId::Supplement.file_name())) {
         Ok(cached) => match PricingSupplement::decode(&cached) {
             Ok(cached_supplement)
-                if supplement_is_newer(
-                    bundled_supplement.updated_at.as_deref(),
-                    cached_supplement.updated_at.as_deref(),
-                ) =>
+                if supplement_is_newer(bundled_supplement.updated_at.as_deref(), None)
+                    && !supplement_is_newer(
+                        cached_supplement.updated_at.as_deref(),
+                        bundled_supplement.updated_at.as_deref(),
+                    ) =>
             {
                 bundled_supplement
             }
@@ -602,10 +603,10 @@ mod tests {
             ("newer bundle", Some("2026-08-12"), Some("2026-08-11"), 1.0),
             ("newer cache", Some("2026-08-11"), Some("2026-08-12"), 9.0),
             (
-                "equal date keeps cache",
+                "equal date keeps bundled corrections",
                 Some("2026-08-12"),
                 Some("2026-08-12"),
-                9.0,
+                1.0,
             ),
             (
                 "same-day newer bundle timestamp",
@@ -668,6 +669,46 @@ mod tests {
                 pricing.resolve("auto").unwrap().input_per_million,
                 expected_input,
                 "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn sol_6_1_survives_stale_and_equal_revision_dynamic_feeds() {
+        for updated_at in ["2026-09-23", "2026-09-30T00:00:00Z"] {
+            let directory = tempdir().unwrap();
+            let http = Arc::new(StubHttp::default());
+            http.push(response(br#"{"gpt-6.1-sol":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-6.1-sol-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198}}"#));
+            http.push(response(
+                br#"{"openai":{"models":{"gpt-6.1-sol":{"cost":{"input":88,"output":88}}}}}"#,
+            ));
+            http.push(response(&supplement(Some(updated_at), 9.0)));
+            let now = Utc.with_ymd_and_hms(2026, 9, 30, 12, 0, 0).unwrap();
+            let store = PricingStore::with_dependencies(
+                directory.path().to_path_buf(),
+                BundledSources::default(),
+                http,
+                Arc::new(move || now),
+            )
+            .unwrap();
+            store.refresh_due();
+            let tokens = super::super::TokenBreakdown {
+                cache_read: 1_000_000,
+                ..Default::default()
+            };
+            assert_eq!(
+                store.snapshot().estimated_cost_dollars(
+                    "openai-codex/gpt-6.1-sol-high",
+                    tokens,
+                    false
+                ),
+                Some(0.1),
+                "revision {updated_at}"
+            );
+            let reloaded = load_pricing(directory.path(), &BundledSources::default()).unwrap();
+            assert_eq!(
+                reloaded.estimated_cost_dollars("gpt-6.1-sol-fast", tokens, false),
+                Some(0.2)
             );
         }
     }

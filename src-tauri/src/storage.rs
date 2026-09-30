@@ -67,6 +67,16 @@ impl Storage {
                events_json TEXT NOT NULL,
                PRIMARY KEY(provider_id, path)
              );
+             CREATE TABLE IF NOT EXISTS local_usage_events (
+               provider_id TEXT NOT NULL,
+               event_key TEXT NOT NULL,
+               identity_key TEXT NOT NULL,
+               schema_version INTEGER NOT NULL,
+               event_json TEXT NOT NULL,
+               PRIMARY KEY(provider_id, event_key)
+             );
+             CREATE INDEX IF NOT EXISTS local_usage_identity
+               ON local_usage_events(provider_id, identity_key, schema_version);
              CREATE TABLE IF NOT EXISTS app_settings (
                id INTEGER PRIMARY KEY CHECK (id = 1),
                payload TEXT NOT NULL
@@ -98,11 +108,10 @@ impl Storage {
              );",
         )?;
         if !Self::has_column(&connection, "log_file_cache", "modified_nanos")? {
-            // Parsed log rows are disposable. Rebuilding the table is safer than converting the old
-            // millisecond timestamp because the conversion would preserve the very collisions this
-            // migration removes. The next refresh repopulates it from the source logs.
+            // Force fresh metadata checks, but preserve actual parsed usage for recovery
+            // when its source has already been deleted before this upgrade.
             connection.execute_batch(
-                "DROP TABLE log_file_cache;
+                "ALTER TABLE log_file_cache RENAME TO legacy_log_file_cache;
                  CREATE TABLE log_file_cache (
                    provider_id TEXT NOT NULL,
                    path TEXT NOT NULL,
@@ -110,7 +119,10 @@ impl Storage {
                    modified_nanos INTEGER NOT NULL,
                    events_json TEXT NOT NULL,
                    PRIMARY KEY(provider_id, path)
-                 );",
+                 );
+                 INSERT INTO log_file_cache(provider_id, path, size, modified_nanos, events_json)
+                   SELECT provider_id, path, size, 0, events_json FROM legacy_log_file_cache;
+                 DROP TABLE legacy_log_file_cache;",
             )?;
         }
         if !Self::has_column(&connection, "provider_snapshots", "identity_key")? {
@@ -202,6 +214,111 @@ impl Storage {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Compact usage facts only; callers must never pass transcript or credential payloads.
+    /// An event stays with its first observed account even when a shared log is rescanned.
+    pub fn record_usage_events<T: serde::Serialize>(
+        &self,
+        provider_id: &str,
+        identity_key: &str,
+        schema_version: u8,
+        events: &[T],
+        event_key: impl Fn(&T) -> Result<String, serde_json::Error>,
+    ) -> Result<(), StorageError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO local_usage_events
+                   (provider_id, event_key, identity_key, schema_version, event_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(provider_id, event_key) DO UPDATE SET
+                   schema_version = excluded.schema_version,
+                   event_json = excluded.event_json
+                 WHERE local_usage_events.identity_key = excluded.identity_key
+                   AND (local_usage_events.schema_version != excluded.schema_version
+                     OR local_usage_events.event_json != excluded.event_json)",
+            )?;
+            for event in events {
+                statement.execute(params![
+                    provider_id,
+                    event_key(event)?,
+                    identity_key,
+                    schema_version,
+                    serde_json::to_string(event)?
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn load_usage_events<T: serde::de::DeserializeOwned>(
+        &self,
+        provider_id: &str,
+        identity_key: &str,
+        schema_version: u8,
+    ) -> Result<Vec<T>, StorageError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT event_json FROM local_usage_events
+             WHERE provider_id = ?1 AND identity_key = ?2 AND schema_version = ?3
+             ORDER BY event_key",
+        )?;
+        let rows = statement
+            .query_map(params![provider_id, identity_key, schema_version], |row| {
+                row.get::<_, String>(0)
+            })?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    pub fn has_usage_events(
+        &self,
+        provider_id: &str,
+        identity_key: &str,
+        schema_version: u8,
+    ) -> Result<bool, StorageError> {
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_usage_events
+             WHERE provider_id = ?1 AND identity_key = ?2 AND schema_version = ?3)",
+                params![provider_id, identity_key, schema_version],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::from)
+    }
+
+    /// Legacy parsed caches have no account stamp. Only a matching persisted snapshot
+    /// can establish provenance; unscoped local sources explicitly use an empty identity.
+    pub fn recoverable_log_events(
+        &self,
+        provider_id: &str,
+        identity_key: &str,
+        identity_provider: &str,
+    ) -> Result<Vec<(PathBuf, String)>, StorageError> {
+        let connection = self.connection()?;
+        if !identity_key.is_empty() {
+            let prior: Option<String> = connection
+                .query_row(
+                    "SELECT identity_key FROM provider_snapshots WHERE provider_id = ?1",
+                    [identity_provider],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            if prior.as_deref() != Some(identity_key) {
+                return Ok(Vec::new());
+            }
+        }
+        let mut statement = connection.prepare(
+            "SELECT path, events_json FROM log_file_cache WHERE provider_id = ?1 ORDER BY path",
+        )?;
+        let rows = statement.query_map([provider_id], |row| {
+            Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
     }
 
     pub fn load_log_events(

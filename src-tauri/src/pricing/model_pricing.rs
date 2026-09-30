@@ -262,4 +262,140 @@ mod tests {
             .is_some());
         assert!(model_pricing.resolve("secondary-model").is_none());
     }
+
+    #[test]
+    fn historical_opus_fast_alias_survives_catalog_retirement() {
+        let pricing = ModelPricing::new(
+            PricingSupplement::decode(include_bytes!("../../resources/pricing_supplement.json"))
+                .unwrap(),
+            PricingCatalog::default(),
+            PricingCatalog::default(),
+        );
+        let cost = pricing
+            .estimated_cost_dollars(
+                "claude-4.6-opus-max-thinking-fast",
+                TokenBreakdown {
+                    input: 1_000_000,
+                    cache_write_5m: 1_000_000,
+                    cache_write_1h: 1_000_000,
+                    cache_read: 1_000_000,
+                    output: 1_000_000,
+                    is_fast: true,
+                },
+                true,
+            )
+            .unwrap();
+        // Historical Fast rates include the premium once, across the full context window.
+        assert!((cost - 280.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sol_6_1_log_aliases_keep_the_new_cache_discount_and_fast_prices() {
+        let pricing = crate::pricing::test_bundled_pricing();
+        let tokens = TokenBreakdown {
+            input: 100_000,
+            cache_write_5m: 120_000,
+            cache_read: 52_000,
+            output: 10_000,
+            ..Default::default()
+        };
+        for model in [
+            "gpt-6.1-sol",
+            "openai/gpt-6.1-sol-high",
+            "openai-codex/gpt-6.1-sol-max",
+            "gpt-6.1-sol-20260930-ultra",
+        ] {
+            let cost = pricing.estimated_cost_dollars(model, tokens, true).unwrap();
+            assert!((cost - 0.6052).abs() < 1e-9, "{model}: {cost}");
+            assert_eq!(pricing.display_family(model), "gpt-6.1-sol");
+        }
+        for model in [
+            "gpt-6.1-sol-fast",
+            "openai-codex/gpt-6.1-sol-high-fast",
+            "openai/gpt-6.1-sol-fast-max",
+        ] {
+            let cost = pricing
+                .estimated_cost_dollars(
+                    model,
+                    TokenBreakdown {
+                        is_fast: true,
+                        ..tokens
+                    },
+                    true,
+                )
+                .unwrap();
+            assert!((cost - 1.2104).abs() < 1e-9, "{model}: {cost}");
+        }
+        assert_eq!(
+            pricing.resolve("gpt-6-sol").unwrap().cache_read_per_million,
+            0.2
+        );
+    }
+
+    #[test]
+    fn sol_6_1_combined_prompt_boundary_reprices_the_whole_request() {
+        let pricing = crate::pricing::test_bundled_pricing();
+        let tokens = TokenBreakdown {
+            input: 100_000,
+            cache_write_5m: 120_000,
+            cache_read: 52_001,
+            output: 10_000,
+            ..Default::default()
+        };
+        for (long_context, fast, expected) in [
+            (false, false, 0.6052001),
+            (true, false, 1.1604002),
+            (true, true, 2.3208004),
+        ] {
+            let cost = pricing
+                .estimated_cost_dollars(
+                    "gpt-6.1-sol",
+                    TokenBreakdown {
+                        is_fast: fast,
+                        ..tokens
+                    },
+                    long_context,
+                )
+                .unwrap();
+            assert!(
+                (cost - expected).abs() < 1e-9,
+                "{long_context}/{fast}: {cost}"
+            );
+        }
+    }
+
+    #[test]
+    fn sol_6_1_credit_mode_has_no_api_long_context_or_cache_write_charge() {
+        let mut pricing = crate::pricing::test_bundled_pricing();
+        pricing.codex_credit_mode = true;
+        let tokens = TokenBreakdown {
+            input: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 1_000_000,
+            output: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            pricing.estimated_cost_dollars("openai-codex/gpt-6.1-sol-high", tokens, true),
+            Some(12.1)
+        );
+        assert_eq!(
+            pricing.estimated_cost_dollars(
+                "gpt-6.1-sol-ultra-fast",
+                TokenBreakdown {
+                    is_fast: true,
+                    ..tokens
+                },
+                true
+            ),
+            Some(24.2)
+        );
+        assert!(pricing
+            .estimated_cost_dollars("gpt-6.1-sol-ultrafast", tokens, true)
+            .is_none());
+        assert!(pricing
+            .estimated_cost_dollars("gpt-6.1-sol-none", tokens, true)
+            .is_none());
+    }
 }

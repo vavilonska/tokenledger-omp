@@ -395,9 +395,12 @@ impl ClaudeProvider {
                     now,
                     pricing,
                     self.provider_id(),
-                    &self.log_roots,
-                    self.include_standard_logs,
-                    self.include_pi,
+                    self.account_identity.as_deref(),
+                    local_usage::UsageSources {
+                        configured_roots: &self.log_roots,
+                        include_standard_roots: self.include_standard_logs,
+                        include_pi: self.include_pi,
+                    },
                 )
             },
             &mut warnings,

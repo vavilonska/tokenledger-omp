@@ -1,7 +1,8 @@
-//! Codex credit rate card, verified 2026-09-23:
+//! Codex purchased-credit rate card, verified 2026-09-30:
 //! https://learn.chatgpt.com/docs/pricing#token-rates
 //! https://learn.chatgpt.com/docs/agent-configuration/speed
 //! Kept separate from API catalogs, promotions, Batch/Flex and API Fast rates.
+//! Fast uses 2x purchased credits/PAYG, not the 2.5x included-subscription multiplier.
 use super::{ModelPricing, TokenBreakdown};
 
 pub const CREDITS_PER_USD: f64 = 25.0;
@@ -17,15 +18,16 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
     });
     let base = DATED.replace(base, "");
     let (input, cached, output, fast_multiplier) = match base.as_ref() {
-        "gpt-6-astra" => (250.0, 25.0, 1250.0, 2.5),
-        "gpt-6-sol" => (50.0, 5.0, 250.0, 2.5),
-        "gpt-6-luna" => (2.5, 0.25, 12.5, 2.5),
-        "gpt-5.6-sol" => (100.0, 10.0, 500.0, 2.5),
-        "gpt-5.6-terra" => (50.0, 5.0, 300.0, 2.5),
-        "gpt-5.6-luna" => (5.0, 0.5, 30.0, 2.5),
-        "gpt-5.6-cyber" => (312.5, 31.25, 1875.0, 2.5),
+        "gpt-6-astra" => (250.0, 25.0, 1250.0, 2.0),
+        "gpt-6.1-sol" => (50.0, 2.5, 250.0, 2.0),
+        "gpt-6-sol" => (50.0, 5.0, 250.0, 2.0),
+        "gpt-6-luna" => (2.5, 0.25, 12.5, 2.0),
+        "gpt-5.6-sol" => (100.0, 10.0, 500.0, 2.0),
+        "gpt-5.6-terra" => (50.0, 5.0, 300.0, 2.0),
+        "gpt-5.6-luna" => (5.0, 0.5, 30.0, 2.0),
+        "gpt-5.6-cyber" => (312.5, 31.25, 1875.0, 2.0),
         "gpt-rosalind-research" => (125.0, 12.5, 625.0, 1.0),
-        "gpt-5.5" => (125.0, 12.5, 750.0, 2.5),
+        "gpt-5.5" => (125.0, 12.5, 750.0, 2.0),
         "gpt-5.4" => (62.5, 6.25, 375.0, 2.0),
         "gpt-5.4-mini" => (18.75, 1.875, 113.0, 2.0),
         _ => return None,
@@ -48,25 +50,31 @@ mod tests {
     use crate::pricing::test_bundled_pricing;
 
     #[test]
-    fn gpt_6_and_5_6_credit_fast_differ_from_api_fast() {
+    fn purchased_credit_fast_does_not_use_included_subscription_multiplier() {
         let pricing = test_bundled_pricing();
-        for (model, api, credit) in [
-            ("gpt-6-astra", 20.0, 25.0),
-            ("gpt-6-sol", 4.0, 5.0),
-            ("gpt-6-luna", 0.2, 0.25),
-            ("gpt-5.6-sol", 8.0, 10.0),
+        let tokens = TokenBreakdown {
+            input: 1_000_000,
+            is_fast: true,
+            ..Default::default()
+        };
+        for (model, expected) in [
+            ("gpt-6-astra", 20.0),
+            ("gpt-6.1-sol", 4.0),
+            ("gpt-6-sol", 4.0),
+            ("gpt-6-luna", 0.2),
+            ("gpt-5.6-sol", 8.0),
+            ("gpt-5.5", 10.0),
         ] {
-            let tokens = TokenBreakdown {
-                input: 1_000_000,
-                is_fast: true,
-                ..Default::default()
-            };
             assert_eq!(
-                pricing.estimated_cost_dollars(model, tokens, false),
-                Some(api)
+                equivalent_usd(&pricing, model, tokens),
+                Some(expected),
+                "{model}"
             );
-            assert_eq!(equivalent_usd(&pricing, model, tokens), Some(credit));
         }
+        assert_eq!(
+            pricing.estimated_cost_dollars("gpt-5.5", tokens, false),
+            Some(12.5)
+        );
     }
 
     #[test]
@@ -109,7 +117,7 @@ mod tests {
         assert_eq!(equivalent_usd(&pricing, "gpt-6-astra", tokens), Some(4.1));
         assert_eq!(
             equivalent_usd(&pricing, "gpt-6-astra-ultra-fast", tokens),
-            Some(10.25)
+            Some(8.2)
         );
         assert!(equivalent_usd(&pricing, "gpt-5.3-codex-spark", tokens).is_none());
         assert!(equivalent_usd(&pricing, "gpt-6-astra-unknown", tokens).is_none());

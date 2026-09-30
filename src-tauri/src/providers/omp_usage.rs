@@ -18,8 +18,8 @@ use crate::{
 
 mod session;
 
-use super::log_usage::{load_or_parse_log, LogCacheError};
-use session::{parse_jsonl, SessionUsageEvent};
+use super::log_usage::LogCacheError;
+use session::{normalize_anonymous_occurrences, parse_jsonl, SessionUsageEvent};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OmpUsageError {
@@ -57,6 +57,7 @@ pub struct QuotaCycleAnchor {
 pub(super) struct SessionSource<'a> {
     pub directory: &'a Path,
     pub cache_key: &'a str,
+    pub identity_key: &'a str,
     pub label: &'a str,
     /// Empty means all models. Otherwise compare only explicitly known pricing aliases.
     pub allowed_models: &'a [&'a str],
@@ -123,11 +124,14 @@ fn scan_home_into(
         Vec::new()
     });
 
+    let identity_key =
+        crate::hashing::sha256_hex(expected_account_id.unwrap_or_default().as_bytes());
     let mut outcome = scan_sessions_into(
         storage,
         SessionSource {
             directory: &home.join("agent").join("sessions"),
             cache_key: "omp",
+            identity_key: &identity_key,
             label: "Oh My Pi",
             allowed_models: &[],
         },
@@ -166,27 +170,44 @@ pub(super) fn scan_sessions_into(
         .map(|value| value.to_utc())
         .unwrap_or_else(|| now - chrono::Duration::days(31));
     let paths = discover_files(source.directory);
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-    let mut events = Vec::new();
-    for path in paths {
-        seen_paths.insert(path.clone());
-        if let Some(parsed) = load_or_parse_log(storage, source.cache_key, &path, 1, |content| {
-            parse_jsonl(content)
-                .into_iter()
-                .filter(|event| {
-                    source.allowed_models.is_empty()
-                        || source
-                            .allowed_models
-                            .contains(&pricing.display_family(&event.model).as_str())
-                })
-                .collect::<Vec<_>>()
-        })? {
-            events.extend(parsed);
-        }
-    }
-    storage
-        .prune_log_events(source.cache_key, &seen_paths)
-        .map_err(LogCacheError::from)?;
+    let mut events = super::log_usage::retain_log_usage_with_normalization(
+        storage,
+        source.cache_key,
+        source.identity_key,
+        "codex",
+        3,
+        1,
+        &paths,
+        parse_jsonl,
+        normalize_anonymous_occurrences,
+        |event: &SessionUsageEvent| {
+            if let Some(id) = event.response_id.as_deref() {
+                super::log_usage::usage_event_key(&("response", id))
+            } else if let Some(id) = event.id.as_deref() {
+                super::log_usage::usage_event_key(&("entry", id, event.timestamp, &event.model))
+            } else if event.anonymous_occurrence <= 1 {
+                // Keep the first occurrence's legacy key and its original account ownership.
+                super::log_usage::usage_event_key(&(
+                    &event.session_id,
+                    event.timestamp,
+                    &event.model,
+                ))
+            } else {
+                super::log_usage::usage_event_key(&(
+                    &event.session_id,
+                    event.timestamp,
+                    &event.model,
+                    event.anonymous_occurrence,
+                ))
+            }
+        },
+        |event| {
+            source.allowed_models.is_empty()
+                || source
+                    .allowed_models
+                    .contains(&pricing.display_family(&event.model).as_str())
+        },
+    )?;
     events.sort_by_key(|event| event.timestamp);
     // References keep the response identifiers out of an extra allocation per event.
     let mut seen_ids = HashSet::new();
@@ -425,7 +446,10 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{read_weekly_anchors, same_codex_account, scan_home_into, OmpScanOutcome};
+    use super::{
+        parse_jsonl, read_weekly_anchors, same_codex_account, scan_home_into, scan_sessions_into,
+        OmpScanOutcome, SessionSource,
+    };
     use crate::{
         pricing::{ModelPricing, ModelRates, PricingCatalog, PricingSupplement},
         providers::daily_usage::DailyUsageAccumulator,
@@ -550,6 +574,63 @@ mod tests {
     }
 
     #[test]
+    fn retained_omp_usage_stays_with_its_matching_oauth_account() {
+        use std::io::Write;
+        let directory = tempdir().unwrap();
+        create_databases(directory.path(), "account-a");
+        let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+        assert_eq!(
+            scan(&storage, directory.path(), "account-a")
+                .events
+                .iter()
+                .map(|event| event.total)
+                .sum::<u64>(),
+            180
+        );
+        let auth = Connection::open(directory.path().join("agent/agent.db")).unwrap();
+        let change_account = |account| {
+            auth.execute(
+                "UPDATE auth_credentials SET data = ?1 WHERE provider = 'openai-codex'",
+                [serde_json::json!({"accountId": account}).to_string()],
+            )
+            .unwrap()
+        };
+        change_account("account-b");
+        assert!(!scan(&storage, directory.path(), "account-a").included);
+        assert!(!scan(&storage, directory.path(), "account-b").included);
+        let path = directory.path().join("agent/sessions/parent.jsonl");
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", message("new-b", "2026-07-12T14:02:00Z")).unwrap();
+        drop(file);
+        assert_eq!(
+            scan(&storage, directory.path(), "account-b")
+                .events
+                .iter()
+                .map(|event| event.total)
+                .sum::<u64>(),
+            180
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            scan(&storage, directory.path(), "account-b")
+                .events
+                .iter()
+                .map(|event| event.total)
+                .sum::<u64>(),
+            180
+        );
+        change_account("account-a");
+        assert_eq!(
+            scan(&storage, directory.path(), "account-a")
+                .events
+                .iter()
+                .map(|event| event.total)
+                .sum::<u64>(),
+            180
+        );
+    }
+
+    #[test]
     fn session_append_refreshes_cached_usage_without_stats_database() {
         use std::io::Write;
         let directory = tempdir().unwrap();
@@ -650,6 +731,7 @@ mod tests {
 
     #[test]
     fn response_ids_deduplicate_but_anonymous_equal_usage_remains_independent() {
+        use std::io::Write;
         let directory = tempdir().unwrap();
         create_databases(directory.path(), "account-a");
         let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
@@ -663,13 +745,120 @@ mod tests {
         write_session(
             directory.path(),
             "copy.jsonl",
-            &[copied, anonymous.clone(), anonymous],
+            &[copied, anonymous.clone(), anonymous.clone()],
         );
         let outcome = scan(&storage, directory.path(), "account-a");
         assert_eq!(outcome.events.len(), 3);
         assert_eq!(
             outcome.events.iter().map(|event| event.total).sum::<u64>(),
             540
+        );
+        let sessions = directory.path().join("agent/sessions");
+        fs::copy(sessions.join("copy.jsonl"), sessions.join("mirror.jsonl")).unwrap();
+        fs::rename(sessions.join("copy.jsonl"), sessions.join("moved.jsonl")).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(sessions.join("moved.jsonl"))
+            .unwrap();
+        writeln!(file, "{anonymous}").unwrap();
+        drop(file);
+        assert_eq!(
+            scan(&storage, directory.path(), "account-a").events.len(),
+            4
+        );
+        let auth = Connection::open(directory.path().join("agent/agent.db")).unwrap();
+        auth.execute(
+            "UPDATE auth_credentials SET data = ?1 WHERE provider = 'openai-codex'",
+            [serde_json::json!({"accountId": "account-b"}).to_string()],
+        )
+        .unwrap();
+        assert!(!scan(&storage, directory.path(), "account-b").included);
+        auth.execute(
+            "UPDATE auth_credentials SET data = ?1 WHERE provider = 'openai-codex'",
+            [serde_json::json!({"accountId": "account-a"}).to_string()],
+        )
+        .unwrap();
+        fs::remove_dir_all(sessions).unwrap();
+        drop(storage);
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let retained = scan(&storage, directory.path(), "account-a");
+        assert_eq!(retained.events.len(), 4);
+        assert_eq!(
+            retained.events.iter().map(|event| event.total).sum::<u64>(),
+            720
+        );
+    }
+
+    #[test]
+    fn deleted_legacy_cache_restores_anonymous_occurrences_without_recounting_first() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let mut anonymous = message("ignored", "2026-07-12T14:00:00Z");
+        anonymous.as_object_mut().unwrap().remove("id");
+        write_session(
+            directory.path(),
+            "legacy.jsonl",
+            &[anonymous.clone(), anonymous],
+        );
+        let sessions = directory.path().join("agent/sessions");
+        let path = sessions.join("legacy.jsonl");
+        let events = parse_jsonl(&fs::read_to_string(&path).unwrap());
+        storage
+            .record_usage_events("omp", "", 1, &events[..1], |event| {
+                super::super::log_usage::usage_event_key(&(
+                    &event.session_id,
+                    event.timestamp,
+                    &event.model,
+                ))
+            })
+            .unwrap();
+        let mut legacy = serde_json::to_value(&events).unwrap();
+        for event in legacy.as_array_mut().unwrap() {
+            event
+                .as_object_mut()
+                .unwrap()
+                .remove("anonymous_occurrence");
+        }
+        storage
+            .save_log_events(
+                "omp",
+                &path,
+                0,
+                0,
+                &serde_json::json!({"schema_version": 2, "events": legacy}).to_string(),
+            )
+            .unwrap();
+        fs::remove_file(path).unwrap();
+        let pricing = ModelPricing::new(
+            PricingSupplement::default(),
+            PricingCatalog {
+                entries: HashMap::from([("gpt-test".into(), ModelRates::new(4.0, 20.0))]),
+                ..PricingCatalog::default()
+            },
+            PricingCatalog::default(),
+        );
+        let outcome = scan_sessions_into(
+            &storage,
+            SessionSource {
+                directory: &sessions,
+                cache_key: "omp",
+                identity_key: "",
+                label: "Oh My Pi",
+                allowed_models: &[],
+            },
+            Utc.with_ymd_and_hms(2026, 7, 12, 15, 0, 0).unwrap(),
+            &pricing,
+            None,
+            None,
+            &mut DailyUsageAccumulator::default(),
+            &mut DailyUsageAccumulator::default(),
+            &mut DailyUsageAccumulator::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome.events.len(), 2);
+        assert_eq!(
+            outcome.events.iter().map(|event| event.total).sum::<u64>(),
+            360
         );
     }
 

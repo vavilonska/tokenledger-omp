@@ -27,19 +27,30 @@ My Pi is authenticated to the same Codex account, TokenLedger OMP also reads its
 under `~/.omp/agent/sessions/**/*.jsonl`, combines both clients, and prices their tokens at the current
 API list rate. No `/stats` command or `stats.db` export is required. Assistant request usage and
 `model_usage` entries include real subagent calls; parent `task` aggregate summaries are not added
-again. Parsed results are cached by file changes, and inherited records in forked sessions are
-deduplicated.
+again. Parsed results are cached by file changes; a separate compact usage ledger preserves observed
+requests independently of their transcript files. Inherited fork records and archived copies are deduplicated.
+Distinct OMP calls without response or entry IDs retain their occurrence within the session, even when
+their timestamps and token counts are identical. Compatible old parsed caches can also seed the ledger
+after their source files have been removed.
 
-The first scan builds this cache from the historical session files. A large archive can exceed the
+The first scan builds the cache and ledger from historical session files. A large archive can exceed the
 provider's refresh timeout; let the local scan finish, then refresh again to use the populated
 cache. Later refreshes reuse unchanged files and reparse files that have grown or changed.
+
+The `local_usage_events` ledger lives in the application's existing `tokenledger-omp.db`. It stores
+only usage facts (model, time, token buckets, speed and request identity), not conversation text or
+credentials. Cached file rows remain disposable; removing a source file does not remove its ledger
+entries. Finish a complete refresh before deleting logs you want to retain.
 
 Oh My Pi's `~/.omp/agent/agent.db` is still used to match the current OAuth account and obtain weekly
 cycle reset anchors, not as the per-request usage source. Historical logs do not provide reliable
 per-request account ownership: the existing current-OAuth-account matching restriction still applies,
 so matching today does not prove that every historical request belongs to that account.
-Missing or deleted session logs cannot be reconstructed. Server subscription quotas are fetched
-separately and are shared, so the quota is shown once instead of being added twice.
+Usage already observed by this application survives archiving, moving, truncation, deletion and
+application restarts. Unobserved deleted sessions cannot be reconstructed without a compatible
+parsed cache. Retained events stay with the account that first observed them; this does not prove
+the historical ownership of old logs. Server subscription quotas are fetched separately and are
+shared, so the quota is shown once instead of being added twice.
 
 The cycle allowance estimate divides the combined local API-value spend by the server-reported used
 percentage. It changes with model mix and is an estimate, not an OpenAI invoice or a cash balance.
@@ -56,16 +67,17 @@ Cost Display**. The choice is saved and applies to Codex usage rows, model detai
 pinned usage metrics and shared screenshots. In credit mode, the overview includes only providers
 with a credit estimate; other providers' dollar costs are not converted into Codex credits.
 
-Prices verified against official OpenAI documentation on 2026-09-23, per million tokens:
+Prices verified against official OpenAI documentation on 2026-09-30, per million tokens:
 
-| Model         | Standard API input / cached / output (USD) | Codex input / cached / output (credits) | API Fast | Codex Fast |
-| ------------- | ------------------------------------------ | --------------------------------------- | -------- | ---------- |
-| GPT-6 Astra   | 10 / 1 / 50                                | 250 / 25 / 1,250                        | 2×       | 2.5×       |
-| GPT-6 Sol     | 2 / 0.2 / 10                               | 50 / 5 / 250                            | 2×       | 2.5×       |
-| GPT-6 Luna    | 0.1 / 0.01 / 0.5                           | 2.5 / 0.25 / 12.5                       | 2×       | 2.5×       |
-| GPT-5.6 Sol   | 4 / 0.4 / 20                               | 100 / 10 / 500                          | 2×       | 2.5×       |
-| GPT-5.6 Terra | 2 / 0.2 / 12                               | 50 / 5 / 300                            | 2×       | 2.5×       |
-| GPT-5.6 Luna  | 0.2 / 0.02 / 1.2                           | 5 / 0.5 / 30                            | 2×       | 2.5×       |
+| Model         | Standard API input / cached / output (USD) | Codex input / cached / output (credits) | API Fast | Purchased credit Fast |
+| ------------- | ------------------------------------------ | --------------------------------------- | -------- | --------------------- |
+| GPT-6 Astra   | 10 / 1 / 50                                | 250 / 25 / 1,250                        | 2×       | 2×                    |
+| GPT-6.1 Sol   | 2 / 0.1 / 10                               | 50 / 2.5 / 250                          | 2×       | 2×                    |
+| GPT-6 Sol     | 2 / 0.2 / 10                               | 50 / 5 / 250                            | 2×       | 2×                    |
+| GPT-6 Luna    | 0.1 / 0.01 / 0.5                           | 2.5 / 0.25 / 12.5                       | 2×       | 2×                    |
+| GPT-5.6 Sol   | 4 / 0.4 / 20                               | 100 / 10 / 500                          | 2×       | 2×                    |
+| GPT-5.6 Terra | 2 / 0.2 / 12                               | 50 / 5 / 300                            | 2×       | 2×                    |
+| GPT-5.6 Luna  | 0.2 / 0.02 / 1.2                           | 5 / 0.5 / 30                            | 2×       | 2×                    |
 
 API USD uses the currently published Standard API price, excluding Batch/Flex reductions and
 third-party or carried client discounts. GPT-5.6 Sol's published Standard price includes OpenAI's
@@ -78,8 +90,10 @@ Codex credit estimates use the independent published token credit card. They do 
 Batch/Flex discounts, API Fast multipliers, API-only long-context surcharges or cache-write charges.
 Hover a credit value to see its USD equivalent at the fixed display anchor **2,500 credits = $100**
 (1 credit = $0.04). This equivalent is not the API list-price estimate or a subscription invoice.
-At Standard speed, the six models in the table have the same input, cached-input and output
-numbers after this display conversion. Their Fast rates differ: API 2× versus Codex credits 2.5×.
+At Standard speed, the seven models in the table have the same input, cached-input and output
+numbers after this display conversion. Credit estimates use purchased-credit/Enterprise PAYG
+Fast rates (2×), not included subscription-limit consumption (2.5×). These are different quantities;
+do not infer subscription usage from the displayed credit estimate.
 GPT-5.4 mini is also a small published exception: its output is 113 credits per million versus
 the API equivalent of 112.5 credits. At the display conversion, GPT-Image-2 image-token credits
 cost 2× its API image-token rates;
@@ -92,11 +106,12 @@ unrecorded cloud activity or actual billed credit deductions.
 
 The two histories and their persisted reset-cycle caches are separate. Existing settings default
 to API USD, and older snapshots without a credit history are never relabeled as credits. The new
-version rebuilds cycle estimates from available logs; it preserves older cached cycle records under
-their existing keys. Model details retain sub-cent precision until display formatting.
+version rebuilds cycle estimates from available logs and retained usage facts; it preserves older
+cached cycle records under their existing keys. Model details retain sub-cent precision until display formatting.
 
 Sources: [API pricing](https://developers.openai.com/api/docs/pricing),
 [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),
+[Sol 6.1](https://developers.openai.com/api/docs/models/gpt-6.1-sol),
 [Sol](https://developers.openai.com/api/docs/models/gpt-6-sol),
 [Luna](https://developers.openai.com/api/docs/models/gpt-6-luna),
 [Codex credit card](https://learn.chatgpt.com/docs/pricing#token-rates),

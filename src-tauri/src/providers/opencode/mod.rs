@@ -16,6 +16,7 @@ use crate::{
         ProviderSnapshot, UsageHistory, UsagePeriodSelection,
     },
     pricing::PricingStore,
+    storage::Storage,
 };
 
 use self::{
@@ -102,6 +103,8 @@ pub(crate) enum OpenCodeError {
     DataDirectoryUnreadable,
     #[error("OpenCode local usage data is temporarily unavailable.")]
     DatabaseUnreadable,
+    #[error("OpenCode usage ledger is unavailable.")]
+    UsageStorage,
     #[error("OpenCode Go login data is invalid or expired. Sign in to OpenCode Go again.")]
     InvalidAuth,
     #[error("OpenCode Go subscription required.")]
@@ -122,9 +125,9 @@ impl From<OpenCodeError> for ProviderError {
             }
             OpenCodeError::GoSubscriptionRequired => ProviderErrorKind::Permission,
             OpenCodeError::CredentialsUnreadable => ProviderErrorKind::CredentialStorage,
-            OpenCodeError::DataDirectoryUnreadable | OpenCodeError::DatabaseUnreadable => {
-                ProviderErrorKind::LocalData
-            }
+            OpenCodeError::DataDirectoryUnreadable
+            | OpenCodeError::DatabaseUnreadable
+            | OpenCodeError::UsageStorage => ProviderErrorKind::LocalData,
             OpenCodeError::ConnectionFailed => ProviderErrorKind::Network,
             OpenCodeError::RequestFailed(429) => ProviderErrorKind::RateLimited,
             OpenCodeError::RequestFailed(500..=599) => ProviderErrorKind::Network,
@@ -145,10 +148,10 @@ pub struct OpenCodeProvider {
 }
 
 impl OpenCodeProvider {
-    pub fn new(pricing: Arc<PricingStore>) -> Self {
+    pub fn new(storage: Arc<Storage>, pricing: Arc<PricingStore>) -> Self {
         let paths = OpenCodePaths::new();
         Self {
-            scanner: OpenCodeUsageScanner::new(paths.clone()),
+            scanner: OpenCodeUsageScanner::new(paths.clone(), storage),
             paths,
             client: OpenCodeClient::new(),
             pricing,
@@ -160,11 +163,12 @@ impl OpenCodeProvider {
     fn with_dependencies(
         paths: OpenCodePaths,
         client: OpenCodeClient,
+        storage: Arc<Storage>,
         pricing: Arc<PricingStore>,
         now: DateTime<Utc>,
     ) -> Self {
         Self {
-            scanner: OpenCodeUsageScanner::new(paths.clone()),
+            scanner: OpenCodeUsageScanner::new(paths.clone(), storage),
             paths,
             client: Ok(client),
             pricing,

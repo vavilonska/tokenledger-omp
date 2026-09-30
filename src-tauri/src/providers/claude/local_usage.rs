@@ -17,9 +17,7 @@ use crate::{
 
 use super::ClaudeError;
 use crate::providers::{
-    daily_usage::DailyUsageAccumulator,
-    log_usage::{load_or_parse_log, parse_log_timestamp},
-    pi_usage,
+    daily_usage::DailyUsageAccumulator, log_usage::parse_log_timestamp, pi_usage,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,49 +47,59 @@ impl ClaudeTokenEvent {
     }
 }
 
+pub struct UsageSources<'a> {
+    pub configured_roots: &'a [PathBuf],
+    pub include_standard_roots: bool,
+    pub include_pi: bool,
+}
+
 pub fn scan_local_usage(
     storage: &Storage,
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     provider_id: &str,
-    configured_roots: &[PathBuf],
-    include_standard_roots: bool,
-    include_pi: bool,
+    account_identity: Option<&str>,
+    sources: UsageSources<'_>,
 ) -> Result<UsageHistory, ClaudeError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(30))
-        .unwrap_or(NaiveDate::MIN);
-    let mut events = Vec::new();
-    let paths = discover_files(configured_roots, include_standard_roots);
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-    for path in paths {
-        seen_paths.insert(path.clone());
-        let Some(parsed) = load_or_parse_log(
-            storage,
-            provider_id,
-            &path,
-            LOG_CACHE_SCHEMA_VERSION,
-            parse_jsonl,
-        )
-        .map_err(|_| ClaudeError::LocalUsage)?
-        else {
-            continue;
-        };
-        events.extend(
-            parsed
-                .into_iter()
-                .filter(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date),
-        );
-    }
-    storage
-        .prune_log_events(provider_id, &seen_paths)
-        .map_err(|_| ClaudeError::LocalUsage)?;
+    let UsageSources {
+        configured_roots,
+        include_standard_roots,
+        include_pi,
+    } = sources;
+    let events = super::super::log_usage::retain_log_usage(
+        storage,
+        provider_id,
+        account_identity.unwrap_or_default(),
+        provider_id,
+        LOG_CACHE_SCHEMA_VERSION,
+        LOG_CACHE_SCHEMA_VERSION,
+        &discover_files(configured_roots, include_standard_roots),
+        parse_jsonl,
+        |event: &ClaudeTokenEvent| {
+            if event.message_id.is_some() || event.request_id.is_some() {
+                super::super::log_usage::usage_event_key(&(
+                    &event.message_id,
+                    &event.request_id,
+                    event.sidechain,
+                ))
+            } else {
+                super::super::log_usage::usage_event_key(&(event.timestamp, &event.model))
+            }
+        },
+        |_| true,
+    )
+    .map_err(|_| ClaudeError::LocalUsage)?;
     let mut accumulator = DailyUsageAccumulator::default();
     aggregate_into(deduplicate(events), now, pricing, &mut accumulator);
     let includes_pi = if include_pi {
-        match pi_usage::scan_into(storage, now, pricing, provider_id, &mut accumulator) {
+        match pi_usage::scan_into(
+            storage,
+            now,
+            pricing,
+            provider_id,
+            account_identity,
+            &mut accumulator,
+        ) {
             Ok(includes_pi) => includes_pi,
             Err(_) => {
                 crate::app_warn!(
@@ -548,6 +556,67 @@ mod tests {
         has_unsupported_null_field, is_semver_prefix, parse_jsonl, parse_line, ClaudeTokenEvent,
     };
     use crate::pricing::{test_bundled_pricing, TokenBreakdown};
+
+    #[test]
+    fn claude_copies_and_deleted_logs_preserve_account_usage_after_restart() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("claude");
+        let path = root.join("projects/project/usage.jsonl");
+        let copy = root.join("projects/project/copied.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"timestamp":"2026-02-20T12:00:00Z","requestId":"request-a","version":"1.0.24","message":{"id":"message-a","model":"claude-test","usage":{"input_tokens":100,"output_tokens":50}}}"#).unwrap();
+        let prices = crate::pricing::ModelPricing::new(
+            crate::pricing::PricingSupplement::default(),
+            crate::pricing::PricingCatalog {
+                entries: std::collections::HashMap::from([(
+                    "claude-test".into(),
+                    crate::pricing::ModelRates::new(2.0, 8.0),
+                )]),
+                ..crate::pricing::PricingCatalog::default()
+            },
+            crate::pricing::PricingCatalog::default(),
+        );
+        let database = directory.path().join("usage.db");
+        let storage = crate::storage::Storage::open(&database).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 2, 21, 12, 0, 0).unwrap();
+        let scan = |storage: &crate::storage::Storage, identity| {
+            super::scan_local_usage(
+                storage,
+                now,
+                &prices,
+                "claude",
+                Some(identity),
+                super::UsageSources {
+                    configured_roots: std::slice::from_ref(&root),
+                    include_standard_roots: false,
+                    include_pi: false,
+                },
+            )
+            .unwrap()
+        };
+        let original = scan(&storage, "account-a");
+        assert_eq!(original.last_30_days.as_ref().unwrap().tokens, 150);
+        assert!(
+            (original
+                .last_30_days
+                .as_ref()
+                .unwrap()
+                .estimated_cost_usd
+                .unwrap()
+                - 0.0006)
+                .abs()
+                < 1e-12
+        );
+        fs::copy(&path, &copy).unwrap();
+        assert_eq!(scan(&storage, "account-a"), original);
+        assert!(scan(&storage, "account-b").daily.is_empty());
+        fs::remove_file(path).unwrap();
+        fs::remove_file(copy).unwrap();
+        drop(storage);
+        let restarted = crate::storage::Storage::open(&database).unwrap();
+        assert_eq!(scan(&restarted, "account-a"), original);
+        assert!(scan(&restarted, "account-b").daily.is_empty());
+    }
 
     #[test]
     fn provider_fixture_parses_and_deduplicates_claude_usage_lines() {

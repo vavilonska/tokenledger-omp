@@ -121,6 +121,93 @@ where
     Ok(Some(events))
 }
 
+/// Event keys encode source identities, never mutable token amounts or file paths.
+pub fn usage_event_key(value: &impl Serialize) -> Result<String, serde_json::Error> {
+    Ok(crate::hashing::sha256_hex(&serde_json::to_vec(value)?))
+}
+
+/// Imports compatible, account-proven legacy caches before pruning and then journals
+/// current usage facts. Missing/truncated files never delete journaled events.
+#[allow(clippy::too_many_arguments)]
+pub fn retain_log_usage<T>(
+    storage: &Storage,
+    provider_id: &str,
+    identity_key: &str,
+    identity_provider: &str,
+    schema_version: u8,
+    oldest_cache_schema: u8,
+    paths: &[std::path::PathBuf],
+    parse: impl Fn(&str) -> Vec<T>,
+    event_key: impl Fn(&T) -> Result<String, serde_json::Error>,
+    include: impl Fn(&T) -> bool,
+) -> Result<Vec<T>, LogCacheError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    retain_log_usage_with_normalization(
+        storage,
+        provider_id,
+        identity_key,
+        identity_provider,
+        schema_version,
+        oldest_cache_schema,
+        paths,
+        parse,
+        |_| {},
+        event_key,
+        include,
+    )
+}
+
+/// Normalizes source identities in both freshly parsed events and compatible legacy caches.
+#[allow(clippy::too_many_arguments)]
+pub fn retain_log_usage_with_normalization<T>(
+    storage: &Storage,
+    provider_id: &str,
+    identity_key: &str,
+    identity_provider: &str,
+    schema_version: u8,
+    oldest_cache_schema: u8,
+    paths: &[std::path::PathBuf],
+    parse: impl Fn(&str) -> Vec<T>,
+    normalize: impl Fn(&mut [T]),
+    event_key: impl Fn(&T) -> Result<String, serde_json::Error>,
+    include: impl Fn(&T) -> bool,
+) -> Result<Vec<T>, LogCacheError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    for (path, json) in
+        storage.recoverable_log_events(provider_id, identity_key, identity_provider)?
+    {
+        if path.exists() {
+            continue;
+        }
+        let Ok(cached) = serde_json::from_str::<CachedLogEvents<T>>(&json) else {
+            continue;
+        };
+        if !(oldest_cache_schema..=schema_version).contains(&cached.schema_version) {
+            continue;
+        }
+        let mut events = cached.events;
+        normalize(&mut events);
+        events.retain(&include);
+        storage.record_usage_events(provider_id, identity_key, 1, &events, &event_key)?;
+    }
+    for path in paths {
+        if let Some(mut events) =
+            load_or_parse_log(storage, provider_id, path, schema_version, &parse)?
+        {
+            normalize(&mut events);
+            events.retain(&include);
+            storage.record_usage_events(provider_id, identity_key, 1, &events, &event_key)?;
+        }
+    }
+    storage.prune_log_events(provider_id, &paths.iter().cloned().collect())?;
+    // Parser-cache versions can change independently of the durable usage-fact schema.
+    Ok(storage.load_usage_events(provider_id, identity_key, 1)?)
+}
+
 /// Keeps provider quotas usable when supplementary local history cannot be refreshed. A prior
 /// persisted history is reused when available; otherwise the provider still returns its live data
 /// with an explicit warning instead of failing the entire refresh.

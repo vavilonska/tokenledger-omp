@@ -454,7 +454,8 @@ pub fn run() {
                 Arc::new(DevinProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(GrokProvider::new(storage.clone(), pricing.clone())?)
                     as Arc<dyn UsageProvider>,
-                Arc::new(OpenCodeProvider::new(pricing.clone())) as Arc<dyn UsageProvider>,
+                Arc::new(OpenCodeProvider::new(storage.clone(), pricing.clone()))
+                    as Arc<dyn UsageProvider>,
                 Arc::new(OpenRouterProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(ZaiProvider::new()?) as Arc<dyn UsageProvider>,
                 Arc::new(KimiProvider::new()?) as Arc<dyn UsageProvider>,

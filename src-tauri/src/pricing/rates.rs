@@ -89,7 +89,7 @@ impl ModelRates {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenBreakdown {
     pub input: u64,
     pub cache_write_5m: u64,

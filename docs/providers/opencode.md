@@ -7,8 +7,8 @@ TokenLedger OMP combines OpenCode Go quota information with usage recorded by lo
 | Metric                           | Meaning                                           |
 | -------------------------------- | ------------------------------------------------- |
 | Session                          | OpenCode Go rolling-window usage                  |
-| Weekly                           | OpenCode Go weekly usage                           |
-| Monthly                          | OpenCode Go monthly usage                          |
+| Weekly                           | OpenCode Go weekly usage                          |
+| Monthly                          | OpenCode Go monthly usage                         |
 | Today / Yesterday / Last 30 Days | Local hosted usage and spend recorded by OpenCode |
 | Usage Trend                      | Recent local usage over time                      |
 
@@ -24,6 +24,12 @@ the OpenCode data directory.
 Sign in to OpenCode Go or use OpenCode locally first. TokenLedger OMP reads OpenCode's local authentication
 file and databases from its data directory. `OPENCODE_DATA_DIR` and `XDG_DATA_HOME` are respected
 when present.
+
+Observed local usage is saved as compact numeric billing records in the application's
+`local_usage_events` ledger, without conversation text or API keys. Deleting OpenCode messages,
+sessions or source databases does not erase usage already collected. Recorded exact costs remain
+unchanged; missing-cost estimates are recalculated using the current price catalog. Deleted
+sessions that were never collected cannot be recovered.
 
 ## Troubleshooting
 

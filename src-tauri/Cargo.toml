@@ -1,6 +1,6 @@
 [package]
 name = "tokenledger-omp"
-version = "0.5.3"
+version = "0.5.4"
 description = "Cross-platform AI quota tracker"
 authors = ["OpenQuota contributors", "TokenLedger OMP contributors"]
 edition = "2021"

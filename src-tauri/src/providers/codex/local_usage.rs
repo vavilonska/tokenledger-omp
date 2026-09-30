@@ -19,7 +19,7 @@ use crate::{
 use super::CodexError;
 use crate::providers::{
     daily_usage::DailyUsageAccumulator,
-    log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+    log_usage::{parse_log_timestamp, retain_log_usage, usage_event_key, LogCacheError},
     omp_usage, pi_usage,
 };
 
@@ -33,9 +33,11 @@ pub struct TokenEvent {
     pub reasoning: u64,
     pub total: u64,
     pub is_fast: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 4;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 5;
 const HISTORY_LOOKBACK_DAYS: u64 = 120;
 const CYCLE_CLUSTER_SECONDS: i64 = 5 * 60;
 
@@ -99,7 +101,7 @@ fn scan_usage_basis(
         .date_naive()
         .checked_sub_days(Days::new(HISTORY_LOOKBACK_DAYS))
         .unwrap_or(NaiveDate::MIN);
-    let events = scan_codex_events(storage, &homes, since_date)?;
+    let events = scan_codex_events(storage, &homes, since_date, account_identity)?;
 
     let session_start = super::cycle_start(quotas, "session", now);
     let weekly_start = super::cycle_start(quotas, "weekly", now);
@@ -152,7 +154,14 @@ fn scan_usage_basis(
             "Oh My Pi",
         );
     }
-    let includes_pi = match pi_usage::scan_into(storage, now, pricing, "codex", &mut accumulator) {
+    let includes_pi = match pi_usage::scan_into(
+        storage,
+        now,
+        pricing,
+        "codex",
+        account_identity,
+        &mut accumulator,
+    ) {
         Ok(includes_pi) => includes_pi,
         Err(_) => {
             crate::app_warn!(
@@ -171,7 +180,7 @@ fn scan_usage_basis(
     }
     let source_note = if pricing.codex_credit_mode {
         format!(
-            "{} logs · Codex credit estimate · 2,500 credits = $100 · separate from API pricing",
+            "{} logs · purchased/PAYG Codex credit estimate · 2,500 credits = $100 · separate from API pricing",
             sources.join(" + ")
         )
     } else {
@@ -368,34 +377,31 @@ fn scan_codex_events(
     storage: &Storage,
     homes: &[PathBuf],
     since_date: NaiveDate,
+    account_identity: Option<&str>,
 ) -> Result<Vec<TokenEvent>, CodexError> {
-    let mut events = Vec::new();
-    let paths = discover_session_files(homes);
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-
-    for path in paths {
-        seen_paths.insert(path.clone());
-        let Some(parsed) = load_or_parse_log(
-            storage,
-            "codex",
-            &path,
-            LOG_CACHE_SCHEMA_VERSION,
-            parse_jsonl,
-        )
-        .map_err(|error| match error {
-            LogCacheError::Storage(_) => CodexError::Storage,
-            LogCacheError::Encode(_) => CodexError::LocalUsage,
-        })?
-        else {
-            continue;
-        };
-        events.extend(
-            parsed
-                .into_iter()
-                .filter(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date),
-        );
-    }
-    storage.prune_log_events("codex", &seen_paths)?;
+    let mut events = retain_log_usage(
+        storage,
+        "codex",
+        account_identity.unwrap_or_default(),
+        "codex",
+        LOG_CACHE_SCHEMA_VERSION,
+        4,
+        &discover_session_files(homes),
+        parse_jsonl,
+        |event: &TokenEvent| {
+            if let Some(id) = event.source_id.as_deref() {
+                Ok(id.to_owned())
+            } else {
+                usage_event_key(&(event.timestamp, &event.model))
+            }
+        },
+        |_| true,
+    )
+    .map_err(|error| match error {
+        LogCacheError::Storage(_) => CodexError::Storage,
+        LogCacheError::Encode(_) => CodexError::LocalUsage,
+    })?;
+    events.retain(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date);
     Ok(events)
 }
 
@@ -478,6 +484,7 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
     let mut current_tier_is_fast = false;
     let mut previous_totals: Option<RawUsage> = None;
     let mut saw_session_meta = false;
+    let mut session_id: Option<String> = None;
     let mut replay_gate: Option<ChildReplayGate> = None;
     let mut events = Vec::new();
 
@@ -512,6 +519,10 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
 
         if object_type == Some("session_meta") && !saw_session_meta {
             saw_session_meta = true;
+            session_id = payload
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             if payload.is_some_and(is_child_session_meta) {
                 replay_gate = Some(
                     object
@@ -592,7 +603,32 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
         }
         let parsed_model = model_name(Some(payload)).or_else(|| model_name(info));
         let model = resolve_model(parsed_model, &mut current_model);
+        let response_id = payload
+            .get("response_id")
+            .or_else(|| payload.get("responseId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        let entry_id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        let source_id = if let Some(response) = response_id {
+            Some(
+                usage_event_key(&("response", response))
+                    .expect("Codex response identity is serializable"),
+            )
+        } else if let Some(session) = session_id.as_deref() {
+            Some(
+                usage_event_key(&("session", session, timestamp_raw, entry_id))
+                    .expect("Codex session identity is serializable"),
+            )
+        } else {
+            entry_id.map(|entry| {
+                usage_event_key(&("entry", entry)).expect("Codex entry identity is serializable")
+            })
+        };
         events.push(TokenEvent {
+            source_id,
             timestamp,
             model,
             input: usage.input,
@@ -811,14 +847,9 @@ fn aggregate_into(
 
     for event in events.iter().filter(|event| event.timestamp <= now) {
         let key = (
+            event.source_id.as_deref(),
             event.timestamp,
-            event.model.clone(),
-            event.input,
-            event.cached,
-            event.output,
-            event.reasoning,
-            event.total,
-            event.is_fast,
+            event.model.as_str(),
         );
         if !seen.insert(key) {
             continue;
@@ -1017,7 +1048,6 @@ mod tests {
     use super::{
         aggregate, codex_homes, codex_long_context_rates, codex_priority_multiplier, cycle_period,
         discover_session_files, estimate_cost, parse_jsonl, scan_codex_events, TokenEvent,
-        LOG_CACHE_SCHEMA_VERSION,
     };
     use crate::{
         pricing::{
@@ -1045,7 +1075,7 @@ mod tests {
         let credit = aggregate(events, now, &pricing);
         // Cached input is subtracted from input, reasoning is already part of output.
         assert!((api.today.unwrap().estimated_cost_usd.unwrap() - 2.61).abs() < 1e-9);
-        assert!((credit.today.unwrap().estimated_cost_usd.unwrap() - 3.045).abs() < 1e-9);
+        assert!((credit.today.unwrap().estimated_cost_usd.unwrap() - 2.61).abs() < 1e-9);
         assert_eq!(api.daily[0].tokens, 202_000);
         assert_eq!(credit.daily[0].tokens, 202_000);
     }
@@ -1271,6 +1301,150 @@ mod tests {
     }
 
     #[test]
+    fn codex_distinct_sessions_revisions_appends_and_accounts_keep_real_usage() {
+        fn journal(session: &str, input: u64, minute: u32) -> String {
+            format!(
+                "{}\n{}",
+                serde_json::json!({"type": "session_meta", "payload": {"id": session}}),
+                serde_json::json!({
+                    "timestamp": format!("2026-07-10T08:{minute:02}:00Z"),
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "model": "gpt-5.5", "info": {
+                        "last_token_usage": {"input_tokens": input, "output_tokens": 10, "total_tokens": input + 10}
+                    }}
+                }),
+            )
+        }
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("codex");
+        let sessions = home.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let first = sessions.join("first.jsonl");
+        let second = sessions.join("second.jsonl");
+        fs::write(&first, journal("first-session", 100, 0)).unwrap();
+        fs::write(&second, journal("second-session", 100, 0)).unwrap();
+        let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+        let since = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 11, 12, 0, 0).unwrap();
+        let pricing = test_bundled_pricing();
+        let total = |account| {
+            aggregate(
+                scan_codex_events(&storage, std::slice::from_ref(&home), since, Some(account))
+                    .unwrap(),
+                now,
+                &pricing,
+            )
+            .daily
+            .iter()
+            .map(|day| day.tokens)
+            .sum::<u64>()
+        };
+        assert_eq!(total("account-a"), 220);
+        fs::write(&first, journal("first-session", 130, 0)).unwrap();
+        assert_eq!(total("account-a"), 250);
+        fs::write(
+            &first,
+            format!(
+                "{}\n{}",
+                journal("first-session", 130, 0),
+                journal("first-session", 45, 1)
+            ),
+        )
+        .unwrap();
+        fs::copy(&first, sessions.join("fork.jsonl")).unwrap();
+        assert_eq!(total("account-a"), 305);
+        assert_eq!(total("account-b"), 0);
+        fs::write(
+            &second,
+            format!(
+                "{}\n{}",
+                journal("second-session", 100, 0),
+                journal("second-session", 50, 2)
+            ),
+        )
+        .unwrap();
+        assert_eq!(total("account-b"), 60);
+        assert_eq!(total("account-a"), 305);
+        fs::write(&first, "").unwrap();
+        fs::remove_file(sessions.join("fork.jsonl")).unwrap();
+        fs::remove_file(&second).unwrap();
+        assert_eq!(total("account-a"), 305);
+        assert_eq!(total("account-b"), 60);
+    }
+
+    #[test]
+    fn codex_recovers_compatible_deleted_source_cache_without_inventing_history() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("codex");
+        let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+        storage.save_log_events("codex", &home.join("sessions/deleted.jsonl"), 10, 20,
+            r#"{"schema_version":4,"events":[{"timestamp":"2026-07-10T08:00:00Z","model":"gpt-5.5","input":100,"cached":0,"output":10,"reasoning":0,"total":110,"is_fast":false}]}"#).unwrap();
+        let since = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 11, 12, 0, 0).unwrap();
+        let history = aggregate(
+            scan_codex_events(&storage, std::slice::from_ref(&home), since, None).unwrap(),
+            now,
+            &test_bundled_pricing(),
+        );
+        assert_eq!(history.daily.iter().map(|day| day.tokens).sum::<u64>(), 110);
+        let retained = aggregate(
+            scan_codex_events(&storage, &[home], since, None).unwrap(),
+            now,
+            &test_bundled_pricing(),
+        );
+        assert_eq!(retained, history);
+    }
+
+    #[test]
+    fn codex_usage_survives_archive_delete_and_restart() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("codex");
+        let active = home.join("sessions/rollout.jsonl");
+        let archived = home.join("archived_sessions/renamed.jsonl");
+        let database = directory.path().join("usage-test.db");
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        fs::write(&active, r#"{"type":"session_meta","payload":{"id":"session-retention"}}
+{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.5","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#).unwrap();
+        let since = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 11, 12, 0, 0).unwrap();
+        let pricing = test_bundled_pricing();
+        let storage = Storage::open(&database).unwrap();
+        let original = aggregate(
+            scan_codex_events(&storage, std::slice::from_ref(&home), since, None).unwrap(),
+            now,
+            &pricing,
+        );
+        assert_eq!(
+            original.daily.iter().map(|day| day.tokens).sum::<u64>(),
+            110
+        );
+        fs::copy(&active, &archived).unwrap();
+        let copied = aggregate(
+            scan_codex_events(&storage, std::slice::from_ref(&home), since, None).unwrap(),
+            now,
+            &pricing,
+        );
+        assert_eq!(copied, original);
+        fs::remove_file(&active).unwrap();
+        let moved = aggregate(
+            scan_codex_events(&storage, std::slice::from_ref(&home), since, None).unwrap(),
+            now,
+            &pricing,
+        );
+        assert_eq!(moved, original);
+        fs::remove_file(&archived).unwrap();
+        drop(storage);
+        let restarted = Storage::open(&database).unwrap();
+        let retained = aggregate(
+            scan_codex_events(&restarted, &[home], since, None).unwrap(),
+            now,
+            &pricing,
+        );
+        assert_eq!(retained, original);
+    }
+
+    #[test]
     fn scan_cache_picks_up_changed_and_new_logs_without_using_config_tier() {
         let directory = tempdir().unwrap();
         let home = directory.path().join("codex");
@@ -1287,7 +1461,8 @@ mod tests {
         let storage = Storage::open(&directory.path().join("tokenledger-omp.db")).unwrap();
         let since = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
 
-        let initial = scan_codex_events(&storage, std::slice::from_ref(&home), since).unwrap();
+        let initial =
+            scan_codex_events(&storage, std::slice::from_ref(&home), since, None).unwrap();
         assert_eq!(initial.len(), 1);
         assert!(!initial[0].is_fast);
 
@@ -1302,7 +1477,7 @@ mod tests {
         )
         .unwrap();
 
-        let refreshed = scan_codex_events(&storage, &[home], since).unwrap();
+        let refreshed = scan_codex_events(&storage, &[home], since, None).unwrap();
         assert_eq!(refreshed.len(), 2);
         assert_eq!(refreshed.iter().map(|event| event.total).sum::<u64>(), 195);
         assert!(refreshed.iter().all(|event| !event.is_fast));
@@ -1338,19 +1513,12 @@ mod tests {
             &storage,
             &[home],
             NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            None,
         )
         .unwrap();
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].model, "codex-auto-review");
-        let cached = storage
-            .load_log_events("codex", &path, fingerprint.size, fingerprint.modified_nanos)
-            .unwrap()
-            .unwrap();
-        let cached = serde_json::from_str::<serde_json::Value>(&cached).unwrap();
-        assert_eq!(cached["schema_version"], LOG_CACHE_SCHEMA_VERSION);
-        assert_eq!(cached["events"][0]["model"], "codex-auto-review");
-        assert!(cached["events"][0].get("pricing_model").is_none());
     }
 
     #[cfg(unix)]
@@ -1461,6 +1629,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            source_id: None,
             timestamp: Utc::now(),
             model: "test-model".into(),
             input: 1_000_000,
@@ -1496,6 +1665,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            source_id: None,
             timestamp: Utc::now(),
             model: "test-model".into(),
             input: 1_000_000,
@@ -1522,6 +1692,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            source_id: None,
             timestamp: Utc::now(),
             model: "gpt-5.5-pro".into(),
             input: 100_000,
@@ -1546,6 +1717,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = |input| TokenEvent {
+            source_id: None,
             timestamp: Utc::now(),
             model: "gpt-5.4".into(),
             input,
@@ -1626,6 +1798,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            source_id: None,
             timestamp: Utc::now(),
             model: "gpt-5.5-fast".into(),
             input: 100_000,
@@ -1650,6 +1823,7 @@ mod tests {
             },
         );
         let event = TokenEvent {
+            source_id: None,
             timestamp: Utc::now(),
             model: "vendor-model-fast".into(),
             input: 100_000,

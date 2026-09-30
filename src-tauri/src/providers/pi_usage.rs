@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -16,14 +15,16 @@ use crate::{
 
 use super::{
     daily_usage::DailyUsageAccumulator,
-    log_usage::{load_or_parse_log, parse_log_timestamp, LogCacheError},
+    log_usage::{parse_log_timestamp, LogCacheError},
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 1;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct PiUsageEvent {
     id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
     timestamp: DateTime<Utc>,
     card_id: String,
     model: String,
@@ -61,6 +62,7 @@ pub fn scan_into(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
+    account_identity: Option<&str>,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, LogCacheError> {
     let home = home_directory();
@@ -69,7 +71,15 @@ pub fn scan_into(
         env_text("PI_CODING_AGENT_DIR").as_deref(),
         &home,
     );
-    scan_directory_into(storage, &directory, now, pricing, card_id, accumulator)
+    scan_directory_into(
+        storage,
+        &directory,
+        now,
+        pricing,
+        card_id,
+        account_identity,
+        accumulator,
+    )
 }
 
 fn scan_directory_into(
@@ -78,21 +88,30 @@ fn scan_directory_into(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     card_id: &str,
+    account_identity: Option<&str>,
     accumulator: &mut DailyUsageAccumulator,
 ) -> Result<bool, LogCacheError> {
     let paths = discover_files(directory);
-    let mut seen_paths = HashSet::with_capacity(paths.len());
-    let mut events = Vec::new();
-    for path in paths {
-        seen_paths.insert(path.clone());
-        let Some(parsed) =
-            load_or_parse_log(storage, "pi", &path, LOG_CACHE_SCHEMA_VERSION, parse_jsonl)?
-        else {
-            continue;
-        };
-        events.extend(parsed);
-    }
-    storage.prune_log_events("pi", &seen_paths)?;
+    let events = super::log_usage::retain_log_usage(
+        storage,
+        "pi",
+        account_identity.unwrap_or_default(),
+        card_id,
+        LOG_CACHE_SCHEMA_VERSION,
+        1,
+        &paths,
+        parse_jsonl,
+        |event: &PiUsageEvent| {
+            super::log_usage::usage_event_key(&(
+                &event.id,
+                event.timestamp,
+                &event.card_id,
+                &event.model,
+                event.id.is_none().then_some(&event.session_id),
+            ))
+        },
+        |event| event.card_id == card_id,
+    )?;
 
     let since = now
         .with_timezone(&Local)
@@ -100,7 +119,7 @@ fn scan_directory_into(
         .checked_sub_days(Days::new(30))
         .unwrap_or(NaiveDate::MIN);
     Ok(aggregate_into(
-        deduplicate(events),
+        events,
         card_id,
         since,
         now,
@@ -147,11 +166,23 @@ fn discover_files(directory: &Path) -> Vec<PathBuf> {
 }
 
 fn parse_jsonl(content: &str) -> Vec<PiUsageEvent> {
-    content
-        .lines()
-        .filter(|line| line.contains("\"usage\""))
-        .filter_map(parse_line)
-        .collect()
+    let mut session_id = None;
+    let mut events = Vec::new();
+    for line in content.lines() {
+        if !line.contains("\"usage\"") {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                if value.get("type").and_then(Value::as_str) == Some("session") {
+                    session_id = value.get("id").and_then(Value::as_str).map(str::to_owned);
+                }
+            }
+            continue;
+        }
+        if let Some(mut event) = parse_line(line) {
+            event.session_id = session_id.clone();
+            events.push(event);
+        }
+    }
+    events
 }
 
 fn parse_line(line: &str) -> Option<PiUsageEvent> {
@@ -174,6 +205,7 @@ fn parse_line(line: &str) -> Option<PiUsageEvent> {
         .and_then(|cost| finite_number(cost.get("total")));
 
     Some(PiUsageEvent {
+        session_id: None,
         id: object.get("id").and_then(Value::as_str).map(str::to_owned),
         timestamp,
         card_id: card_id.to_owned(),
@@ -205,14 +237,6 @@ fn mapped_card(provider: &str) -> Option<&'static str> {
         "github-copilot" => Some("copilot"),
         _ => None,
     }
-}
-
-fn deduplicate(events: Vec<PiUsageEvent>) -> Vec<PiUsageEvent> {
-    let mut seen = HashSet::new();
-    events
-        .into_iter()
-        .filter(|event| event.id.as_ref().is_none_or(|id| seen.insert(id.clone())))
-        .collect()
 }
 
 fn aggregate_into(
@@ -325,10 +349,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
-    use super::{
-        aggregate_into, deduplicate, mapped_card, parse_line, scan_directory_into,
-        sessions_directory,
-    };
+    use super::{aggregate_into, mapped_card, parse_line, scan_directory_into, sessions_directory};
     use crate::{
         pricing::{ModelPricing, ModelRates, PricingCatalog, PricingSupplement},
         providers::daily_usage::DailyUsageAccumulator,
@@ -452,12 +473,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_message_ids_are_counted_once_across_files() {
-        let event = parse_line(&line("duplicate", "anthropic", "model", "0.5")).unwrap();
-        assert_eq!(deduplicate(vec![event.clone(), event]).len(), 1);
-    }
-
-    #[test]
     fn recursive_scan_uses_cache_and_folds_only_the_requested_card() {
         let directory = tempdir().unwrap();
         let sessions = directory.path().join("sessions");
@@ -472,6 +487,8 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
+        let copied = sessions.join("project/fork.jsonl");
+        fs::copy(&log, &copied).unwrap();
         let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
         let mut accumulator = DailyUsageAccumulator::default();
 
@@ -481,6 +498,7 @@ mod tests {
             now(),
             &pricing(),
             "claude",
+            None,
             &mut accumulator,
         )
         .unwrap());
@@ -488,12 +506,34 @@ mod tests {
         assert_eq!(history.today.unwrap().tokens, 202);
 
         let mut second = DailyUsageAccumulator::default();
-        assert!(
-            scan_directory_into(&storage, &sessions, now(), &pricing(), "codex", &mut second,)
-                .unwrap()
-        );
+        assert!(scan_directory_into(
+            &storage,
+            &sessions,
+            now(),
+            &pricing(),
+            "codex",
+            None,
+            &mut second,
+        )
+        .unwrap());
         let period = second.build(now(), "From pi").today.unwrap();
         assert_eq!(period.tokens, 202);
         assert!((period.estimated_cost_usd.unwrap() - 0.002_43).abs() < 0.000_001);
+        fs::remove_file(log).unwrap();
+        fs::remove_file(copied).unwrap();
+        for card in ["claude", "codex"] {
+            let mut retained = DailyUsageAccumulator::default();
+            assert!(scan_directory_into(
+                &storage,
+                &sessions,
+                now(),
+                &pricing(),
+                card,
+                None,
+                &mut retained
+            )
+            .unwrap());
+            assert_eq!(retained.build(now(), "From pi").today.unwrap().tokens, 202);
+        }
     }
 }
