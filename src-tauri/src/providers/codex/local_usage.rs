@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
@@ -11,14 +11,12 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::{
-    models::{QuotaWindow, ResetCycleUsage, UsageHistory},
+    models::{QuotaWindow, ResetCycleUsage, UsageHistory, UsagePeriod},
     pricing::{ModelPricing, ModelRates, TokenBreakdown},
     storage::Storage,
 };
 
-use super::cycle_usage::{self, CycleTokenEvent, ObservedThreadUsage, ThreadSample};
 use super::CodexError;
-
 use crate::providers::{
     daily_usage::DailyUsageAccumulator,
     log_usage::{parse_log_timestamp, retain_log_usage, usage_event_key, LogCacheError},
@@ -47,6 +45,8 @@ struct CycleBucket {
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
     scheduled_reset_at: DateTime<Utc>,
+    used_percent: f64,
+    accumulator: DailyUsageAccumulator,
 }
 
 pub fn scan_local_usage(
@@ -56,7 +56,6 @@ pub fn scan_local_usage(
     quotas: &[QuotaWindow],
     expected_account_id: Option<&str>,
     account_identity: Option<&str>,
-    fetch_thread_usage: impl Fn(&[ThreadSample]) -> HashMap<String, ObservedThreadUsage>,
 ) -> Result<UsageHistory, CodexError> {
     let mut usage = scan_usage_basis(
         storage,
@@ -65,7 +64,6 @@ pub fn scan_local_usage(
         quotas,
         expected_account_id,
         account_identity,
-        &fetch_thread_usage,
     )?;
     let mut credit_pricing = ModelPricing::new(
         crate::pricing::PricingSupplement::decode(include_bytes!(
@@ -83,7 +81,6 @@ pub fn scan_local_usage(
         quotas,
         expected_account_id,
         account_identity,
-        &fetch_thread_usage,
     )?));
     Ok(usage)
 }
@@ -95,7 +92,6 @@ fn scan_usage_basis(
     quotas: &[QuotaWindow],
     expected_account_id: Option<&str>,
     account_identity: Option<&str>,
-    fetch_thread_usage: &impl Fn(&[ThreadSample]) -> HashMap<String, ObservedThreadUsage>,
 ) -> Result<UsageHistory, CodexError> {
     let home = home_directory();
     let configured_home = crate::provider_environment::value("CODEX_HOME");
@@ -106,23 +102,9 @@ fn scan_usage_basis(
         .checked_sub_days(Days::new(HISTORY_LOOKBACK_DAYS))
         .unwrap_or(NaiveDate::MIN);
     let events = scan_codex_events(storage, &homes, since_date, account_identity)?;
+
     let session_start = super::cycle_start(quotas, "session", now);
     let weekly_start = super::cycle_start(quotas, "weekly", now);
-
-    let mut samples = capture_codex_samples(
-        storage,
-        &homes,
-        &events,
-        account_identity.unwrap_or_default(),
-        session_start.into_iter().chain(weekly_start).min(),
-    )
-    .unwrap_or_else(|_| {
-        crate::app_warn!(
-            "plugin:codex",
-            "Codex cycle sample metadata could not be refreshed"
-        );
-        Vec::new()
-    });
     let mut accumulator = DailyUsageAccumulator::default();
     let mut session_accumulator = DailyUsageAccumulator::default();
     let mut weekly_accumulator = DailyUsageAccumulator::default();
@@ -151,30 +133,26 @@ fn scan_usage_basis(
         anchors.push(anchor);
     }
     let mut cycle_buckets = build_cycle_buckets(anchors, now);
-    aggregate_into(&events, now, pricing, &mut accumulator);
-    samples.extend(omp_outcome.cycle_samples.iter().cloned());
-    let samples = cycle_usage::unique_samples(samples, Utc::now());
-    let current_weekly_start = cycle_buckets
-        .last()
-        .filter(|cycle| cycle.scheduled_reset_at > now && cycle.ended_at.is_none())
-        .map(|cycle| cycle.started_at)
-        .or(weekly_start);
-    let first_start = current_weekly_start.into_iter().chain(session_start).min();
-    let query_samples: Vec<_> = samples
-        .into_iter()
-        .filter(|sample| first_start.is_some_and(|start| sample.created_at >= start))
-        .take(cycle_usage::MAX_QUERY_THREADS)
-        .collect();
-    let observations = fetch_thread_usage(&query_samples);
-    // Fetches may finish after refresh-start and even cross a reset. Daily
-    // bucketing keeps its original timestamp; cycle matching uses observation time.
-    let observation_now = Utc::now();
-    for bucket in &mut cycle_buckets {
-        if bucket.scheduled_reset_at <= observation_now {
-            bucket.ended_at = Some(bucket.ended_at.map_or(bucket.scheduled_reset_at, |end| {
-                end.min(bucket.scheduled_reset_at)
-            }));
-        }
+    aggregate_into(
+        &events,
+        now,
+        pricing,
+        &mut accumulator,
+        session_start,
+        &mut session_accumulator,
+        weekly_start,
+        &mut weekly_accumulator,
+        &mut cycle_buckets,
+    );
+    for event in &omp_outcome.events {
+        add_cycle_event(
+            &mut cycle_buckets,
+            event.timestamp,
+            &event.model,
+            event.total,
+            event.cost,
+            "Oh My Pi",
+        );
     }
     let includes_pi = match pi_usage::scan_into(
         storage,
@@ -210,66 +188,24 @@ fn scan_usage_basis(
     };
     let source_note = source_note.as_str();
     let mut usage = accumulator.build(now, source_note);
-    let session_end = quotas
-        .iter()
-        .find(|quota| quota.id == "session")
-        .and_then(|quota| quota.resets_at)
-        .filter(|reset| *reset > observation_now);
-    usage.session_cycle = session_start
-        .filter(|_| session_end.is_some())
-        .and_then(|start| {
-            cycle_usage::matched_period(
-                &query_samples,
-                &observations,
-                start,
-                session_end,
-                observation_now,
-                false,
-                pricing,
-            )
-        });
-    // A banked reset can start later than scheduled_reset - seven days.
-    let current_weekly = cycle_buckets
-        .last()
-        .filter(|cycle| cycle.scheduled_reset_at > observation_now && cycle.ended_at.is_none());
-    usage.weekly_cycle = current_weekly.and_then(|cycle| {
-        cycle_usage::matched_period(
-            &query_samples,
-            &observations,
-            cycle.started_at,
-            Some(cycle.scheduled_reset_at),
-            observation_now,
-            true,
-            pricing,
-        )
-    });
-    let fresh_cycles = cycle_buckets
-        .iter()
-        .filter_map(|bucket| {
-            let usage = cycle_usage::matched_period(
-                &query_samples,
-                &observations,
-                bucket.started_at,
-                bucket.ended_at.or(Some(bucket.scheduled_reset_at)),
-                observation_now,
-                true,
-                pricing,
-            )?;
-            Some(ResetCycleUsage {
-                started_at: bucket.started_at,
-                ended_at: bucket.ended_at,
-                scheduled_reset_at: bucket.scheduled_reset_at,
-                usage,
-            })
-        })
-        .collect();
+    usage.session_cycle = cycle_period(
+        session_accumulator,
+        now,
+        source_note,
+        quota_used_percent(quotas, "session"),
+    );
+    usage.weekly_cycle = cycle_period(
+        weekly_accumulator,
+        now,
+        source_note,
+        quota_used_percent(quotas, "weekly"),
+    );
+    let fresh_cycles = build_cycle_history(cycle_buckets, now, source_note);
     usage.weekly_cycles = merge_persisted_cycles(
         storage,
         account_identity,
         fresh_cycles,
         pricing.codex_credit_mode,
-        &cycle_buckets,
-        observation_now,
     )?;
     Ok(usage)
 }
@@ -316,14 +252,56 @@ fn build_cycle_buckets(
     (0..merged.len())
         .map(|index| CycleBucket {
             started_at: merged[index].started_at,
-            ended_at: merged
-                .get(index + 1)
-                .map(|anchor| anchor.started_at.min(merged[index].scheduled_reset_at))
-                .or_else(|| {
-                    (merged[index].scheduled_reset_at <= now)
-                        .then_some(merged[index].scheduled_reset_at)
-                }),
+            ended_at: merged.get(index + 1).map(|anchor| anchor.started_at),
             scheduled_reset_at: merged[index].scheduled_reset_at,
+            used_percent: merged[index].used_percent,
+            accumulator: DailyUsageAccumulator::default(),
+        })
+        .collect()
+}
+
+fn add_cycle_event(
+    buckets: &mut [CycleBucket],
+    timestamp: DateTime<Utc>,
+    model: &str,
+    tokens: u64,
+    cost: Option<f64>,
+    source: &str,
+) {
+    let Some(bucket) = buckets.iter_mut().rev().find(|bucket| {
+        timestamp >= bucket.started_at
+            && bucket.ended_at.is_none_or(|ended_at| timestamp < ended_at)
+    }) else {
+        return;
+    };
+    let date = timestamp.with_timezone(&Local).date_naive();
+    if let Some(cost) = cost {
+        add_priced_event(&mut bucket.accumulator, date, model, tokens, cost, source);
+    } else if tokens > 0 {
+        bucket.accumulator.add_unknown_model(date, model);
+    }
+}
+
+fn build_cycle_history(
+    buckets: Vec<CycleBucket>,
+    now: DateTime<Utc>,
+    source_note: &str,
+) -> Vec<ResetCycleUsage> {
+    buckets
+        .into_iter()
+        .filter_map(|bucket| {
+            let usage = cycle_period(
+                bucket.accumulator,
+                now,
+                source_note,
+                Some(bucket.used_percent),
+            )?;
+            Some(ResetCycleUsage {
+                started_at: bucket.started_at,
+                ended_at: bucket.ended_at,
+                scheduled_reset_at: bucket.scheduled_reset_at,
+                usage,
+            })
         })
         .collect()
 }
@@ -333,8 +311,6 @@ fn merge_persisted_cycles(
     account_identity: Option<&str>,
     fresh: Vec<ResetCycleUsage>,
     credit_mode: bool,
-    boundaries: &[CycleBucket],
-    observation_now: DateTime<Utc>,
 ) -> Result<Vec<ResetCycleUsage>, CodexError> {
     let Some(identity) = account_identity else {
         let mut fresh = fresh;
@@ -342,9 +318,9 @@ fn merge_persisted_cycles(
         return Ok(fresh);
     };
     let key = if credit_mode {
-        "weekly-matched-credits-v1"
+        "weekly-credits-v1"
     } else {
-        "weekly-matched-api-v1"
+        "weekly-api-v2"
     };
     let mut cycles = storage.load_reset_cycles("codex", identity, key)?;
     for cycle in fresh {
@@ -365,32 +341,36 @@ fn merge_persisted_cycles(
         }
     }
     cycles.sort_by_key(|cycle| cycle.started_at);
-    for cycle in &mut cycles {
-        if cycle.scheduled_reset_at <= observation_now {
-            cycle.ended_at = Some(cycle.ended_at.map_or(cycle.scheduled_reset_at, |end| {
-                end.min(cycle.scheduled_reset_at)
-            }));
-        }
-        if let Some(bucket) = boundaries.iter().find(|bucket| {
-            (bucket.started_at - cycle.started_at).num_seconds().abs() <= CYCLE_CLUSTER_SECONDS
-        }) {
-            if let Some(end) = bucket.ended_at {
-                cycle.ended_at = Some(cycle.ended_at.map_or(end, |previous| previous.min(end)));
-            }
-        }
-        if let Some(next) = boundaries
-            .iter()
-            .map(|bucket| bucket.started_at)
-            .find(|boundary| {
-                *boundary > cycle.started_at + chrono::Duration::seconds(CYCLE_CLUSTER_SECONDS)
-            })
-        {
-            cycle.ended_at = Some(cycle.ended_at.map_or(next, |end| end.min(next)));
-        }
+    for index in 0..cycles.len().saturating_sub(1) {
+        cycles[index].ended_at = Some(cycles[index + 1].started_at);
     }
     storage.save_reset_cycles("codex", identity, key, &cycles)?;
     cycles.reverse();
     Ok(cycles)
+}
+
+fn quota_used_percent(quotas: &[QuotaWindow], id: &str) -> Option<f64> {
+    quotas
+        .iter()
+        .find(|quota| quota.id == id)
+        .map(|quota| quota.used_percent.clamp(0.0, 100.0))
+}
+
+fn cycle_period(
+    accumulator: DailyUsageAccumulator,
+    now: DateTime<Utc>,
+    source_note: &str,
+    used_percent: Option<f64>,
+) -> Option<UsagePeriod> {
+    let mut period = accumulator.build(now, source_note).last_30_days?;
+    if let Some(used_percent) = used_percent.filter(|percent| *percent > 0.0) {
+        period.quota_used_percent = Some(used_percent);
+        period.estimated_limit_usd = period
+            .estimated_cost_usd
+            .filter(|cost| *cost > 0.0)
+            .map(|cost| cost / (used_percent / 100.0));
+    }
+    Some(period)
 }
 
 fn scan_codex_events(
@@ -423,160 +403,6 @@ fn scan_codex_events(
     })?;
     events.retain(|event| event.timestamp.with_timezone(&Local).date_naive() >= since_date);
     Ok(events)
-}
-
-fn codex_cycle_token(event: &TokenEvent) -> Option<CycleTokenEvent> {
-    // The legacy timestamp/model fallback does not establish request identity.
-    Some(CycleTokenEvent {
-        key: event.source_id.clone()?,
-        timestamp: event.timestamp,
-        model: event.model.clone(),
-        total: event.total,
-        input: event.input.saturating_sub(event.cached),
-        cached: event.cached,
-        cache_write: 0,
-        cache_write_1h: 0,
-        output: event.output,
-        is_fast: event.is_fast,
-    })
-}
-
-fn capture_codex_samples(
-    storage: &Storage,
-    homes: &[PathBuf],
-    events: &[TokenEvent],
-    identity_key: &str,
-    earliest: Option<DateTime<Utc>>,
-) -> Result<Vec<ThreadSample>, LogCacheError> {
-    let owned = events
-        .iter()
-        .filter_map(codex_cycle_token)
-        .map(|event| (event.key.clone(), event))
-        .collect();
-    cycle_usage::capture_samples(
-        storage,
-        "codex-cycle-samples-v1",
-        identity_key,
-        &discover_session_files(homes),
-        parse_cycle_samples,
-        &owned,
-        earliest,
-    )
-}
-
-fn parse_cycle_samples(content: &str) -> Vec<ThreadSample> {
-    let Some(sample) = (|| {
-        let mut metadata = None;
-        let mut observed_through = DateTime::<Utc>::MIN_UTC;
-        let mut final_totals = None;
-        let mut active = false;
-        let mut has_model = false;
-        // Discard each JSON value immediately; keep only usage metadata, never a
-        // second in-memory copy of an entire conversation's parsed objects.
-        for line in content.lines().filter(|line| !line.trim().is_empty()) {
-            let entry = serde_json::from_str::<Value>(line).ok()?;
-            if entry.get("type").and_then(Value::as_str) == Some("session_meta") {
-                if metadata.is_some() {
-                    return None;
-                }
-                let payload = entry.get("payload")?;
-                // Inherited snapshots cannot prove a child's own lifetime.
-                if is_child_session_meta(payload)
-                    || !matches!(
-                        payload.get("source").and_then(Value::as_str),
-                        Some("cli" | "vscode" | "exec")
-                    )
-                {
-                    return None;
-                }
-                let thread_id = payload.get("id")?.as_str()?.trim();
-                if thread_id.is_empty() {
-                    return None;
-                }
-                let created_at = payload
-                    .get("timestamp")
-                    .or_else(|| entry.get("timestamp"))?
-                    .as_str()
-                    .and_then(parse_log_timestamp)?;
-                metadata = Some((thread_id.to_owned(), created_at));
-                observed_through = observed_through.max(created_at);
-            }
-            if let Some(timestamp) = entry
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(parse_log_timestamp)
-            {
-                observed_through = observed_through.max(timestamp);
-            }
-            let Some(body) = entry.get("payload") else {
-                continue;
-            };
-            if entry.get("type").and_then(Value::as_str) == Some("turn_context") {
-                has_model |= model_name(Some(body)).is_some();
-            }
-            if entry.get("type").and_then(Value::as_str) != Some("event_msg") {
-                continue;
-            }
-            match body.get("type").and_then(Value::as_str) {
-                Some("task_started") => active = true,
-                Some("task_complete" | "turn_aborted") => active = false,
-                Some("token_count") => {
-                    if !has_model
-                        && model_name(Some(body))
-                            .or_else(|| model_name(body.get("info")))
-                            .is_none()
-                    {
-                        return None;
-                    }
-                    if let Some(totals) = body.pointer("/info/total_token_usage") {
-                        final_totals = Some(RawUsage::from_value(totals));
-                    }
-                }
-                _ => {}
-            }
-        }
-        if active {
-            return None;
-        }
-        let (thread_id, created_at) = metadata?;
-        let events = parse_jsonl(content);
-        if events.is_empty() || events.iter().any(|event| event.timestamp < created_at) {
-            return None;
-        }
-        // Missing early requests, a truncated file or a reset cumulative counter
-        // must not be mistaken for the complete lifetime billed by the service.
-        let sum = events.iter().fold(
-            RawUsage {
-                input: 0,
-                cached: 0,
-                output: 0,
-                reasoning: 0,
-                total: 0,
-            },
-            |mut sum, event| {
-                sum.input = sum.input.saturating_add(event.input);
-                sum.cached = sum.cached.saturating_add(event.cached);
-                sum.output = sum.output.saturating_add(event.output);
-                sum.reasoning = sum.reasoning.saturating_add(event.reasoning);
-                sum.total = sum.total.saturating_add(event.total);
-                sum
-            },
-        );
-        if final_totals != Some(sum) {
-            return None;
-        }
-        let events: Option<Vec<_>> = events.iter().map(codex_cycle_token).collect();
-        Some(ThreadSample {
-            thread_id,
-            created_at,
-            observed_through,
-            source: "Codex".into(),
-            events: events?,
-        })
-    })() else {
-        return Vec::new();
-    };
-    vec![sample]
 }
 
 fn codex_homes(configured_home: Option<&OsStr>, home: &Path) -> Vec<PathBuf> {
@@ -986,15 +812,34 @@ fn auto_review_fallback(timestamp: &DateTime<Utc>) -> &'static str {
 #[cfg(test)]
 fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
-    aggregate_into(&events, now, pricing, &mut accumulator);
+    let mut session = DailyUsageAccumulator::default();
+    let mut weekly = DailyUsageAccumulator::default();
+    let mut cycles = Vec::new();
+    aggregate_into(
+        &events,
+        now,
+        pricing,
+        &mut accumulator,
+        None,
+        &mut session,
+        None,
+        &mut weekly,
+        &mut cycles,
+    );
     accumulator.build(now, "From your Codex logs (estimated)")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn aggregate_into(
     events: &[TokenEvent],
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     accumulator: &mut DailyUsageAccumulator,
+    session_start: Option<DateTime<Utc>>,
+    session_accumulator: &mut DailyUsageAccumulator,
+    weekly_start: Option<DateTime<Utc>>,
+    weekly_accumulator: &mut DailyUsageAccumulator,
+    cycle_buckets: &mut [CycleBucket],
 ) {
     let today = now.with_timezone(&Local).date_naive();
     let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
@@ -1011,12 +856,56 @@ fn aggregate_into(
         }
         let date = event.timestamp.with_timezone(&Local).date_naive();
         if let Some(cost) = estimate_cost(event, pricing) {
+            add_cycle_event(
+                cycle_buckets,
+                event.timestamp,
+                &event.model,
+                event.total,
+                Some(cost),
+                "Codex",
+            );
             if date < since {
                 continue;
             }
             add_priced_event(accumulator, date, &event.model, event.total, cost, "Codex");
-        } else if event.total > 0 && date >= since {
-            accumulator.add_unknown_model(date, &event.model);
+            if session_start.is_some_and(|start| event.timestamp >= start) {
+                add_priced_event(
+                    session_accumulator,
+                    date,
+                    &event.model,
+                    event.total,
+                    cost,
+                    "Codex",
+                );
+            }
+            if weekly_start.is_some_and(|start| event.timestamp >= start) {
+                add_priced_event(
+                    weekly_accumulator,
+                    date,
+                    &event.model,
+                    event.total,
+                    cost,
+                    "Codex",
+                );
+            }
+        } else if event.total > 0 {
+            if date >= since {
+                accumulator.add_unknown_model(date, &event.model);
+            }
+            if session_start.is_some_and(|start| event.timestamp >= start) {
+                session_accumulator.add_unknown_model(date, &event.model);
+            }
+            if weekly_start.is_some_and(|start| event.timestamp >= start) {
+                weekly_accumulator.add_unknown_model(date, &event.model);
+            }
+            add_cycle_event(
+                cycle_buckets,
+                event.timestamp,
+                &event.model,
+                event.total,
+                None,
+                "Codex",
+            );
         }
     }
 }
@@ -1157,7 +1046,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        aggregate, codex_homes, codex_long_context_rates, codex_priority_multiplier,
+        aggregate, codex_homes, codex_long_context_rates, codex_priority_multiplier, cycle_period,
         discover_session_files, estimate_cost, parse_jsonl, scan_codex_events, TokenEvent,
     };
     use crate::{
@@ -1165,6 +1054,7 @@ mod tests {
             test_bundled_pricing, ModelPricing, ModelRates, PricingCatalog, PricingSupplement,
             TokenBreakdown,
         },
+        providers::daily_usage::DailyUsageAccumulator,
         providers::log_usage::LogFileFingerprint,
         storage::Storage,
     };
@@ -1219,93 +1109,6 @@ mod tests {
         assert_eq!(events[0].model, "gpt-5.5");
         assert_eq!(events[0].total, 115);
         assert_eq!(events[0].cached, 20);
-    }
-
-    #[test]
-    fn cycle_samples_require_complete_root_lifetimes_with_a_closed_local_turn() {
-        let content = r#"{"timestamp":"2026-10-07T08:00:00Z","type":"session_meta","payload":{"id":"thread","source":"vscode"}}
-{"type":"turn_context","payload":{"model":"gpt-6.1-sol"}}
-{"timestamp":"2026-10-07T08:01:00Z","type":"event_msg","payload":{"type":"task_started"}}
-{"timestamp":"2026-10-07T08:02:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110},"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
-{"timestamp":"2026-10-07T08:03:00Z","type":"event_msg","payload":{"type":"task_complete"}}"#;
-        let sample = super::parse_cycle_samples(content);
-        assert_eq!(sample.len(), 1);
-        assert_eq!(sample[0].events[0].total, 110);
-        assert!(super::parse_cycle_samples(content.rsplit_once('\n').unwrap().0).is_empty());
-        let truncated = content.replace(
-            "\"total_token_usage\":{\"input_tokens\":100",
-            "\"total_token_usage\":{\"input_tokens\":1000",
-        );
-        assert!(super::parse_cycle_samples(&truncated).is_empty());
-        let child = content.replace(
-            "\"source\":\"vscode\"",
-            "\"source\":\"vscode\",\"parent_thread_id\":\"parent\"",
-        );
-        assert!(super::parse_cycle_samples(&child).is_empty());
-        assert!(super::parse_cycle_samples(&format!("{content}\n{{partial")).is_empty());
-    }
-
-    #[test]
-    fn expired_anchor_closes_last_bucket_without_inventing_a_current_cycle() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
-        let reset = now - chrono::Duration::hours(1);
-        let buckets = super::build_cycle_buckets(
-            vec![crate::providers::omp_usage::QuotaCycleAnchor {
-                started_at: reset - chrono::Duration::days(7),
-                scheduled_reset_at: reset,
-                used_percent: 99.0,
-            }],
-            now,
-        );
-        assert_eq!(buckets[0].ended_at, Some(reset));
-        assert!(!buckets[0].scheduled_reset_at.gt(&now));
-        let directory = tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
-        let period = crate::models::UsagePeriod {
-            tokens: 0,
-            estimated_cost_usd: None,
-            estimated_limit_usd: None,
-            quota_used_percent: None,
-            cost_estimated: false,
-            estimate_complete: true,
-            model_breakdown: None,
-            unknown_models: Vec::new(),
-        };
-        // A formerly observed current record must close even when no new sample matches.
-        storage
-            .save_reset_cycles(
-                "codex",
-                "account",
-                "weekly-matched-api-v1",
-                &[crate::models::ResetCycleUsage {
-                    started_at: buckets[0].started_at,
-                    ended_at: None,
-                    scheduled_reset_at: reset,
-                    usage: period,
-                }],
-            )
-            .unwrap();
-        let cycles = super::merge_persisted_cycles(
-            &storage,
-            Some("account"),
-            Vec::new(),
-            false,
-            &buckets,
-            now,
-        )
-        .unwrap();
-        assert_eq!(cycles[0].ended_at, Some(reset));
-        // A missing live quota and unreadable OMP anchors must still close a
-        // persisted matched window using its own already observed reset boundary.
-        let mut current = cycles[0].clone();
-        current.ended_at = None;
-        storage
-            .save_reset_cycles("codex", "account", "weekly-matched-api-v1", &[current])
-            .unwrap();
-        let cycles =
-            super::merge_persisted_cycles(&storage, Some("account"), Vec::new(), false, &[], now)
-                .unwrap();
-        assert_eq!(cycles[0].ended_at, Some(reset));
     }
 
     #[test]
@@ -1738,6 +1541,18 @@ mod tests {
         assert!(history.today.as_ref().unwrap().estimated_cost_usd.is_some());
         assert!(history.today.as_ref().unwrap().estimate_complete);
         assert!(history.unknown_models.is_empty());
+    }
+
+    #[test]
+    fn cycle_api_value_infers_the_full_allowance_from_used_share() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let mut accumulator = DailyUsageAccumulator::default();
+        accumulator.add_variant(now.date_naive(), 1_000, 25.0, "gpt-test", "Codex");
+
+        let period = cycle_period(accumulator, now, "test", Some(20.0)).unwrap();
+        assert_eq!(period.estimated_cost_usd, Some(25.0));
+        assert_eq!(period.estimated_limit_usd, Some(125.0));
+        assert_eq!(period.quota_used_percent, Some(20.0));
     }
 
     #[test]

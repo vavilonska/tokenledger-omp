@@ -1,14 +1,9 @@
-use std::{
-    collections::HashMap,
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::Duration};
 
 use reqwest::{blocking::Client, header::HeaderMap, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::cycle_usage::{ThreadQuery, ThreadUsageResponse};
 use super::CodexError;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -38,7 +33,6 @@ pub struct CodexClient {
     usage_url: String,
     reset_credits_url: String,
     consume_reset_credit_url: String,
-    thread_cache: Mutex<HashMap<String, (Instant, Option<ThreadUsageResponse>)>>,
 }
 
 impl CodexClient {
@@ -71,7 +65,6 @@ impl CodexClient {
             usage_url: usage_url.to_owned(),
             reset_credits_url: reset_credits_url.to_owned(),
             consume_reset_credit_url: consume_reset_credit_url.to_owned(),
-            thread_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -111,63 +104,6 @@ impl CodexClient {
             headers,
             body,
         })
-    }
-
-    /// One bounded batch, shared by API and credit calculations. Cache identity
-    /// includes account and complete local token facts, never credentials.
-    pub fn fetch_thread_usage(
-        &self,
-        access_token: &str,
-        account_id: &str,
-        threads: &[ThreadQuery],
-        sample_fingerprint: &str,
-    ) -> Result<ThreadUsageResponse, CodexError> {
-        let body = serde_json::json!({"threads": threads});
-        let key = crate::hashing::sha256_hex(
-            format!("{account_id}\n{sample_fingerprint}\n{body}").as_bytes(),
-        );
-        {
-            let mut cache = self
-                .thread_cache
-                .lock()
-                .map_err(|_| CodexError::LocalUsage)?;
-            cache.retain(|_, (time, response)| {
-                time.elapsed() < Duration::from_secs(if response.is_some() { 300 } else { 60 })
-            });
-            if let Some((_, response)) = cache.get(&key) {
-                return response.clone().ok_or(CodexError::ConnectionFailed);
-            }
-        }
-        let result = (|| {
-            let response = self
-                .client
-                .post(format!(
-                    "{}/thread_usage/query_v2",
-                    self.usage_url.trim_end_matches('/')
-                ))
-                .bearer_auth(access_token)
-                .header("ChatGPT-Account-Id", account_id)
-                .header("Accept", "application/json")
-                .timeout(Duration::from_secs(5))
-                .json(&body)
-                .send()
-                .map_err(|_| CodexError::ConnectionFailed)?;
-            if !response.status().is_success() {
-                return Err(CodexError::RequestFailed(response.status().as_u16()));
-            }
-            response
-                .json::<ThreadUsageResponse>()
-                .map_err(|_| CodexError::InvalidResponse)
-        })();
-        if let Ok(mut cache) = self.thread_cache.lock() {
-            // At most two batches are requested per scan. Bound memory even if
-            // frequently changing local journals produce many fingerprints.
-            if cache.len() >= 32 {
-                cache.clear();
-            }
-            cache.insert(key, (Instant::now(), result.as_ref().ok().cloned()));
-        }
-        result
     }
 
     pub fn fetch_reset_credits(
@@ -416,40 +352,6 @@ mod tests {
 
         assert!(matches!(error, CodexError::InvalidResponse));
         assert!(!error.to_string().contains("secret-token"));
-    }
-
-    #[test]
-    fn thread_usage_posts_scoped_lifetimes_and_caches_identical_local_facts() {
-        use super::ThreadQuery;
-        use chrono::TimeZone;
-        let (base, request) = capture_once(r#"{"data_as_of":"2026-10-07T10:00:00Z","threads":[]}"#);
-        let client = client(&base);
-        let threads = [ThreadQuery {
-            thread_id: "thread-one".into(),
-            created_at: chrono::Utc.with_ymd_and_hms(2026, 10, 7, 8, 0, 0).unwrap(),
-            descendant_thread_ids: Vec::new(),
-        }];
-        assert!(client
-            .fetch_thread_usage("secret-token", "account-one", &threads, "facts-one")
-            .is_ok());
-        // The one-shot listener is gone: success proves identical facts reuse the response.
-        assert!(client
-            .fetch_thread_usage("secret-token", "account-one", &threads, "facts-one")
-            .is_ok());
-        let request = request.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(request.starts_with("POST /usage/thread_usage/query_v2 HTTP/1.1"));
-        assert!(request
-            .to_ascii_lowercase()
-            .contains("chatgpt-account-id: account-one"));
-        assert!(request.contains("\"thread_id\":\"thread-one\""));
-        assert!(request.contains("\"descendant_thread_ids\":[]"));
-        assert!(request.contains("2026-10-07T08:00:00Z"));
-        assert!(client
-            .fetch_thread_usage("secret-token", "account-two", &threads, "facts-one")
-            .is_err());
-        assert!(client
-            .fetch_thread_usage("secret-token", "account-one", &threads, "facts-two")
-            .is_err());
     }
 
     #[test]

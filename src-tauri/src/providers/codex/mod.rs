@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod client;
-pub mod cycle_usage;
 pub mod local_usage;
 pub mod mapper;
 pub mod reset_claim;
@@ -292,8 +291,7 @@ impl CodexProvider {
         };
         let mapped = map_usage(&response, reset_credits.as_ref(), now)?;
         let pricing = self.pricing.current();
-        let scan_succeeded = std::cell::Cell::new(false);
-        let mut usage = scan_or_cached_usage(
+        let usage = scan_or_cached_usage(
             &self.storage,
             "codex",
             account_identity
@@ -301,73 +299,17 @@ impl CodexProvider {
                 .unwrap_or(crate::providers::CacheIdentity::Unresolved),
             "Codex",
             || {
-                let result = scan_local_usage(
+                scan_local_usage(
                     &self.storage,
                     now,
                     &pricing,
                     &mapped.quotas,
                     auth.account_id.as_deref(),
                     account_identity,
-                    |samples| {
-                        let mut observations = std::collections::HashMap::new();
-                        let Some(account_id) = auth.account_id.as_deref() else {
-                            return observations;
-                        };
-                        for batch in samples.chunks(32).take(2) {
-                            let requests: Vec<_> = batch
-                                .iter()
-                                .map(|sample| cycle_usage::ThreadQuery {
-                                    thread_id: sample.thread_id.clone(),
-                                    created_at: sample.created_at,
-                                    descendant_thread_ids: Vec::new(),
-                                })
-                                .collect();
-                            let fingerprint = crate::providers::log_usage::usage_event_key(&batch)
-                                .expect("thread token facts are serializable");
-                            let response = match self.client.fetch_thread_usage(
-                                &auth.access_token,
-                                account_id,
-                                &requests,
-                                &fingerprint,
-                            ) {
-                                Ok(response) => response,
-                                Err(_) => {
-                                    crate::app_warn!("plugin:codex", "Local thread consumption is unavailable; cycle estimates require matched usage");
-                                    continue;
-                                }
-                            };
-                            let Some(data_as_of) = response.data_as_of else {
-                                continue;
-                            };
-                            let mut counts = std::collections::HashMap::new();
-                            for row in &response.threads {
-                                *counts.entry(&row.thread_id).or_insert(0) += 1;
-                            }
-                            for row in &response.threads {
-                                if counts.get(&row.thread_id) == Some(&1)
-                                    && batch.iter().any(|sample| sample.thread_id == row.thread_id)
-                                {
-                                    observations.insert(
-                                        row.thread_id.clone(),
-                                        cycle_usage::ObservedThreadUsage {
-                                            data_as_of,
-                                            usage: row.clone(),
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                        observations
-                    },
-                );
-                scan_succeeded.set(result.is_ok());
-                result
+                )
             },
             &mut warnings,
         );
-        if !scan_succeeded.get() {
-            cycle_usage::clear_cycles(&mut usage);
-        }
         Self::ensure_candidate_source_current(auth, account_identity)?;
         Ok(ProviderSnapshot {
             provider_id: "codex".into(),

@@ -48,17 +48,6 @@
           : definition.label
       : (definition?.label ?? ''),
   );
-  const cycleWindowReported = $derived.by(() => {
-    const source = definition?.source;
-    if (source?.kind !== 'usage') return true;
-    const windowId =
-      source.period === 'sessionCycle'
-        ? 'session'
-        : source.period === 'weeklyCycle'
-          ? 'weekly'
-          : null;
-    return windowId === null || snapshot.quotas.some((window) => window.id === windowId);
-  });
   const cycles = $derived(
     definition?.source.kind === 'usage' && definition.source.period === 'weeklyCycle'
       ? (usage.weeklyCycles ?? [])
@@ -125,15 +114,7 @@
 {:else if definition?.source.kind === 'status'}
   <StatusMetric label={definition.label} metric={statusMetric} />
 {:else if definition?.source.kind === 'usage'}
-  <UsageMetric
-    label={usageLabel}
-    {period}
-    {cycles}
-    {credits}
-    {cycleWindowReported}
-    matchedCycle={definition.source.period === 'sessionCycle' ||
-      definition.source.period === 'weeklyCycle'}
-  />
+  <UsageMetric label={usageLabel} {period} {cycles} {credits} />
 {:else if definition?.source.kind === 'value'}
   <ValueMetric
     label={definition.label}

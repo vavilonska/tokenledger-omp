@@ -12,25 +12,14 @@
     period: UsagePeriod | null;
     cycles?: ResetCycleUsage[];
     credits?: boolean;
-    matchedCycle?: boolean;
-    cycleWindowReported?: boolean;
   }
-  let {
-    label,
-    period,
-    cycles = [],
-    credits = false,
-    matchedCycle = false,
-    cycleWindowReported = true,
-  }: Props = $props();
+  let { label, period, cycles = [], credits = false }: Props = $props();
   let open = $state(false);
   let detailTop = $state(8);
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
   function reading(value: UsagePeriod | null) {
-    if (matchedCycle && !cycleWindowReported) return 'Quota window not reported';
-    if (!value && matchedCycle) return 'No usable session attribution';
     if (!value) return credits ? 'Credit estimate unavailable' : 'No data';
     const tokens = formatMetricValue(value.tokens, 'count', 'row', 'tokens');
     if (value.estimatedCostUsd === null) return tokens;
@@ -42,22 +31,6 @@
     return `${costReading(value.estimatedCostUsd, credits)} · ${tokens}`;
   }
   function valueTooltip(value: UsagePeriod | null) {
-    if (matchedCycle) {
-      if (!cycleWindowReported)
-        return 'This account did not report this quota window. No current-cycle estimate is available.';
-      return [
-        'Only matched local Codex and Oh My Pi sessions; this is not total account usage.',
-        value?.estimatedLimitUsd == null
-          ? 'Quota estimate requires matching token usage and server-reported consumption in the same reset cycle.'
-          : `Inferred from ${value.quotaUsedPercent?.toFixed(2) ?? 'the reported'}% matched consumption; model mix affects this estimate`,
-        credits && value ? costTooltip(value.estimatedCostUsd, true) : undefined,
-        credits && value?.estimatedLimitUsd != null
-          ? `Estimated quota: ${costTooltip(value.estimatedLimitUsd, true)}`
-          : undefined,
-      ]
-        .filter(Boolean)
-        .join('\n');
-    }
     if (!value) return undefined;
     if (credits)
       return [
@@ -155,7 +128,6 @@
     title={label}
     {cycles}
     {credits}
-    {matchedCycle}
     top={detailTop}
     onEnter={keepOpen}
     onLeave={scheduleHide}
