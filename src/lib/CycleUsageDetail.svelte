@@ -7,13 +7,22 @@
   interface Props {
     title: string;
     credits?: boolean;
+    matchedCycle?: boolean;
     cycles: ResetCycleUsage[];
     top: number;
     onEnter: () => void;
     onLeave: () => void;
   }
 
-  let { title, cycles, top, onEnter, onLeave, credits = false }: Props = $props();
+  let {
+    title,
+    cycles,
+    top,
+    onEnter,
+    onLeave,
+    credits = false,
+    matchedCycle = false,
+  }: Props = $props();
 
   function range(cycle: ResetCycleUsage) {
     const dateTime = new Intl.DateTimeFormat(resolvedLanguage(), {
@@ -66,7 +75,8 @@
           <span title={costTooltip(cycle.usage.estimatedCostUsd, credits)}
             >{cycle.usage.estimatedCostUsd == null
               ? '—'
-              : costReading(cycle.usage.estimatedCostUsd, credits)} used</span
+              : costReading(cycle.usage.estimatedCostUsd, credits)}
+            {matchedCycle ? 'matched' : 'used'}</span
           >
           <span title={costTooltip(cycle.usage.estimatedLimitUsd, credits)}
             >{cycle.usage.estimatedLimitUsd == null
@@ -75,7 +85,8 @@
           >
         </div>
         <div class="cycle-meta">
-          <span>{cycle.usage.quotaUsedPercent?.toFixed(0) ?? '—'}% observed</span>
+          <span>{cycle.usage.quotaUsedPercent?.toFixed(matchedCycle ? 2 : 0) ?? '—'}% observed</span
+          >
           <span>{formatMetricValue(cycle.usage.tokens, 'count', 'row', 'tokens')}</span>
         </div>
         {#if sources.length}
@@ -91,6 +102,9 @@
     {/each}
   </div>
   <p>Server-observed windows; reset cause is not inferred.</p>
+  {#if matchedCycle}
+    <p>Only matched Codex and Oh My Pi sessions; this is not total account usage.</p>
+  {/if}
 </div>
 
 <style>

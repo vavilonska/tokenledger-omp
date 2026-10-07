@@ -114,7 +114,14 @@
 {:else if definition?.source.kind === 'status'}
   <StatusMetric label={definition.label} metric={statusMetric} />
 {:else if definition?.source.kind === 'usage'}
-  <UsageMetric label={usageLabel} {period} {cycles} {credits} />
+  <UsageMetric
+    label={usageLabel}
+    {period}
+    {cycles}
+    {credits}
+    matchedCycle={definition.source.period === 'sessionCycle' ||
+      definition.source.period === 'weeklyCycle'}
+  />
 {:else if definition?.source.kind === 'value'}
   <ValueMetric
     label={definition.label}

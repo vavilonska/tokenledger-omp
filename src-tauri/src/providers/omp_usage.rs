@@ -18,6 +18,7 @@ use crate::{
 
 mod session;
 
+use super::codex::cycle_usage::{capture_samples, CycleTokenEvent, ThreadSample};
 use super::log_usage::LogCacheError;
 use session::{normalize_anonymous_occurrences, parse_jsonl, SessionUsageEvent};
 
@@ -35,13 +36,15 @@ const ANCHOR_CLUSTER_SECONDS: i64 = 5 * 60;
 #[derive(Debug, Default)]
 pub struct OmpScanOutcome {
     pub included: bool,
+    #[cfg(test)]
     pub events: Vec<PricedOmpEvent>,
     pub weekly_anchors: Vec<QuotaCycleAnchor>,
+    pub cycle_samples: Vec<ThreadSample>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct PricedOmpEvent {
-    pub timestamp: DateTime<Utc>,
     pub model: String,
     pub total: u64,
     pub cost: Option<f64>,
@@ -180,27 +183,7 @@ pub(super) fn scan_sessions_into(
         &paths,
         parse_jsonl,
         normalize_anonymous_occurrences,
-        |event: &SessionUsageEvent| {
-            if let Some(id) = event.response_id.as_deref() {
-                super::log_usage::usage_event_key(&("response", id))
-            } else if let Some(id) = event.id.as_deref() {
-                super::log_usage::usage_event_key(&("entry", id, event.timestamp, &event.model))
-            } else if event.anonymous_occurrence <= 1 {
-                // Keep the first occurrence's legacy key and its original account ownership.
-                super::log_usage::usage_event_key(&(
-                    &event.session_id,
-                    event.timestamp,
-                    &event.model,
-                ))
-            } else {
-                super::log_usage::usage_event_key(&(
-                    &event.session_id,
-                    event.timestamp,
-                    &event.model,
-                    event.anonymous_occurrence,
-                ))
-            }
-        },
+        session_event_key,
         |event| {
             source.allowed_models.is_empty()
                 || source
@@ -209,10 +192,36 @@ pub(super) fn scan_sessions_into(
         },
     )?;
     events.sort_by_key(|event| event.timestamp);
+    let cycle_samples = if source.cache_key == "omp" {
+        let owned = events
+            .iter()
+            .map(cycle_token_event)
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+        capture_samples(
+            storage,
+            "omp-cycle-samples-v1",
+            source.identity_key,
+            &paths,
+            parse_cycle_samples,
+            &owned,
+            session_start.into_iter().chain(weekly_start).min(),
+        )
+        .unwrap_or_else(|_| {
+            crate::app_warn!(
+                "plugin:omp",
+                "Oh My Pi cycle sample metadata could not be refreshed"
+            );
+            Vec::new()
+        })
+    } else {
+        // Other consumers of this parser keep daily usage only.
+        Vec::new()
+    };
     // References keep the response identifiers out of an extra allocation per event.
     let mut seen_ids = HashSet::new();
     let mut seen_responses = HashSet::new();
     let mut included = false;
+    #[cfg(test)]
     let mut priced_events = Vec::new();
 
     for event in events.iter().filter(|event| event.timestamp <= now) {
@@ -252,8 +261,8 @@ pub(super) fn scan_sessions_into(
             if weekly_start.is_some_and(|start| event.timestamp >= start) {
                 weekly_accumulator.add_unknown_model(date, &event.model);
             }
+            #[cfg(test)]
             priced_events.push(PricedOmpEvent {
-                timestamp: event.timestamp,
                 model: event.model.clone(),
                 total: event.total,
                 cost: None,
@@ -271,8 +280,8 @@ pub(super) fn scan_sessions_into(
         if weekly_start.is_some_and(|start| event.timestamp >= start) {
             add_event(weekly_accumulator, date, event, cost, source.label);
         }
+        #[cfg(test)]
         priced_events.push(PricedOmpEvent {
-            timestamp: event.timestamp,
             model: event.model.clone(),
             total: event.total,
             cost: Some(cost),
@@ -282,9 +291,133 @@ pub(super) fn scan_sessions_into(
 
     Ok(OmpScanOutcome {
         included,
+        #[cfg(test)]
         events: priced_events,
         weekly_anchors: Vec::new(),
+        cycle_samples,
     })
+}
+
+fn session_event_key(event: &SessionUsageEvent) -> Result<String, serde_json::Error> {
+    if let Some(id) = event.response_id.as_deref() {
+        super::log_usage::usage_event_key(&("response", id))
+    } else if let Some(id) = event.id.as_deref() {
+        super::log_usage::usage_event_key(&("entry", id, event.timestamp, &event.model))
+    } else if event.anonymous_occurrence <= 1 {
+        super::log_usage::usage_event_key(&(&event.session_id, event.timestamp, &event.model))
+    } else {
+        super::log_usage::usage_event_key(&(
+            &event.session_id,
+            event.timestamp,
+            &event.model,
+            event.anonymous_occurrence,
+        ))
+    }
+}
+
+fn cycle_token_event(
+    event: &SessionUsageEvent,
+) -> Result<(String, CycleTokenEvent), serde_json::Error> {
+    let key = session_event_key(event)?;
+    Ok((
+        key.clone(),
+        CycleTokenEvent {
+            key,
+            timestamp: event.timestamp,
+            model: event.model.clone(),
+            total: event.total,
+            input: event.input,
+            cached: event.cache_read,
+            cache_write: event.cache_write,
+            cache_write_1h: event.cache_write_1h,
+            output: event.output,
+            is_fast: event.is_fast,
+        },
+    ))
+}
+
+fn parse_cycle_samples(content: &str) -> Vec<ThreadSample> {
+    let Some(sample) = (|| {
+        let mut metadata = None;
+        let mut observed_through = DateTime::<Utc>::MIN_UTC;
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            let entry = serde_json::from_str::<Value>(line).ok()?;
+            if entry.get("type").and_then(Value::as_str) == Some("session") {
+                if metadata.is_some() {
+                    return None;
+                }
+                if [
+                    "parentSession",
+                    "parentSessionId",
+                    "forkedFrom",
+                    "forked_from_id",
+                    "parent_thread_id",
+                ]
+                .iter()
+                .any(|key| {
+                    entry
+                        .get(*key)
+                        .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+                }) {
+                    return None;
+                }
+                let thread_id = entry.get("id")?.as_str()?.trim();
+                if thread_id.is_empty() {
+                    return None;
+                }
+                let created_at =
+                    super::log_usage::parse_log_timestamp(entry.get("timestamp")?.as_str()?)?;
+                metadata = Some((thread_id.to_owned(), created_at));
+                observed_through = observed_through.max(created_at);
+            }
+            if let Some(timestamp) = entry
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(super::log_usage::parse_log_timestamp)
+            {
+                observed_through = observed_through.max(timestamp);
+            }
+            let message = if entry.get("type").and_then(Value::as_str) == Some("model_usage") {
+                &entry
+            } else {
+                entry.get("message").unwrap_or(&Value::Null)
+            };
+            if message.get("provider").and_then(Value::as_str) == Some("openai-codex")
+                && (message.get("role").and_then(Value::as_str) == Some("assistant")
+                    || entry.get("type").and_then(Value::as_str) == Some("model_usage"))
+                && (!message.get("usage").is_some_and(Value::is_object)
+                    || !message.get("model").is_some_and(Value::is_string))
+            {
+                return None;
+            }
+        }
+        let (thread_id, created_at) = metadata?;
+        let mut events = parse_jsonl(content);
+        normalize_anonymous_occurrences(&mut events);
+        if events.is_empty()
+            || events
+                .iter()
+                .any(|event| event.timestamp < created_at || event.model.is_empty())
+        {
+            return None;
+        }
+        observed_through = observed_through.max(events.iter().map(|event| event.timestamp).max()?);
+        let events = events
+            .iter()
+            .map(|event| cycle_token_event(event).map(|(_, fact)| fact))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        Some(ThreadSample {
+            thread_id,
+            created_at,
+            observed_through,
+            source: "Oh My Pi".into(),
+            events,
+        })
+    })() else {
+        return Vec::new();
+    };
+    vec![sample]
 }
 
 fn read_weekly_anchors(
@@ -444,6 +577,28 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use rusqlite::Connection;
+
+    #[test]
+    fn cycle_samples_reject_forks_missing_usage_and_incomplete_journals() {
+        let content = r#"{"type":"session","id":"omp-thread","timestamp":"2026-10-07T08:00:00Z"}
+{"type":"message","id":"call","timestamp":"2026-10-07T09:00:00Z","message":{"role":"assistant","provider":"openai-codex","model":"gpt-6.1-sol","responseId":"response","usage":{"input":100,"output":10,"totalTokens":110}}}"#;
+        assert_eq!(super::parse_cycle_samples(content).len(), 1);
+        assert!(super::parse_cycle_samples(
+            &content.replace("2026-10-07T08:00:00Z", "2026-10-07T10:00:00Z")
+        )
+        .is_empty());
+        assert!(super::parse_cycle_samples(&content.replace(
+            "\"id\":\"omp-thread\"",
+            "\"id\":\"omp-thread\",\"parentSession\":\"parent\""
+        ))
+        .is_empty());
+        assert!(super::parse_cycle_samples(&format!("{content}\n{{partial")).is_empty());
+        assert!(super::parse_cycle_samples(&content.replace(
+            "\"usage\":{\"input\":100,\"output\":10,\"totalTokens\":110}",
+            "\"usage\":null"
+        ))
+        .is_empty());
+    }
     use tempfile::tempdir;
 
     use super::{

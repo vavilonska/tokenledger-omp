@@ -126,6 +126,7 @@ describe('UsageMetric model detail', () => {
     vi.useFakeTimers();
     render(UsageMetric, {
       label: 'Weekly API Value',
+      matchedCycle: true,
       period: {
         tokens: 3_000,
         estimatedCostUsd: 25,
@@ -152,6 +153,7 @@ describe('UsageMetric model detail', () => {
     });
 
     const reading = screen.getByRole('button', { name: '~$125.00 quota · $25.00' });
+    expect(reading.getAttribute('data-tooltip')).toContain('20.00% matched consumption');
     await fireEvent.mouseEnter(reading);
     await vi.advanceTimersByTimeAsync(400);
 
@@ -188,6 +190,7 @@ describe('UsageMetric model detail', () => {
     };
     render(UsageMetric, {
       label: 'Weekly API Value',
+      matchedCycle: true,
       period,
       cycles: [
         {
@@ -206,10 +209,23 @@ describe('UsageMetric model detail', () => {
       name: 'Weekly API Value reset cycle history',
     });
     expect(detail).toHaveTextContent('Actual reset cycles');
-    expect(detail).toHaveTextContent('$25.00 used');
+    expect(detail).toHaveTextContent('$25.00 matched');
     expect(detail).toHaveTextContent('~$125.00 quota');
     expect(detail).toHaveTextContent('Codex $10.00');
     expect(detail).toHaveTextContent('Oh My Pi $15.00');
     expect(detail).toHaveTextContent('reset cause is not inferred');
+    expect(detail).toHaveTextContent('20.00% observed');
+    expect(detail).toHaveTextContent('this is not total account usage');
+  });
+
+  it('does not present missing cycle attribution as zero usage', () => {
+    render(UsageMetric, {
+      label: 'Weekly Credits',
+      period: null,
+      credits: true,
+      matchedCycle: true,
+    });
+    const reading = screen.getByRole('button', { name: 'No matched usage' });
+    expect(reading).toHaveAttribute('data-tooltip', expect.stringContaining('same reset cycle'));
   });
 });

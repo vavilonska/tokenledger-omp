@@ -255,6 +255,18 @@ const zhHans: Record<string, string> = {
   used: '已用',
   quota: '额度',
   'quota unavailable': '额度不可用',
+  'No matched usage': '暂无匹配用量',
+  matched: '已匹配',
+  'matched token and quota usage': 'token 与额度消耗已配对',
+  'API list price estimate': 'API 标价估算',
+  'purchased/PAYG credit estimate': '购买／按量积分估算',
+  'excludes unmatched, cross-cycle and non-included usage': '不含未匹配、跨周期及非套餐内用量',
+  'Only matched local Codex and Oh My Pi sessions; this is not total account usage.':
+    '仅统计已匹配的本地 Codex 与 Oh My Pi 会话，不代表账户总用量。',
+  'Only matched Codex and Oh My Pi sessions; this is not total account usage.':
+    '仅统计已匹配的 Codex 与 Oh My Pi 会话，不代表账户总用量。',
+  'Quota estimate requires matching token usage and server-reported consumption in the same reset cycle.':
+    '额度估算需要同一重置周期内相互匹配的 token 用量与服务端消耗比例。',
   observed: '已观测',
   'Server-observed windows; reset cause is not inferred.': '周期来自服务器观测；不会推断重置原因。',
   'Unknown model found': '发现未知模型',
@@ -380,6 +392,7 @@ function translateValue(value: string): string {
     [/^(.+) quota$/, (name) => `${translateValue(name)}额度`],
     [/^(.+) used$/, (amount) => `已用 ${translateValue(amount)}`],
     [/^(.+)% observed$/, (amount) => `已观测 ${amount}%`],
+    [/^(.+) matched$/, (amount) => `已匹配 ${translateValue(amount)}`],
     [/^(.+) tokens$/, (amount) => `${amount} token`],
     [/^(.+) credits$/, (amount) => `${amount} 余额`],
     [
@@ -394,6 +407,11 @@ function translateValue(value: string): string {
       /^Inferred from (.+)% used; model mix affects this estimate$/,
       (amount) => `根据已用 ${amount}% 推算；模型组合会影响估算结果`,
     ],
+    [
+      /^Inferred from (.+)% matched consumption; model mix affects this estimate$/,
+      (amount) => `根据已匹配消耗 ${amount}% 推算；模型组合会影响估算结果`,
+    ],
+    [/^locally recorded sessions as of (.+)$/, (cutoff) => `截至 ${cutoff} 的本地会话记录`],
     [/^peak (.+) tokens$/, (amount) => `峰值 ${amount} token`],
     [
       /^30-day token chart\. Peak (.+) tokens on (.+)\.$/,

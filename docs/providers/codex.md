@@ -11,7 +11,7 @@ TokenLedger OMP tracks Codex subscription limits and usage recorded by the Codex
 | Spark / Spark Weekly             | Model-specific limits when they are reported for the account |
 | Extra Usage                      | Additional usage credits reported by Codex                   |
 | Rate Limit Resets                | Available reset credits                                      |
-| 5h / Weekly API Value            | Current-cycle spend and inferred allowance at API list price |
+| 5h / Weekly API Value            | Matched Codex / Oh My Pi consumption and inferred allowance  |
 | Weekly cycle history             | Actual server-observed windows, including early resets       |
 | Today / Yesterday / Last 30 Days | Combined Codex and Oh My Pi local usage                      |
 | Usage Trend                      | Recent local usage over time                                 |
@@ -52,8 +52,19 @@ parsed cache. Retained events stay with the account that first observed them; th
 the historical ownership of old logs. Server subscription quotas are fetched separately and are
 shared, so the quota is shown once instead of being added twice.
 
-The cycle allowance estimate divides the combined local API-value spend by the server-reported used
-percentage. It changes with model mix and is an estimate, not an OpenAI invoice or a cash balance.
+Cycle estimates use only Codex and same-account Oh My Pi sessions whose local token records can be
+paired with server-reported **per-thread** consumption in the same reset cycle. The displayed cycle
+spend, tokens and percentage describe that matched sample, not total account activity. The allowance
+estimate divides the matched sample's priced tokens by its matching consumed percentage. Account-wide
+quota percentages are used to show shared limits, never as the denominator for this estimate.
+No additional pi or cloud records are added to these samples; existing daily usage tracking
+is unchanged. Unavailable attribution is not zero usage. Sessions whose lifetime usage
+cannot be placed in one cycle, incomplete observations and unsupported prices cannot produce a quota
+estimate. It changes with model mix and remains an estimate, not an OpenAI invoice or a cash balance.
+The server reports per-thread percentages, not matching token totals. If the same thread continues
+on another device or in the cloud without updating this device's journal, its percentage may include
+unobserved calls. Matching therefore relies on the local journal covering that thread's usage;
+detected missing or conflicting records are excluded, but cross-device completeness is not proven.
 Hover the weekly API-value row to see reset-cycle history. Its boundaries come from the reset times
 saved by Oh My Pi, so a banked reset starts a new window instead of being forced into a calendar
 week. TokenLedger OMP preserves those reconstructed cycles in its account-scoped database. It does not
@@ -105,9 +116,10 @@ Standard speed. Estimates cover locally available Codex and same-account Oh My P
 unrecorded cloud activity or actual billed credit deductions.
 
 The two histories and their persisted reset-cycle caches are separate. Existing settings default
-to API USD, and older snapshots without a credit history are never relabeled as credits. The new
-version rebuilds cycle estimates from available logs and retained usage facts; it preserves older
-cached cycle records under their existing keys. Model details retain sub-cent precision until display formatting.
+to API USD, and older snapshots without a credit history are never relabeled as credits. Matched
+cycle estimates use new cache keys; old estimates based on account-wide percentages are removed
+from displayed snapshots, including when a refresh fails. Existing daily history and the old stored
+cycle records are preserved. Model details retain sub-cent precision until display formatting.
 
 Sources: [API pricing](https://developers.openai.com/api/docs/pricing),
 [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),

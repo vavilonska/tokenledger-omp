@@ -173,6 +173,11 @@ impl Storage {
                         quota.unit = Some("requests".into());
                     }
                 }
+                if snapshot.provider_id == "codex" {
+                    crate::providers::codex::cycle_usage::discard_legacy_cycles(
+                        &mut snapshot.usage,
+                    );
+                }
                 Ok(snapshot)
             })
             .transpose()
@@ -945,6 +950,80 @@ mod tests {
             storage.load_snapshot("cursor").unwrap().unwrap().quotas[0].unit,
             Some("requests".into())
         );
+    }
+
+    #[test]
+    fn codex_cache_keeps_daily_and_matched_cycles_but_drops_old_cycle_estimates() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+        let now = Utc::now();
+        let period = |note: &str| UsagePeriod {
+            tokens: 100,
+            estimated_cost_usd: Some(2.0),
+            estimated_limit_usd: Some(20.0),
+            quota_used_percent: Some(10.0),
+            cost_estimated: true,
+            estimate_complete: true,
+            model_breakdown: Some(ModelUsageBreakdown {
+                models: Vec::new(),
+                source_note: note.into(),
+            }),
+            unknown_models: Vec::new(),
+        };
+        let old = period("Codex + Oh My Pi + Other client logs");
+        let matched = period(crate::providers::codex::cycle_usage::MATCHED_SOURCE);
+        let cycle = |usage| ResetCycleUsage {
+            started_at: now,
+            ended_at: None,
+            scheduled_reset_at: now + chrono::Duration::days(7),
+            usage,
+        };
+        for provider_id in ["codex", "claude"] {
+            let snapshot = ProviderSnapshot {
+                provider_id: provider_id.into(),
+                plan: None,
+                quotas: Vec::new(),
+                value_metrics: Vec::new(),
+                status_metrics: Vec::new(),
+                notices: Vec::new(),
+                usage: UsageHistory {
+                    today: Some(old.clone()),
+                    session_cycle: Some(old.clone()),
+                    weekly_cycle: Some(matched.clone()),
+                    weekly_cycles: vec![cycle(old.clone()), cycle(matched.clone())],
+                    credit_usage: Some(Box::new(UsageHistory {
+                        today: Some(old.clone()),
+                        session_cycle: Some(old.clone()),
+                        weekly_cycle: Some(old.clone()),
+                        weekly_cycles: vec![cycle(old.clone())],
+                        ..UsageHistory::default()
+                    })),
+                    ..UsageHistory::default()
+                },
+                warnings: Vec::new(),
+                refreshed_at: now,
+            };
+            storage
+                .save_snapshot_for_identity(&snapshot, Some("account-a"))
+                .unwrap();
+            let loaded = storage
+                .load_snapshot_for_identity(provider_id, CacheIdentity::Resolved("account-a"))
+                .unwrap()
+                .unwrap();
+            if provider_id == "claude" {
+                assert_eq!(loaded, snapshot);
+                continue;
+            }
+            assert_eq!(loaded.usage.today, snapshot.usage.today);
+            assert!(loaded.usage.session_cycle.is_none());
+            assert_eq!(loaded.usage.weekly_cycle, Some(matched.clone()));
+            assert_eq!(loaded.usage.weekly_cycles, vec![cycle(matched.clone())]);
+            let credits = loaded.usage.credit_usage.unwrap();
+            assert_eq!(credits.today, Some(old.clone()));
+            assert!(credits.session_cycle.is_none());
+            assert!(credits.weekly_cycle.is_none());
+            assert!(credits.weekly_cycles.is_empty());
+        }
     }
 
     #[test]
