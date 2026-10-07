@@ -225,7 +225,19 @@ describe('UsageMetric model detail', () => {
       credits: true,
       matchedCycle: true,
     });
-    const reading = screen.getByRole('button', { name: 'No matched usage' });
+    const reading = screen.getByRole('button', { name: 'No usable session attribution' });
     expect(reading).toHaveAttribute('data-tooltip', expect.stringContaining('same reset cycle'));
+  });
+
+  it('distinguishes an unreported quota window from missing session attribution', () => {
+    render(UsageMetric, {
+      label: '5h API Value',
+      period: null,
+      matchedCycle: true,
+      cycleWindowReported: false,
+    });
+    const reading = screen.getByRole('button', { name: 'Quota window not reported' });
+    expect(reading).toHaveAttribute('data-tooltip', expect.stringContaining('did not report'));
+    expect(screen.queryByText('No usable session attribution')).not.toBeInTheDocument();
   });
 });

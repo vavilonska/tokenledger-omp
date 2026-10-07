@@ -13,15 +13,24 @@
     cycles?: ResetCycleUsage[];
     credits?: boolean;
     matchedCycle?: boolean;
+    cycleWindowReported?: boolean;
   }
-  let { label, period, cycles = [], credits = false, matchedCycle = false }: Props = $props();
+  let {
+    label,
+    period,
+    cycles = [],
+    credits = false,
+    matchedCycle = false,
+    cycleWindowReported = true,
+  }: Props = $props();
   let open = $state(false);
   let detailTop = $state(8);
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
   function reading(value: UsagePeriod | null) {
-    if (!value && matchedCycle) return 'No matched usage';
+    if (matchedCycle && !cycleWindowReported) return 'Quota window not reported';
+    if (!value && matchedCycle) return 'No usable session attribution';
     if (!value) return credits ? 'Credit estimate unavailable' : 'No data';
     const tokens = formatMetricValue(value.tokens, 'count', 'row', 'tokens');
     if (value.estimatedCostUsd === null) return tokens;
@@ -34,6 +43,8 @@
   }
   function valueTooltip(value: UsagePeriod | null) {
     if (matchedCycle) {
+      if (!cycleWindowReported)
+        return 'This account did not report this quota window. No current-cycle estimate is available.';
       return [
         'Only matched local Codex and Oh My Pi sessions; this is not total account usage.',
         value?.estimatedLimitUsd == null

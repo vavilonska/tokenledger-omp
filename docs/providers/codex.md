@@ -65,6 +65,9 @@ The server reports per-thread percentages, not matching token totals. If the sam
 on another device or in the cloud without updating this device's journal, its percentage may include
 unobserved calls. Matching therefore relies on the local journal covering that thread's usage;
 detected missing or conflicting records are excluded, but cross-device completeness is not proven.
+An OMP parent-session link alone does not imply inherited usage: independent child calls can enter
+the sample, while inherited or duplicate calls remain excluded. A missing quota window is displayed
+separately from a reported window with no usable session attribution; neither is treated as zero.
 Hover the weekly API-value row to see reset-cycle history. Its boundaries come from the reset times
 saved by Oh My Pi, so a banked reset starts a new window instead of being forced into a calendar
 week. TokenLedger OMP preserves those reconstructed cycles in its account-scoped database. It does not

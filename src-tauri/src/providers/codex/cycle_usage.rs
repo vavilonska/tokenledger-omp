@@ -100,6 +100,14 @@ pub fn capture_samples(
     let Some(earliest) = earliest else {
         return Ok(Vec::new());
     };
+    // Only disposable OMP file parsing changes. Keep the durable fact ledger's
+    // namespace/schema and account ownership/coverage watermarks untouched.
+    // Version 1 cached parent-linked fresh sessions as empty.
+    let parser_schema = if cache_key == "omp-cycle-samples-v1" {
+        2
+    } else {
+        1
+    };
     let mut previous: HashMap<String, ThreadSample> = storage
         .load_usage_events::<ThreadSample>(cache_key, identity_key, 1)?
         .into_iter()
@@ -122,7 +130,7 @@ pub fn capture_samples(
         if journal_created_at(path).is_none_or(|created| created < earliest) {
             continue;
         }
-        if let Some(parsed) = load_or_parse_log(storage, cache_key, path, 1, &parse)? {
+        if let Some(parsed) = load_or_parse_log(storage, cache_key, path, parser_schema, &parse)? {
             for sample in parsed {
                 if sample.events.is_empty()
                     || !sample

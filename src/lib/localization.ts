@@ -256,6 +256,10 @@ const zhHans: Record<string, string> = {
   quota: '额度',
   'quota unavailable': '额度不可用',
   'No matched usage': '暂无匹配用量',
+  'Quota window not reported': '账户未提供该额度窗口',
+  'No usable session attribution': '暂无可用会话归因',
+  'This account did not report this quota window. No current-cycle estimate is available.':
+    '账户未返回该额度窗口，无法计算当前周期估算。',
   matched: '已匹配',
   'matched token and quota usage': 'token 与额度消耗已配对',
   'API list price estimate': 'API 标价估算',

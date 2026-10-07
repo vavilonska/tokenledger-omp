@@ -346,15 +346,11 @@ fn parse_cycle_samples(content: &str) -> Vec<ThreadSample> {
                 if metadata.is_some() {
                     return None;
                 }
-                if [
-                    "parentSession",
-                    "parentSessionId",
-                    "forkedFrom",
-                    "forked_from_id",
-                    "parent_thread_id",
-                ]
-                .iter()
-                .any(|key| {
+                // A parent link also labels fresh subagent sessions; it does
+                // not prove that this journal copied any parent calls. Explicit
+                // forks stay excluded. Earlier calls and duplicate identities
+                // are checked below and by account-owned sample capture.
+                if ["forkedFrom", "forked_from_id"].iter().any(|key| {
                     entry
                         .get(*key)
                         .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
@@ -589,7 +585,7 @@ mod tests {
         .is_empty());
         assert!(super::parse_cycle_samples(&content.replace(
             "\"id\":\"omp-thread\"",
-            "\"id\":\"omp-thread\",\"parentSession\":\"parent\""
+            "\"id\":\"omp-thread\",\"forkedFrom\":\"parent\""
         ))
         .is_empty());
         assert!(super::parse_cycle_samples(&format!("{content}\n{{partial")).is_empty());
@@ -598,6 +594,123 @@ mod tests {
             "\"usage\":null"
         ))
         .is_empty());
+    }
+
+    #[test]
+    fn parent_links_reparse_empty_cache_and_match_only_independent_calls() {
+        use crate::providers::{
+            codex::cycle_usage::{self, ObservedThreadUsage, ThreadUsage, ThreadUsageGroup},
+            log_usage::load_or_parse_log,
+        };
+        let content = r#"{"type":"session","id":"child","timestamp":"2026-10-07T08:00:00Z","parentSession":"parent-path","parentSessionId":"parent-id","parent_thread_id":"parent-thread"}
+{"type":"message","id":"call","timestamp":"2026-10-07T09:00:00Z","message":{"role":"assistant","provider":"openai-codex","model":"gpt-6.1-sol","responseId":"response","usage":{"input":100,"output":10,"totalTokens":110}}}"#;
+        let sample = super::parse_cycle_samples(content).pop().unwrap();
+        assert_eq!(sample.events[0].total, 110);
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let path = directory.path().join("child.jsonl");
+        fs::write(&path, content).unwrap();
+        let cache_key = "omp-cycle-samples-v1";
+        // Installed v1 wrote empty parser results for this exact, unchanged file.
+        assert!(load_or_parse_log(&storage, cache_key, &path, 1, |_| {
+            Vec::<super::ThreadSample>::new()
+        })
+        .unwrap()
+        .unwrap()
+        .is_empty());
+        let mut prior = sample.clone();
+        prior.thread_id = "retained-thread".into();
+        prior.events[0].key = "retained-call".into();
+        storage
+            .record_usage_events(
+                cache_key,
+                "account-a",
+                1,
+                std::slice::from_ref(&prior),
+                |sample| Ok(sample.thread_id.clone()),
+            )
+            .unwrap();
+        let owned = sample
+            .events
+            .iter()
+            .map(|event| (event.key.clone(), event.clone()))
+            .collect();
+        let start = Utc.with_ymd_and_hms(2026, 10, 7, 7, 0, 0).unwrap();
+        let selected = super::capture_samples(
+            &storage,
+            cache_key,
+            "account-a",
+            std::slice::from_ref(&path),
+            super::parse_cycle_samples,
+            &owned,
+            Some(start),
+        )
+        .unwrap();
+        assert_eq!(selected, vec![sample.clone()]);
+        // File parsing upgrades without deleting or reassigning durable coverage.
+        let retained: Vec<super::ThreadSample> = storage
+            .load_usage_events(cache_key, "account-a", 1)
+            .unwrap();
+        assert!(retained.contains(&prior));
+        assert!(super::capture_samples(
+            &storage,
+            cache_key,
+            "account-b",
+            std::slice::from_ref(&path),
+            super::parse_cycle_samples,
+            &owned,
+            Some(start)
+        )
+        .unwrap()
+        .is_empty());
+        let as_of = Utc.with_ymd_and_hms(2026, 10, 7, 10, 0, 0).unwrap();
+        let observations = HashMap::from([(
+            "child".into(),
+            ObservedThreadUsage {
+                data_as_of: as_of,
+                usage: ThreadUsage {
+                    thread_id: "child".into(),
+                    data_status: "available".into(),
+                    usage_source: "included_plan".into(),
+                    five_hour_limit_percent: Some(10.0),
+                    weekly_limit_percent: Some(2.0),
+                    balance_usage_credits: None,
+                    groups: vec![ThreadUsageGroup {
+                        model: "gpt-6.1-sol".into(),
+                        speed: "standard".into(),
+                        five_hour_limit_percent: Some(10.0),
+                        weekly_limit_percent: Some(2.0),
+                        balance_usage_credits: None,
+                    }],
+                },
+            },
+        )]);
+        let period = cycle_usage::matched_period(
+            &selected,
+            &observations,
+            start,
+            None,
+            as_of,
+            false,
+            &crate::pricing::test_bundled_pricing(),
+        )
+        .unwrap();
+        assert_eq!(period.tokens, 110);
+        assert_eq!(period.quota_used_percent, Some(10.0));
+        assert!((period.estimated_limit_usd.unwrap() - 0.003).abs() < 1e-12);
+        // A parent link never exempts inherited calls from timestamp or identity checks.
+        assert!(super::parse_cycle_samples(
+            &content.replace("2026-10-07T08:00:00Z", "2026-10-07T10:00:00Z")
+        )
+        .is_empty());
+        assert!(super::parse_cycle_samples(&content.replace(
+            "\"parentSessionId\":\"parent-id\"",
+            "\"forked_from_id\":\"parent-id\""
+        ))
+        .is_empty());
+        let mut duplicate = sample.clone();
+        duplicate.thread_id = "another-thread".into();
+        assert!(cycle_usage::unique_samples(vec![sample, duplicate], as_of).is_empty());
     }
     use tempfile::tempdir;
 

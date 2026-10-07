@@ -48,6 +48,17 @@
           : definition.label
       : (definition?.label ?? ''),
   );
+  const cycleWindowReported = $derived.by(() => {
+    const source = definition?.source;
+    if (source?.kind !== 'usage') return true;
+    const windowId =
+      source.period === 'sessionCycle'
+        ? 'session'
+        : source.period === 'weeklyCycle'
+          ? 'weekly'
+          : null;
+    return windowId === null || snapshot.quotas.some((window) => window.id === windowId);
+  });
   const cycles = $derived(
     definition?.source.kind === 'usage' && definition.source.period === 'weeklyCycle'
       ? (usage.weeklyCycles ?? [])
@@ -119,6 +130,7 @@
     {period}
     {cycles}
     {credits}
+    {cycleWindowReported}
     matchedCycle={definition.source.period === 'sessionCycle' ||
       definition.source.period === 'weeklyCycle'}
   />
