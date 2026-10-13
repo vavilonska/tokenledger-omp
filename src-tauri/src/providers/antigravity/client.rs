@@ -80,6 +80,7 @@ impl AntigravityClient {
         Ok(Self {
             local: Client::builder()
                 .danger_accept_invalid_certs(true)
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(5))
                 .build()
                 .map_err(|_| AntigravityError::Unavailable)?,
@@ -248,6 +249,42 @@ mod tests {
             Duration::from_secs(1),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn local_language_server_does_not_forward_requests_to_redirect_targets() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let location = format!("http://{}/remote", target.local_addr().unwrap());
+        let base = test_http::serve_once(307, &[("location", &location)], "");
+        let server = super::LanguageServer {
+            csrf: "local-test-csrf".into(),
+            ports: Vec::new(),
+            extension_port: reqwest::Url::parse(&base).unwrap().port(),
+        };
+
+        assert!(client(&base)
+            .call_language_server(&server, "GetUserStatus")
+            .is_none());
+        assert!(matches!(
+            target.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[test]
+    fn local_language_server_http_responses_remain_usable() {
+        let base = test_http::serve_once(200, &[], r#"{"quota":"available"}"#);
+        let server = super::LanguageServer {
+            csrf: "local-test-csrf".into(),
+            ports: Vec::new(),
+            extension_port: reqwest::Url::parse(&base).unwrap().port(),
+        };
+
+        assert_eq!(
+            client(&base).call_language_server(&server, "GetUserStatus"),
+            Some(json!({"quota": "available"}))
+        );
     }
 
     #[test]

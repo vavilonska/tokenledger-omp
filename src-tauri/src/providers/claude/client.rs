@@ -26,9 +26,17 @@ impl ClaudeClient {
     }
 
     fn with_timeout(timeout: std::time::Duration) -> Result<Self, ClaudeError> {
+        let default_redirect_policy = reqwest::redirect::Policy::default();
         Ok(Self {
             client: Client::builder()
                 .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                    if super::auth::oauth_url_is_secure(attempt.url()) {
+                        default_redirect_policy.redirect(attempt)
+                    } else {
+                        attempt.error("Claude OAuth redirects require HTTPS outside loopback")
+                    }
+                }))
                 .build()
                 .map_err(|_| ClaudeError::ConnectionFailed)?,
         })
@@ -161,6 +169,62 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["plan"], "max");
         assert_eq!(retry_after, Some(120));
+    }
+
+    #[test]
+    fn credential_requests_reject_remote_plaintext_redirects() {
+        let client = ClaudeClient::new().unwrap();
+        for refresh in [false, true] {
+            let base = test_http::serve_once(
+                307,
+                &[("location", "http://oauth.example.invalid/credentials")],
+                "",
+            );
+            let error = if refresh {
+                client
+                    .refresh_token("secret-refresh", &config(&base))
+                    .unwrap_err()
+            } else {
+                client
+                    .fetch_usage("secret-token", &config(&base))
+                    .unwrap_err()
+            };
+            assert!(matches!(error, ClaudeError::ConnectionFailed));
+            assert!(!error.to_string().contains("secret-"));
+        }
+    }
+
+    #[test]
+    fn plaintext_redirects_fail_at_the_policy_boundary_before_dns_or_connection() {
+        let client = ClaudeClient::new().unwrap();
+        for method in [reqwest::Method::GET, reqwest::Method::POST] {
+            let base = test_http::serve_once(
+                307,
+                &[("location", "http://oauth.example.invalid/credentials")],
+                "",
+            );
+            let error = client
+                .client
+                .request(method, &base)
+                .bearer_auth("local-test-token")
+                .json(&serde_json::json!({"refresh_token": "local-test-refresh"}))
+                .send()
+                .unwrap_err();
+            assert!(error.is_redirect(), "{error}");
+            assert!(!error.is_connect(), "{error}");
+        }
+    }
+
+    #[test]
+    fn local_development_redirects_remain_usable() {
+        let destination = test_http::serve_once(200, &[], r#"{"plan":"max"}"#);
+        let source = test_http::serve_once(307, &[("location", &destination)], "");
+        let (status, body, _) = ClaudeClient::new()
+            .unwrap()
+            .fetch_usage("local-test-token", &config(&source))
+            .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["plan"], "max");
     }
 
     #[test]

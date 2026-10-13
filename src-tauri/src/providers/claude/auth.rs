@@ -441,10 +441,23 @@ fn resolved_oauth_settings() -> (String, String, String, &'static str) {
 
 fn validate_http_url(value: &str) -> Result<(), ClaudeError> {
     let url = reqwest::Url::parse(value).map_err(|_| ClaudeError::InvalidOAuthUrl)?;
-    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+    if !oauth_url_is_secure(&url) {
         return Err(ClaudeError::InvalidOAuthUrl);
     }
     Ok(())
+}
+
+pub(super) fn oauth_url_is_secure(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    url.scheme() == "https"
+        || (url.scheme() == "http"
+            && (host == "localhost"
+                || host == "[::1]"
+                || host
+                    .parse::<std::net::Ipv4Addr>()
+                    .is_ok_and(|address| address.is_loopback())))
 }
 
 fn parse_candidate(
@@ -581,6 +594,36 @@ mod tests {
         ClaudeCredentialScope, ClaudeCredentialsFile, ClaudeOAuth, CredentialSource,
     };
     use crate::providers::claude::ClaudeError;
+
+    #[test]
+    fn oauth_urls_require_https_except_for_loopback_development() {
+        for url in [
+            "https://api.anthropic.com/api/oauth/usage",
+            "https://oauth.example.invalid/v1/oauth/token",
+            "http://localhost:8000/api/oauth/usage",
+            "http://127.0.0.1:8000/v1/oauth/token",
+            "http://[::1]:8000/v1/oauth/token",
+        ] {
+            assert!(super::validate_http_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "http://oauth.example.invalid/api/oauth/usage",
+            "http://oauth.example.invalid/v1/oauth/token",
+            "http://localhost.example.invalid/v1/oauth/token",
+            "http://192.168.1.1/v1/oauth/token",
+            "http://[::2]/v1/oauth/token",
+            "ftp://localhost/v1/oauth/token",
+            "not-a-url",
+        ] {
+            assert!(
+                matches!(
+                    super::validate_http_url(url),
+                    Err(ClaudeError::InvalidOAuthUrl)
+                ),
+                "{url}"
+            );
+        }
+    }
 
     #[test]
     fn parses_claude_credentials_and_hex_fallback() {

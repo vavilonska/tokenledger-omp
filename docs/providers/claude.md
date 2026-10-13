@@ -36,6 +36,13 @@ Spend history is calculated locally from Claude usage logs. It can also include 
 usage recorded by pi and, on macOS, Claude's local agent-mode sessions. These local records are not
 uploaded by TokenLedger OMP.
 
+## Custom OAuth endpoints
+
+`CLAUDE_CODE_CUSTOM_OAUTH_URL` and `CLAUDE_LOCAL_OAUTH_API_BASE` must use HTTPS for remote hosts.
+Plain HTTP is supported only for loopback development (`localhost`, `127.0.0.1`, and `::1`).
+Usage and token-refresh requests also reject redirects to non-loopback HTTP destinations.
+Invalid endpoints are rejected rather than sending access or refresh tokens over remote plaintext HTTP.
+
 ## Troubleshooting
 
 - **Not logged in** — run `claude`, complete sign-in, then refresh TokenLedger OMP.

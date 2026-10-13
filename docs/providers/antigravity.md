@@ -19,6 +19,10 @@ Sign in through Antigravity or run `agy`. TokenLedger OMP reuses Antigravity's l
 and can also discover a compatible running Antigravity language server. No API key needs to be added
 to TokenLedger OMP.
 
+Language-server requests connect directly to `127.0.0.1` and never follow HTTP redirects.
+Self-signed HTTPS remains supported for this local service; cloud and OAuth requests use a separate
+client with normal certificate validation.
+
 ## Troubleshooting
 
 - **Not signed in** — open Antigravity or run `agy`, complete sign-in, then refresh TokenLedger OMP.
