@@ -14,11 +14,11 @@ maintenance does not bump the application version or publish/replace existing in
 validation and installer build below remain required before release.
 
 合并 Rust 依赖更新后，Cargo 锁文件移除已不再被使用的 Windows 0.61 依赖图，并归一化
-Windows 0.62 的引用，保证后续 `--locked` 构建无需重写锁文件；没有额外升级 Rust 包。
+Windows 0.62 的引用，保证后续 `--locked` 构建无需重写锁文件；此归一化本身不升级 Rust 包。
 
 After merging the Rust dependency updates, the Cargo lockfile removes the unused Windows 0.61
 dependency graph and normalizes Windows 0.62 references so `--locked` builds need no lockfile rewrite.
-No additional Rust packages are upgraded.
+This normalization itself does not upgrade Rust packages.
 
 Claude OAuth 自定义远端端点及凭据请求的重定向必须使用 HTTPS；仅保留本机 loopback HTTP
 开发支持，避免 access／refresh token 被发送到明文远端。
@@ -32,6 +32,12 @@ Antigravity 本机语言服务不再跟随重定向，防止本机自签证书�
 Antigravity local language-server requests no longer follow redirects, keeping local self-signed
 certificate compatibility and CSRF tokens confined to the discovered loopback service. Remote
 requests retain normal certificate validation.
+
+Rustls 更新至 0.23.45，修复 [GHSA-2mjx-qc3c-rqvc](https://github.com/advisories/GHSA-2mjx-qc3c-rqvc)；
+同时满足该版本所需的 aws-lc-rs／aws-lc-sys 和 rustls-webpki 依赖约束。
+
+Rustls is updated to 0.23.45 for [GHSA-2mjx-qc3c-rqvc](https://github.com/advisories/GHSA-2mjx-qc3c-rqvc),
+along with the aws-lc-rs/aws-lc-sys and rustls-webpki versions required by this release.
 
 ## 中文
 
