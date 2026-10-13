@@ -64,3 +64,7 @@ zbus = "5.13"
 
 [dev-dependencies]
 fontdue = { version = "0.9.3", default-features = false, features = ["std"] }
+
+[patch.crates-io]
+# Keep GTK 0.18 compatibility while backporting the upstream VariantStrIter safety fix.
+glib = { path = "vendor/glib" }

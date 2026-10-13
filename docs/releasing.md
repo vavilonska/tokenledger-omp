@@ -39,6 +39,36 @@ Rustls 更新至 0.23.45，修复 [GHSA-2mjx-qc3c-rqvc](https://github.com/advis
 Rustls is updated to 0.23.45 for [GHSA-2mjx-qc3c-rqvc](https://github.com/advisories/GHSA-2mjx-qc3c-rqvc),
 along with the aws-lc-rs/aws-lc-sys and rustls-webpki versions required by this release.
 
+Linux GTK 0.18 链仍需要 glib 0.18.5。`src-tauri/vendor/glib` 保留该版本的完整 crates.io 原包和
+MIT 许可；原包 SHA-256 为 `233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5`。
+通过 `[patch.crates-io]` 回移 [gtk-rs/gtk-rs-core#1343](https://github.com/gtk-rs/gtk-rs-core/pull/1343)
+（官方合并 `05dff0ee696f9bcd8617cd48c4b812d046d440cb`）的两处指针可变性修复，避免
+`VariantStrIter` 将不可变 `&p` 作为 C 函数的输出参数。只更改 `src/variant_iter.rs` 的
+`let p` → `let mut p` 和 `&p` → `&mut p`，其余原包源码保持不变，版本仍为 0.18.5。
+这是 [GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g) 的本地安全回移，
+不是伪装为上游 0.20，也不以手动关闭 GitHub 告警代替源代码修复。
+
+The Linux GTK 0.18 graph still requires glib 0.18.5. `src-tauri/vendor/glib` preserves the complete
+crates.io package and MIT license; its original archive SHA-256 is recorded above. The crates.io
+patch backports the two pointer-mutability changes from upstream PR #1343 (merge commit above);
+all other packaged source remains unchanged and the package version stays 0.18.5. This is a local
+backport for GHSA-wrw7-89jp-8q8g, not a false upstream 0.20 identity or a manual advisory dismissal.
+With GLib development libraries available, run the real optimized iterator regression tests:
+
+```sh
+cargo test --manifest-path src-tauri/vendor/glib/Cargo.toml --release variant_iter::tests
+cargo tree --manifest-path src-tauri/Cargo.toml --locked --target x86_64-unknown-linux-gnu -i glib
+```
+
+2026-10-13 验证：隔离 Linux 环境、GLib 2.88.0、优化构建的 11 项迭代器测试通过；
+独立程序通过实际 GVariant FFI 验证正反向迭代、Unicode 和空字符串，Linux GTK/Tauri
+依赖树确认使用本地回移。原版在同一工具链下也通过这些测试，因此不宣称已复现优化器误编译。
+
+Validation on 2026-10-13: all 11 optimized iterator tests and a standalone GVariant FFI smoke
+passed against GLib 2.88.0, including bidirectional iteration, Unicode and empty strings.
+The Linux GTK/Tauri graph resolves to this local backport. The unpatched package also passed
+these tests on this toolchain; this does not claim a reproduced optimizer miscompilation.
+
 ## 中文
 
 项目在 https://github.com/vavilonska/tokenledger-omp 公开发布。初始公开版本 0.5.2 提供 Windows x64 NSIS 安装包和 SHA-256。
