@@ -37,15 +37,3 @@ updates:
         patterns: ['*']
         update-types:
           - patch
-
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
-    groups:
-      github-actions-minor-and-patch:
-        applies-to: version-updates
-        patterns: ['*']
-        update-types:
-          - minor
-          - patch

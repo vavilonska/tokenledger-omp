@@ -5,6 +5,8 @@ pull requests are welcome.
 
 Work against [the public repository](https://github.com/vavilonska/tokenledger-omp).
 Inherited GitHub Actions templates are kept in docs/github-actions and are not enabled automatically.
+Dependabot tracks the active npm and Cargo manifests. GitHub Actions updates remain disabled while
+workflow templates are archived; enable them only after adding workflows under .github/workflows.
 
 By participating, you agree to follow the project [Code of Conduct](CODE_OF_CONDUCT.md).
 
