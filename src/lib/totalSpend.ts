@@ -14,6 +14,7 @@ export interface SpendSlice {
 export interface SpendProjection {
   slices: SpendSlice[];
   centerValue: number | null;
+  totalTokens: number;
   costEstimated: boolean;
   estimateComplete: boolean;
 }
@@ -31,7 +32,9 @@ function valueFor(period: UsagePeriod, metric: AppSettings['totalSpendMetric']):
   if (metric === 'tokens') return period.tokens > 0 ? period.tokens : null;
   if (period.estimatedCostUsd === null || period.estimatedCostUsd <= 0) return null;
   if (metric === 'costPerMillion') {
-    return period.tokens > 0 ? (period.estimatedCostUsd / period.tokens) * 1_000_000 : null;
+    return period.estimateComplete && period.tokens > 0
+      ? (period.estimatedCostUsd / period.tokens) * 1_000_000
+      : null;
   }
   return period.estimatedCostUsd;
 }
@@ -41,6 +44,14 @@ export function projectSpend(
   periodSelection: AppSettings['totalSpendPeriod'],
   metric: AppSettings['totalSpendMetric'],
 ): SpendProjection {
+  const periods = providers
+    .map((provider) => selectedPeriod(provider.usage, periodSelection))
+    .filter((period): period is UsagePeriod => period !== null);
+  const totalTokens = periods.reduce((sum, period) => sum + period.tokens, 0);
+  const estimateComplete = periods.every(
+    (period) =>
+      period.estimateComplete && (period.tokens === 0 || period.estimatedCostUsd !== null),
+  );
   const slices = providers
     .flatMap((provider) => {
       const period = selectedPeriod(provider.usage, periodSelection);
@@ -51,7 +62,7 @@ export function projectSpend(
     .sort((left, right) => right.value - left.value || left.id.localeCompare(right.id));
 
   if (slices.length === 0) {
-    return { slices, centerValue: null, costEstimated: false, estimateComplete: true };
+    return { slices, centerValue: null, totalTokens, costEstimated: false, estimateComplete };
   }
 
   const centerValue =
@@ -69,8 +80,9 @@ export function projectSpend(
   return {
     slices,
     centerValue,
+    totalTokens,
     costEstimated: metric !== 'tokens' && slices.some((slice) => slice.period.costEstimated),
-    estimateComplete: slices.every((slice) => slice.period.estimateComplete),
+    estimateComplete,
   };
 }
 

@@ -7,15 +7,24 @@
     title: string;
     credits?: boolean;
     breakdown: ModelUsageBreakdown;
+    estimateComplete?: boolean;
     top: number;
     onEnter: () => void;
     onLeave: () => void;
   }
 
-  let { title, breakdown, top, onEnter, onLeave, credits = false }: Props = $props();
+  let {
+    title,
+    breakdown,
+    top,
+    onEnter,
+    onLeave,
+    credits = false,
+    estimateComplete = true,
+  }: Props = $props();
 
   const shares = $derived.by(() => {
-    const allPriced = breakdown.models.every((model) => model.costUsd !== null);
+    const allPriced = estimateComplete && breakdown.models.every((model) => model.costUsd !== null);
     const costTotal = breakdown.models.reduce((sum, model) => sum + (model.costUsd ?? 0), 0);
     const tokenTotal = breakdown.models.reduce((sum, model) => sum + model.totalTokens, 0);
     if (allPriced && costTotal > 0) {
@@ -58,7 +67,10 @@
         <div class="model-usage-primary">
           <strong title={model.model}>{model.model}</strong>
           <span title={costTooltip(model.costUsd, credits)}
-            >{model.costUsd === null ? '—' : costReading(model.costUsd, credits)}</span
+            >{model.costUsd === null ? '—' : costReading(model.costUsd, credits)}{model.costUsd !==
+              null && !estimateComplete
+              ? ' partial'
+              : ''}</span
           >
         </div>
         <div class="model-usage-secondary">
@@ -76,7 +88,12 @@
                 <span title={variant.model}>{variant.model}</span>
                 <span>{formatMetricValue(variant.totalTokens, 'count', 'row', 'tokens')}</span>
                 <span title={costTooltip(variant.costUsd, credits)}
-                  >{variant.costUsd === null ? '—' : costReading(variant.costUsd, credits)}</span
+                  >{variant.costUsd === null
+                    ? '—'
+                    : costReading(variant.costUsd, credits)}{variant.costUsd !== null &&
+                  !estimateComplete
+                    ? ' partial'
+                    : ''}</span
                 >
               </div>
             {/each}
@@ -85,6 +102,11 @@
       </div>
     {/each}
   </div>
+  {#if !estimateComplete}
+    <p>
+      Partial estimate: some usage has unknown model pricing or request speed. Shares use tokens.
+    </p>
+  {/if}
   <p>{breakdown.sourceNote}</p>
 </div>
 

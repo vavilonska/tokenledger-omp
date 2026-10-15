@@ -75,7 +75,17 @@ fn suffix_allows_match(key: &[u8], suffix: &[u8]) -> bool {
     if separator.is_ascii_alphanumeric() {
         return false;
     }
-    !suffix_starts_with_numeric_model_version(key, suffix)
+    if suffix_starts_with_numeric_model_version(key, suffix) {
+        return false;
+    }
+    // Reasoning and speed suffixes require explicit aliases. Otherwise an unknown
+    // tier can silently inherit a standard catalog price through fuzzy matching.
+    matches!(suffix, b"-preview" | b"-latest")
+        || (suffix.first() == Some(&b'-')
+            && matches!(suffix.len(), 9 | 11)
+            && suffix[1..]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || *byte == b'-'))
 }
 
 fn suffix_starts_with_numeric_model_version(key: &[u8], suffix: &[u8]) -> bool {

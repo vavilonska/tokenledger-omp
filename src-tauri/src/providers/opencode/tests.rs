@@ -491,7 +491,10 @@ fn exact_zero_cost_is_usage_but_unknown_cost_stays_visible_as_incomplete() {
     );
     drop(unknown);
     let unknown_usage = scan(vec![unknown_path]).usage;
-    assert!(unknown_usage.today.is_none());
+    let unknown_today = unknown_usage.today.unwrap();
+    assert_eq!(unknown_today.tokens, 60);
+    assert_eq!(unknown_today.estimated_cost_usd, None);
+    assert!(!unknown_today.estimate_complete);
     assert_eq!(unknown_usage.unknown_models, ["unknown-model"]);
 }
 

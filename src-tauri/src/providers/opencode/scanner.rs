@@ -210,9 +210,14 @@ fn aggregate_history(
                     accumulator.add(date, record.tokens, cost, &record.model)
                 }
             }
+        } else if record.tokens > 0 {
+            accumulator.add_unpriced_variant(date, record.tokens, &record.model, &record.model);
         }
-        if record.incomplete_cost || (record.cost.is_none() && record.tokens > 0) {
-            accumulator.add_unknown_model(date, &record.model);
+        if record.tokens > 0 && (record.incomplete_cost || record.cost.is_none()) {
+            accumulator.mark_incomplete(date);
+            if record.unknown_model {
+                accumulator.add_unknown_model(date, &record.model);
+            }
         }
     }
     accumulator.build(now, USAGE_SOURCE_NOTE)
@@ -239,6 +244,7 @@ mod unit_tests {
                 CostProvenance::Estimated
             },
             incomplete_cost: cost.is_none(),
+            unknown_model: false,
         }
     }
 
@@ -289,5 +295,98 @@ mod unit_tests {
 
         let estimated = aggregate_history([record(100, Some(1.0), false)], now);
         assert!(estimated.today.unwrap().cost_estimated);
+    }
+}
+
+#[cfg(test)]
+mod unpriced_regressions {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn unknown_and_partial_records_keep_tokens_and_only_known_costs() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        for cost in [None, Some(0.5)] {
+            let history = aggregate_history(
+                [UsageRecord {
+                    timestamp: now,
+                    model: "model".into(),
+                    tokens: 110,
+                    cost,
+                    cost_provenance: CostProvenance::Exact,
+                    incomplete_cost: true,
+                    unknown_model: false,
+                }],
+                now,
+            );
+            let period = history.today.unwrap();
+            assert_eq!(period.tokens, 110);
+            assert_eq!(period.estimated_cost_usd, cost);
+            assert!(!period.estimate_complete);
+            assert!(period.unknown_models.is_empty());
+            assert_eq!(history.daily[0].estimated_cost_usd, cost);
+            let model = &period.model_breakdown.unwrap().models[0];
+            assert_eq!(model.total_tokens, 110);
+            assert_eq!(model.cost_usd, cost);
+        }
+    }
+}
+
+#[cfg(test)]
+mod completeness_cause_regressions {
+    use super::super::record::{parse_message, parse_part};
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn parsed_cost_gaps_do_not_mislabel_known_models_in_the_dto() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
+        let pricing = crate::pricing::test_bundled_pricing();
+        for (model, known) in [("gpt-6-astra", true), ("missing-model", false)] {
+            for subtotal in [false, true] {
+                let message = parse_message(
+                    "s".into(),
+                    "m".into(),
+                    Some(now.timestamp()),
+                    &serde_json::json!({
+                        "role": "assistant", "providerID": "opencode", "modelID": model,
+                        "tokens": { "input": 100, "output": 10, "total": 110 }, "cost": -1
+                    }),
+                )
+                .unwrap();
+                let parts = if subtotal {
+                    vec![
+                        parse_part(&serde_json::json!({
+                            "type": "step-finish", "tokens": { "input": 50 }, "cost": 0.5
+                        }))
+                        .unwrap(),
+                        parse_part(&serde_json::json!({
+                            "type": "step-finish", "tokens": { "input": 60 }, "cost": -1
+                        }))
+                        .unwrap(),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                let record = message.into_usage(&parts, &pricing);
+                assert_eq!(record.unknown_model, !known);
+                let dto = serde_json::to_value(aggregate_history([record], now)).unwrap();
+                assert_eq!(dto["today"]["tokens"], 110);
+                assert_eq!(dto["today"]["estimateComplete"], false);
+                assert_eq!(dto["last30Days"]["estimateComplete"], false);
+                assert_eq!(
+                    dto["today"]["estimatedCostUsd"],
+                    serde_json::json!(subtotal.then_some(0.5))
+                );
+                assert_eq!(
+                    dto["today"]["unknownModels"],
+                    if known {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::json!([model])
+                    }
+                );
+            }
+        }
     }
 }

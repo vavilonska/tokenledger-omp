@@ -154,6 +154,7 @@ pub fn catalog_from_compact(data: &[u8]) -> Result<PricingCatalog, PricingCodecE
                     cache_read_is_explicit: model.cre.unwrap_or(true),
                     long_context_threshold_tokens: 200_000,
                     fast_multiplier: model.fast.unwrap_or(1.0),
+                    ultrafast_multiplier: None,
                 },
             )
         })

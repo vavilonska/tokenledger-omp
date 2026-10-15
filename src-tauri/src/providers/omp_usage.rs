@@ -12,7 +12,10 @@ use walkdir::WalkDir;
 
 use crate::{
     pricing::{ModelPricing, TokenBreakdown},
-    providers::{codex::local_usage::estimate_token_cost, daily_usage::DailyUsageAccumulator},
+    providers::{
+        codex::local_usage::{estimate_token_cost, model_has_rates},
+        daily_usage::DailyUsageAccumulator,
+    },
     storage::Storage,
 };
 
@@ -175,7 +178,7 @@ pub(super) fn scan_sessions_into(
         source.cache_key,
         source.identity_key,
         "codex",
-        3,
+        4,
         1,
         &paths,
         parse_jsonl,
@@ -216,6 +219,16 @@ pub(super) fn scan_sessions_into(
     let mut priced_events = Vec::new();
 
     for event in events.iter().filter(|event| event.timestamp <= now) {
+        // Cancelled/error replies with no usage cannot make a priced period partial.
+        if event.total == 0
+            && event.input == 0
+            && event.output == 0
+            && event.cache_read == 0
+            && event.cache_write == 0
+            && event.cache_write_1h == 0
+        {
+            continue;
+        }
         // Entry IDs are only eight hex characters. A fork inherits the timestamp and
         // model too, while an unrelated request may legitimately reuse the short ID.
         let duplicate_id = event
@@ -229,28 +242,54 @@ pub(super) fn scan_sessions_into(
         if duplicate_id || duplicate_response {
             continue;
         }
-        let Some(cost) = estimate_token_cost(
-            &event.timestamp,
-            &event.model,
-            TokenBreakdown {
-                input: event.input,
-                output: event.output,
-                cache_read: event.cache_read,
-                cache_write_5m: event.cache_write.saturating_sub(event.cache_write_1h),
-                cache_write_1h: event.cache_write_1h,
-                is_fast: event.is_fast,
-            },
-            pricing,
-        ) else {
+        let cost = event
+            .speed
+            .filter(|_| event.has_complete_usage())
+            .and_then(|speed| {
+                estimate_token_cost(
+                    &event.timestamp,
+                    &event.model,
+                    TokenBreakdown {
+                        input: event.input,
+                        output: event.output,
+                        cache_read: event.cache_read,
+                        cache_write_5m: event.cache_write.saturating_sub(event.cache_write_1h),
+                        cache_write_1h: event.cache_write_1h,
+                        speed,
+                    },
+                    pricing,
+                )
+            });
+        let Some(cost) = cost else {
             let date = event.timestamp.with_timezone(&Local).date_naive();
+            let unknown_model = !model_has_rates(&event.timestamp, &event.model, pricing);
             if event.timestamp >= since {
-                accumulator.add_unknown_model(date, &event.model);
+                accumulator.add_unpriced_variant(date, event.total, &event.model, source.label);
+                if unknown_model {
+                    accumulator.add_unknown_model(date, &event.model);
+                }
             }
             if session_start.is_some_and(|start| event.timestamp >= start) {
-                session_accumulator.add_unknown_model(date, &event.model);
+                session_accumulator.add_unpriced_variant(
+                    date,
+                    event.total,
+                    &event.model,
+                    source.label,
+                );
+                if unknown_model {
+                    session_accumulator.add_unknown_model(date, &event.model);
+                }
             }
             if weekly_start.is_some_and(|start| event.timestamp >= start) {
-                weekly_accumulator.add_unknown_model(date, &event.model);
+                weekly_accumulator.add_unpriced_variant(
+                    date,
+                    event.total,
+                    &event.model,
+                    source.label,
+                );
+                if unknown_model {
+                    weekly_accumulator.add_unknown_model(date, &event.model);
+                }
             }
             priced_events.push(PricedOmpEvent {
                 timestamp: event.timestamp,
@@ -440,6 +479,8 @@ fn home_directory() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    mod regression;
+
     use std::{collections::HashMap, fs};
 
     use chrono::{TimeZone, Utc};
@@ -529,6 +570,7 @@ mod tests {
             "type": "message", "id": id, "timestamp": timestamp,
             "message": {
                 "role": "assistant", "provider": "openai-codex", "model": "gpt-test",
+                "serviceTier": "default",
                 "usage": {
                     "input": 100, "output": 20, "cacheRead": 50, "cacheWrite": 10,
                     "totalTokens": 180, "cost": {"total": 0}
@@ -814,10 +856,10 @@ mod tests {
             .unwrap();
         let mut legacy = serde_json::to_value(&events).unwrap();
         for event in legacy.as_array_mut().unwrap() {
-            event
-                .as_object_mut()
-                .unwrap()
-                .remove("anonymous_occurrence");
+            let event = event.as_object_mut().unwrap();
+            event.remove("anonymous_occurrence");
+            event.remove("speed");
+            event.insert("is_fast".into(), serde_json::json!(true));
         }
         storage
             .save_log_events(
@@ -903,6 +945,7 @@ mod tests {
             let period = accumulator.build(now, "test").last_30_days.unwrap();
             assert!(!period.estimate_complete);
             assert_eq!(period.unknown_models, ["unknown-omp-model"]);
+            assert_eq!(period.tokens, 360);
         }
     }
 

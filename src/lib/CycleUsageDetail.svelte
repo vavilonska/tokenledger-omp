@@ -29,7 +29,7 @@
 
   function sourceTotals(cycle: ResetCycleUsage) {
     const clients = ['Codex', 'Oh My Pi', 'pi'];
-    const totals: Record<string, number> = {};
+    const totals: Record<string, number | null> = {};
     for (const model of cycle.usage.modelBreakdown?.models ?? []) {
       for (const variant of model.variants ?? []) {
         const source = clients.find(
@@ -38,10 +38,11 @@
             (model.model === 'Other' && variant.model.endsWith(` · ${client}`)),
         );
         if (!source) continue;
-        totals[source] = (totals[source] ?? 0) + (variant.costUsd ?? 0);
+        if (!(source in totals)) totals[source] = null;
+        if (variant.costUsd !== null) totals[source] = (totals[source] ?? 0) + variant.costUsd;
       }
     }
-    return Object.entries(totals).sort((left, right) => right[1] - left[1]);
+    return Object.entries(totals).sort((left, right) => (right[1] ?? -1) - (left[1] ?? -1));
   }
 </script>
 
@@ -66,10 +67,14 @@
           <span title={costTooltip(cycle.usage.estimatedCostUsd, credits)}
             >{cycle.usage.estimatedCostUsd == null
               ? '—'
-              : costReading(cycle.usage.estimatedCostUsd, credits)} used</span
+              : `${costReading(cycle.usage.estimatedCostUsd, credits)}${cycle.usage.estimateComplete ? '' : ' partial'}`}
+            used</span
           >
-          <span title={costTooltip(cycle.usage.estimatedLimitUsd, credits)}
-            >{cycle.usage.estimatedLimitUsd == null
+          <span
+            title={cycle.usage.estimateComplete
+              ? costTooltip(cycle.usage.estimatedLimitUsd, credits)
+              : undefined}
+            >{!cycle.usage.estimateComplete || cycle.usage.estimatedLimitUsd == null
               ? 'quota unavailable'
               : `~${costReading(cycle.usage.estimatedLimitUsd, credits)} quota`}</span
           >
@@ -82,7 +87,11 @@
           <div class="cycle-sources">
             {#each sources as source (source[0])}
               <span title={costTooltip(source[1], credits)}
-                >{source[0]} {costReading(source[1], credits)}</span
+                >{source[0]}
+                {source[1] === null ? '—' : costReading(source[1], credits)}{source[1] !== null &&
+                !cycle.usage.estimateComplete
+                  ? ' partial'
+                  : ''}</span
               >
             {/each}
           </div>

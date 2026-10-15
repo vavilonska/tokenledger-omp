@@ -1,9 +1,10 @@
-//! Codex purchased-credit rate card, verified 2026-09-30:
+//! Codex purchased-credit rate card, verified 2026-10-15:
 //! https://learn.chatgpt.com/docs/pricing#token-rates
 //! https://learn.chatgpt.com/docs/agent-configuration/speed
 //! Kept separate from API catalogs, promotions, Batch/Flex and API Fast rates.
 //! Fast uses 2x purchased credits/PAYG, not the 2.5x included-subscription multiplier.
-use super::{ModelPricing, TokenBreakdown};
+//! Ultrafast uses 6x purchased credits/PAYG on Astra and Sol 6.1, not included quota's 8x.
+use super::{ModelPricing, RequestSpeed, TokenBreakdown};
 
 pub const CREDITS_PER_USD: f64 = 25.0;
 
@@ -11,12 +12,35 @@ pub const CREDITS_PER_USD: f64 = 25.0;
 /// Only published credit rates are supported. Spark/unlisted models remain unknown.
 pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdown) -> Option<f64> {
     let canonical = pricing.supplement.canonical_name(model).unwrap_or(model);
-    let base = canonical.strip_suffix("-fast").unwrap_or(canonical);
-    let fast = tokens.is_fast || base != canonical;
+    let (base, speed) = if let Some(base) = canonical.strip_suffix("-ultrafast") {
+        (
+            base,
+            if tokens.speed == RequestSpeed::Standard {
+                RequestSpeed::Ultrafast
+            } else {
+                tokens.speed
+            },
+        )
+    } else if let Some(base) = canonical.strip_suffix("-fast") {
+        (
+            base,
+            if tokens.speed == RequestSpeed::Ultrafast {
+                RequestSpeed::Ultrafast
+            } else {
+                RequestSpeed::Fast
+            },
+        )
+    } else {
+        (canonical, tokens.speed)
+    };
     static DATED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"-\d{4}-?\d{2}-?\d{2}$").expect("valid date regex")
     });
     let base = DATED.replace(base, "");
+    if canonical.ends_with("-ultrafast") && !matches!(base.as_ref(), "gpt-6-astra" | "gpt-6.1-sol")
+    {
+        return None;
+    }
     let (input, cached, output, fast_multiplier) = match base.as_ref() {
         "gpt-6-astra" => (250.0, 25.0, 1250.0, 2.0),
         "gpt-6.1-sol" => (50.0, 2.5, 250.0, 2.0),
@@ -32,6 +56,14 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
         "gpt-5.4-mini" => (18.75, 1.875, 113.0, 2.0),
         _ => return None,
     };
+    let multiplier = match speed {
+        RequestSpeed::Standard => 1.0,
+        RequestSpeed::Fast => fast_multiplier,
+        RequestSpeed::Ultrafast => match base.as_ref() {
+            "gpt-6-astra" | "gpt-6.1-sol" => 6.0,
+            _ => return None,
+        },
+    };
     // The credit card publishes input/read/output rates; cache writes are not charged.
     // Do not silently apply API-only long-context or discount rules to this card.
     Some(
@@ -40,7 +72,7 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
             + tokens.output as f64 * output)
             / 1_000_000.0
             / CREDITS_PER_USD
-            * if fast { fast_multiplier } else { 1.0 },
+            * multiplier,
     )
 }
 
@@ -54,7 +86,7 @@ mod tests {
         let pricing = test_bundled_pricing();
         let tokens = TokenBreakdown {
             input: 1_000_000,
-            is_fast: true,
+            speed: RequestSpeed::Fast,
             ..Default::default()
         };
         for (model, expected) in [

@@ -12,8 +12,8 @@ use walkdir::WalkDir;
 
 use crate::{
     models::{QuotaWindow, ResetCycleUsage, UsageHistory, UsagePeriod},
-    pricing::{ModelPricing, ModelRates, TokenBreakdown},
-    storage::Storage,
+    pricing::{ModelPricing, ModelRates, RequestSpeed, TokenBreakdown},
+    storage::{CycleRecovery, Storage, StoredResetCycle},
 };
 
 use super::CodexError;
@@ -32,13 +32,34 @@ pub struct TokenEvent {
     pub output: u64,
     pub reasoning: u64,
     pub total: u64,
-    pub is_fast: bool,
+    #[serde(
+        default,
+        alias = "is_fast",
+        deserialize_with = "deserialize_codex_speed"
+    )]
+    pub speed: RequestSpeed,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 5;
-const HISTORY_LOOKBACK_DAYS: u64 = 120;
+// Codex's legacy boolean was derived directly from its persisted request tier.
+fn deserialize_codex_speed<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RequestSpeed, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredSpeed {
+        Current(RequestSpeed),
+        Legacy(bool),
+    }
+    Ok(match StoredSpeed::deserialize(deserializer)? {
+        StoredSpeed::Current(speed) => speed,
+        StoredSpeed::Legacy(true) => RequestSpeed::Fast,
+        StoredSpeed::Legacy(false) => RequestSpeed::Standard,
+    })
+}
+
+const LOG_CACHE_SCHEMA_VERSION: u8 = 6;
 const CYCLE_CLUSTER_SECONDS: i64 = 5 * 60;
 
 struct CycleBucket {
@@ -46,6 +67,9 @@ struct CycleBucket {
     ended_at: Option<DateTime<Utc>>,
     scheduled_reset_at: DateTime<Utc>,
     used_percent: f64,
+    observed_tokens: u64,
+    recovered_tokens: u64,
+    recovery: Option<CycleRecovery>,
     accumulator: DailyUsageAccumulator,
 }
 
@@ -96,12 +120,16 @@ fn scan_usage_basis(
     let home = home_directory();
     let configured_home = crate::provider_environment::value("CODEX_HOME");
     let homes = codex_homes(configured_home.as_deref().map(OsStr::new), &home);
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(HISTORY_LOOKBACK_DAYS))
-        .unwrap_or(NaiveDate::MIN);
-    let events = scan_codex_events(storage, &homes, since_date, account_identity)?;
+    // Retained facts are needed even when their source files and recent anchors are gone.
+    let events = scan_codex_events(storage, &homes, NaiveDate::MIN, account_identity)?;
+    let persisted_cycles = match account_identity {
+        Some(identity) => storage.load_reset_cycles(
+            "codex",
+            identity,
+            cycle_storage_key(pricing.codex_credit_mode),
+        )?,
+        None => Vec::new(),
+    };
 
     let session_start = super::cycle_start(quotas, "session", now);
     let weekly_start = super::cycle_start(quotas, "weekly", now);
@@ -132,7 +160,7 @@ fn scan_usage_basis(
     if let Some(anchor) = current_weekly_anchor(quotas, now) {
         anchors.push(anchor);
     }
-    let mut cycle_buckets = build_cycle_buckets(anchors, now);
+    let mut cycle_buckets = restore_cycle_buckets(anchors, &persisted_cycles, now);
     aggregate_into(
         &events,
         now,
@@ -152,6 +180,7 @@ fn scan_usage_basis(
             event.total,
             event.cost,
             "Oh My Pi",
+            event.cost.is_none() && !model_has_rates(&event.timestamp, &event.model, pricing),
         );
     }
     let includes_pi = match pi_usage::scan_into(
@@ -194,14 +223,22 @@ fn scan_usage_basis(
         source_note,
         quota_used_percent(quotas, "session"),
     );
-    usage.weekly_cycle = cycle_period(
-        weekly_accumulator,
+    let mut fresh_cycles = build_cycle_history(cycle_buckets, now, source_note);
+    usage.weekly_cycle = current_weekly_period(
+        &mut fresh_cycles,
+        weekly_start,
         now,
-        source_note,
         quota_used_percent(quotas, "weekly"),
-    );
-    let fresh_cycles = build_cycle_history(cycle_buckets, now, source_note);
-    usage.weekly_cycles = merge_persisted_cycles(
+    )
+    .or_else(|| {
+        cycle_period(
+            weekly_accumulator,
+            now,
+            source_note,
+            quota_used_percent(quotas, "weekly"),
+        )
+    });
+    usage.weekly_cycles = persist_cycles(
         storage,
         account_identity,
         fresh_cycles,
@@ -255,9 +292,83 @@ fn build_cycle_buckets(
             ended_at: merged.get(index + 1).map(|anchor| anchor.started_at),
             scheduled_reset_at: merged[index].scheduled_reset_at,
             used_percent: merged[index].used_percent,
+            observed_tokens: 0,
+            recovered_tokens: 0,
+            recovery: None,
             accumulator: DailyUsageAccumulator::default(),
         })
         .collect()
+}
+
+fn restore_cycle_buckets(
+    mut anchors: Vec<omp_usage::QuotaCycleAnchor>,
+    persisted: &[StoredResetCycle],
+    now: DateTime<Utc>,
+) -> Vec<CycleBucket> {
+    let mut buckets: Vec<_> = persisted
+        .iter()
+        .map(|record| {
+            let cycle = &record.cycle;
+            CycleBucket {
+                started_at: cycle.started_at,
+                ended_at: cycle.ended_at,
+                scheduled_reset_at: cycle.scheduled_reset_at,
+                used_percent: cycle.usage.quota_used_percent.unwrap_or_default(),
+                observed_tokens: 0,
+                recovered_tokens: 0,
+                recovery: Some(record.recovery.clone()),
+                accumulator: DailyUsageAccumulator::default(),
+            }
+        })
+        .collect();
+    // Reject conflicts before clustering: an interior anchor close to a stored
+    // end must not swallow a valid anchor exactly at that end.
+    anchors.retain(|candidate| {
+        if candidate.started_at > now {
+            return false;
+        }
+        if let Some(bucket) = buckets.iter_mut().find(|bucket| {
+            (bucket.started_at - candidate.started_at)
+                .num_seconds()
+                .abs()
+                <= CYCLE_CLUSTER_SECONDS
+        }) {
+            bucket.used_percent = bucket.used_percent.max(candidate.used_percent);
+            return false;
+        }
+        // Closed boundaries are authoritative. An open snapshot cannot be split
+        // inside its attested coverage without inventing a token attribution.
+        if let Some(bucket) = buckets.iter_mut().find(|bucket| {
+            candidate.started_at > bucket.started_at
+                && match bucket.ended_at {
+                    Some(end) => candidate.started_at < end,
+                    None => bucket
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|recovery| candidate.started_at <= recovery.covered_until),
+                }
+        }) {
+            if bucket.ended_at.is_none() {
+                if let Some(recovery) = &mut bucket.recovery {
+                    recovery.boundary_conflict = true;
+                }
+            }
+            return false;
+        }
+        true
+    });
+    for mut candidate in build_cycle_buckets(anchors, now) {
+        // Recompute adjacency only after rejecting conflicting candidates.
+        candidate.ended_at = None;
+        buckets.push(candidate);
+    }
+    buckets.sort_by_key(|bucket| bucket.started_at);
+    for index in 0..buckets.len().saturating_sub(1) {
+        if buckets[index].ended_at.is_none() {
+            buckets[index].ended_at = Some(buckets[index + 1].started_at);
+        }
+    }
+    buckets
 }
 
 fn add_cycle_event(
@@ -267,6 +378,7 @@ fn add_cycle_event(
     tokens: u64,
     cost: Option<f64>,
     source: &str,
+    unknown_model: bool,
 ) {
     let Some(bucket) = buckets.iter_mut().rev().find(|bucket| {
         timestamp >= bucket.started_at
@@ -274,11 +386,24 @@ fn add_cycle_event(
     }) else {
         return;
     };
+    bucket.observed_tokens = bucket.observed_tokens.saturating_add(tokens);
+    if bucket
+        .recovery
+        .as_ref()
+        .is_some_and(|recovery| timestamp <= recovery.covered_until)
+    {
+        bucket.recovered_tokens = bucket.recovered_tokens.saturating_add(tokens);
+    }
     let date = timestamp.with_timezone(&Local).date_naive();
     if let Some(cost) = cost {
         add_priced_event(&mut bucket.accumulator, date, model, tokens, cost, source);
     } else if tokens > 0 {
-        bucket.accumulator.add_unknown_model(date, model);
+        bucket
+            .accumulator
+            .add_unpriced_variant(date, tokens, model, source);
+        if unknown_model {
+            bucket.accumulator.add_unknown_model(date, model);
+        }
     }
 }
 
@@ -286,67 +411,113 @@ fn build_cycle_history(
     buckets: Vec<CycleBucket>,
     now: DateTime<Utc>,
     source_note: &str,
-) -> Vec<ResetCycleUsage> {
+) -> Vec<StoredResetCycle> {
     buckets
         .into_iter()
-        .filter_map(|bucket| {
-            let usage = cycle_period(
+        .filter_map(|mut bucket| {
+            let had_snapshot = bucket.recovery.is_some();
+            let recovery = bucket.recovery.unwrap_or(CycleRecovery {
+                baseline_tokens: bucket.observed_tokens,
+                covered_until: now,
+                boundary_conflict: false,
+            });
+            let missing_tokens = if had_snapshot {
+                recovery
+                    .baseline_tokens
+                    .saturating_sub(bucket.recovered_tokens)
+            } else {
+                0
+            };
+            if missing_tokens > 0 {
+                bucket.accumulator.add_unpriced_variant(
+                    bucket.started_at.with_timezone(&Local).date_naive(),
+                    missing_tokens,
+                    "Unattributed",
+                    "Retained facts unavailable",
+                );
+            }
+            let mut usage = cycle_period(
                 bucket.accumulator,
                 now,
                 source_note,
                 Some(bucket.used_percent),
-            )?;
-            Some(ResetCycleUsage {
-                started_at: bucket.started_at,
-                ended_at: bucket.ended_at,
-                scheduled_reset_at: bucket.scheduled_reset_at,
-                usage,
+            )
+            .or_else(|| {
+                had_snapshot.then_some(UsagePeriod {
+                    tokens: 0,
+                    estimated_cost_usd: Some(0.0),
+                    estimated_limit_usd: None,
+                    quota_used_percent: Some(bucket.used_percent),
+                    cost_estimated: true,
+                    estimate_complete: true,
+                    model_breakdown: None,
+                    unknown_models: Vec::new(),
+                })
+            })?;
+            if recovery.boundary_conflict && usage.tokens > 0 {
+                usage.estimate_complete = false;
+                usage.estimated_limit_usd = None;
+            }
+            Some(StoredResetCycle {
+                cycle: ResetCycleUsage {
+                    started_at: bucket.started_at,
+                    ended_at: bucket.ended_at,
+                    scheduled_reset_at: bucket.scheduled_reset_at,
+                    usage,
+                },
+                recovery,
             })
         })
         .collect()
 }
 
-fn merge_persisted_cycles(
-    storage: &Storage,
-    account_identity: Option<&str>,
-    fresh: Vec<ResetCycleUsage>,
-    credit_mode: bool,
-) -> Result<Vec<ResetCycleUsage>, CodexError> {
-    let Some(identity) = account_identity else {
-        let mut fresh = fresh;
-        fresh.sort_by_key(|cycle| std::cmp::Reverse(cycle.started_at));
-        return Ok(fresh);
-    };
-    let key = if credit_mode {
+fn current_weekly_period(
+    cycles: &mut [StoredResetCycle],
+    weekly_start: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    used_percent: Option<f64>,
+) -> Option<UsagePeriod> {
+    let start = weekly_start?;
+    let cycle = cycles
+        .iter_mut()
+        .map(|record| &mut record.cycle)
+        .find(|cycle| {
+            cycle.started_at <= now
+                && cycle.ended_at.is_none_or(|end| now < end)
+                && (start >= cycle.started_at
+                    || (start - cycle.started_at).num_seconds().abs() <= CYCLE_CLUSTER_SECONDS)
+        })?;
+    // Use the same recovered subtotal as history, including its missing balance.
+    let usage = &mut cycle.usage;
+    usage.quota_used_percent = used_percent;
+    usage.estimated_limit_usd = usage
+        .estimated_cost_usd
+        .filter(|cost| usage.estimate_complete && *cost > 0.0)
+        .zip(used_percent.filter(|percent| *percent > 0.0))
+        .map(|(cost, percent)| cost / (percent / 100.0));
+    Some(usage.clone())
+}
+
+fn cycle_storage_key(credit_mode: bool) -> &'static str {
+    if credit_mode {
         "weekly-credits-v1"
     } else {
         "weekly-api-v2"
-    };
-    let mut cycles = storage.load_reset_cycles("codex", identity, key)?;
-    for cycle in fresh {
-        let key = cycle
-            .started_at
-            .timestamp()
-            .div_euclid(CYCLE_CLUSTER_SECONDS);
-        if let Some(existing) = cycles.iter_mut().find(|existing| {
-            existing
-                .started_at
-                .timestamp()
-                .div_euclid(CYCLE_CLUSTER_SECONDS)
-                == key
-        }) {
-            *existing = cycle;
-        } else {
-            cycles.push(cycle);
-        }
     }
-    cycles.sort_by_key(|cycle| cycle.started_at);
-    for index in 0..cycles.len().saturating_sub(1) {
-        cycles[index].ended_at = Some(cycles[index + 1].started_at);
+}
+
+fn persist_cycles(
+    storage: &Storage,
+    account_identity: Option<&str>,
+    mut cycles: Vec<StoredResetCycle>,
+    credit_mode: bool,
+) -> Result<Vec<ResetCycleUsage>, CodexError> {
+    cycles.sort_by_key(|record| record.cycle.started_at);
+    if let Some(identity) = account_identity {
+        storage.save_reset_cycles("codex", identity, cycle_storage_key(credit_mode), &cycles)?;
     }
-    storage.save_reset_cycles("codex", identity, key, &cycles)?;
     cycles.reverse();
-    Ok(cycles)
+    Ok(cycles.into_iter().map(|record| record.cycle).collect())
 }
 
 fn quota_used_percent(quotas: &[QuotaWindow], id: &str) -> Option<f64> {
@@ -367,7 +538,7 @@ fn cycle_period(
         period.quota_used_percent = Some(used_percent);
         period.estimated_limit_usd = period
             .estimated_cost_usd
-            .filter(|cost| *cost > 0.0)
+            .filter(|cost| period.estimate_complete && *cost > 0.0)
             .map(|cost| cost / (used_percent / 100.0));
     }
     Some(period)
@@ -481,7 +652,7 @@ fn discover_session_files(homes: &[PathBuf]) -> Vec<PathBuf> {
 
 pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
     let mut current_model: Option<String> = None;
-    let mut current_tier_is_fast = false;
+    let mut current_speed = RequestSpeed::Standard;
     let mut previous_totals: Option<RawUsage> = None;
     let mut saw_session_meta = false;
     let mut session_id: Option<String> = None;
@@ -509,7 +680,7 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
 
         if object_type == Some("turn_context") {
             if let Some(tier) = payload.and_then(service_tier) {
-                current_tier_is_fast = matches!(tier, "fast" | "priority");
+                current_speed = request_speed(tier);
             }
             if let Some(model) = model_name(object.get("payload")) {
                 current_model = Some(model);
@@ -547,7 +718,7 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
         let payload_type = payload.get("type").and_then(Value::as_str);
         if payload_type == Some("thread_settings_applied") {
             if let Some(tier) = service_tier(payload) {
-                current_tier_is_fast = matches!(tier, "fast" | "priority");
+                current_speed = request_speed(tier);
             }
             continue;
         }
@@ -636,10 +807,20 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
             output: usage.output,
             reasoning: usage.reasoning,
             total: usage.total,
-            is_fast: current_tier_is_fast,
+            speed: service_tier(payload)
+                .map(request_speed)
+                .unwrap_or(current_speed),
         });
     }
     events
+}
+
+fn request_speed(tier: &str) -> RequestSpeed {
+    match tier {
+        "ultrafast" => RequestSpeed::Ultrafast,
+        "fast" | "priority" => RequestSpeed::Fast,
+        _ => RequestSpeed::Standard,
+    }
 }
 
 fn service_tier(payload: &Value) -> Option<&str> {
@@ -863,6 +1044,7 @@ fn aggregate_into(
                 event.total,
                 Some(cost),
                 "Codex",
+                false,
             );
             if date < since {
                 continue;
@@ -889,14 +1071,24 @@ fn aggregate_into(
                 );
             }
         } else if event.total > 0 {
+            let unknown_model = !model_has_rates(&event.timestamp, &event.model, pricing);
             if date >= since {
-                accumulator.add_unknown_model(date, &event.model);
+                accumulator.add_unpriced_variant(date, event.total, &event.model, "Codex");
+                if unknown_model {
+                    accumulator.add_unknown_model(date, &event.model);
+                }
             }
             if session_start.is_some_and(|start| event.timestamp >= start) {
-                session_accumulator.add_unknown_model(date, &event.model);
+                session_accumulator.add_unpriced_variant(date, event.total, &event.model, "Codex");
+                if unknown_model {
+                    session_accumulator.add_unknown_model(date, &event.model);
+                }
             }
             if weekly_start.is_some_and(|start| event.timestamp >= start) {
-                weekly_accumulator.add_unknown_model(date, &event.model);
+                weekly_accumulator.add_unpriced_variant(date, event.total, &event.model, "Codex");
+                if unknown_model {
+                    weekly_accumulator.add_unknown_model(date, &event.model);
+                }
             }
             add_cycle_event(
                 cycle_buckets,
@@ -905,6 +1097,7 @@ fn aggregate_into(
                 event.total,
                 None,
                 "Codex",
+                unknown_model,
             );
         }
     }
@@ -929,11 +1122,35 @@ fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
             input: event.input.saturating_sub(event.cached),
             cache_read: event.cached,
             output: event.output,
-            is_fast: event.is_fast,
+            speed: event.speed,
             ..TokenBreakdown::default()
         },
         pricing,
     )
+}
+
+/// Whether the model has base rates for this display basis, independently of request speed.
+pub(crate) fn model_has_rates(
+    timestamp: &DateTime<Utc>,
+    raw_model: &str,
+    pricing: &ModelPricing,
+) -> bool {
+    let model = if raw_model.trim() == "codex-auto-review" {
+        auto_review_fallback(timestamp)
+    } else {
+        raw_model.trim()
+    };
+    let canonical = pricing.supplement.canonical_name(model).unwrap_or(model);
+    let base = canonical
+        .strip_suffix("-ultrafast")
+        .or_else(|| canonical.strip_suffix("-fast"))
+        .unwrap_or(canonical);
+    if pricing.codex_credit_mode {
+        crate::pricing::codex_credits::equivalent_usd(pricing, base, TokenBreakdown::default())
+            .is_some()
+    } else {
+        pricing.resolve(base).is_some() || pricing.resolve(canonical).is_some()
+    }
 }
 
 pub(crate) fn estimate_token_cost(
@@ -952,26 +1169,40 @@ pub(crate) fn estimate_token_cost(
         return crate::pricing::codex_credits::equivalent_usd(pricing, model, tokens);
     }
     let canonical = pricing.supplement.canonical_name(model).unwrap_or(model);
-    let fast_base = canonical
-        .strip_suffix("-fast")
-        .filter(|base| !base.is_empty());
-    let rate_model = fast_base.unwrap_or(canonical);
-    let base_rates = pricing.resolve(rate_model);
-    let rates = base_rates.or_else(|| pricing.resolve(model))?;
-    let applies_fast_tier = if fast_base.is_some() {
-        base_rates.is_some()
+    let (rate_model, suffix_speed) = if let Some(base) = canonical.strip_suffix("-ultrafast") {
+        (base, RequestSpeed::Ultrafast)
+    } else if let Some(base) = canonical.strip_suffix("-fast") {
+        (base, RequestSpeed::Fast)
     } else {
-        tokens.is_fast
+        (canonical, RequestSpeed::Standard)
     };
-    Some(codex_cost(rates, tokens, rate_model, applies_fast_tier))
+    let rates = match pricing.resolve(rate_model) {
+        Some(rates) => rates,
+        None if suffix_speed == RequestSpeed::Fast && tokens.speed != RequestSpeed::Ultrafast => {
+            // A catalog may contain only an already-priced Fast model.
+            return codex_cost(
+                pricing.resolve(canonical)?,
+                tokens,
+                canonical,
+                RequestSpeed::Standard,
+            );
+        }
+        None => return None,
+    };
+    let speed = if tokens.speed == RequestSpeed::Standard {
+        suffix_speed
+    } else {
+        tokens.speed
+    };
+    codex_cost(rates, tokens, rate_model, speed)
 }
 
 fn codex_cost(
     mut rates: ModelRates,
     mut tokens: TokenBreakdown,
     model: &str,
-    fast_tier: bool,
-) -> f64 {
+    speed: RequestSpeed,
+) -> Option<f64> {
     if let Some((input, output, cache_read)) = codex_long_context_rates(model) {
         rates.input_above_200k_per_million = Some(input);
         rates.output_above_200k_per_million = Some(output);
@@ -984,7 +1215,7 @@ fn codex_cost(
         rates.cache_read_above_200k_per_million = rates.input_above_200k_per_million;
     }
     rates.fast_multiplier = codex_priority_multiplier(model, rates);
-    tokens.is_fast = fast_tier;
+    tokens.speed = speed;
     rates.cost_dollars(tokens, true)
 }
 
@@ -1052,7 +1283,7 @@ mod tests {
     use crate::{
         pricing::{
             test_bundled_pricing, ModelPricing, ModelRates, PricingCatalog, PricingSupplement,
-            TokenBreakdown,
+            RequestSpeed, TokenBreakdown,
         },
         providers::daily_usage::DailyUsageAccumulator,
         providers::log_usage::LogFileFingerprint,
@@ -1067,8 +1298,8 @@ mod tests {
 {"type":"turn_context","payload":{"model":"gpt-6-astra","service_tier":"default"}}
 {"timestamp":"2026-09-07T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100000,"cached_input_tokens":20000,"output_tokens":1000,"total_tokens":101000}}}}"#;
         let events = parse_jsonl(content);
-        assert!(events[0].is_fast);
-        assert!(!events[1].is_fast);
+        assert_eq!(events[0].speed, RequestSpeed::Fast);
+        assert_eq!(events[1].speed, RequestSpeed::Standard);
         let mut pricing = test_bundled_pricing();
         let api = aggregate(events.clone(), now, &pricing);
         pricing.codex_credit_mode = true;
@@ -1207,8 +1438,8 @@ mod tests {
 {"timestamp":"2026-07-10T08:02:00Z","type":"event_msg","payload":{"type":"thread_settings_applied","service_tier":"default"}}
 {"timestamp":"2026-07-10T08:03:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#;
         let events = parse_jsonl(content);
-        assert!(events[0].is_fast);
-        assert!(!events[1].is_fast);
+        assert_eq!(events[0].speed, RequestSpeed::Fast);
+        assert_eq!(events[1].speed, RequestSpeed::Standard);
     }
 
     #[test]
@@ -1464,7 +1695,7 @@ mod tests {
         let initial =
             scan_codex_events(&storage, std::slice::from_ref(&home), since, None).unwrap();
         assert_eq!(initial.len(), 1);
-        assert!(!initial[0].is_fast);
+        assert_eq!(initial[0].speed, RequestSpeed::Standard);
 
         fs::write(
             &first,
@@ -1480,7 +1711,37 @@ mod tests {
         let refreshed = scan_codex_events(&storage, &[home], since, None).unwrap();
         assert_eq!(refreshed.len(), 2);
         assert_eq!(refreshed.iter().map(|event| event.total).sum::<u64>(), 195);
-        assert!(refreshed.iter().all(|event| !event.is_fast));
+        assert!(refreshed
+            .iter()
+            .all(|event| event.speed == RequestSpeed::Standard));
+    }
+
+    #[test]
+    fn schema_six_recovers_ultrafast_from_source_and_keeps_it_after_deletion() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("codex");
+        fs::create_dir_all(home.join("sessions")).unwrap();
+        let path = home.join("sessions/ultrafast.jsonl");
+        fs::write(&path, r#"{"type":"turn_context","payload":{"model":"gpt-6-astra","service_tier":"ultrafast"}}
+{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#).unwrap();
+        let path = fs::canonicalize(path).unwrap();
+        let fingerprint = LogFileFingerprint::from_metadata(&fs::metadata(&path).unwrap()).unwrap();
+        let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+        storage.save_log_events("codex", &path, fingerprint.size, fingerprint.modified_nanos,
+            r#"{"schema_version":5,"events":[{"timestamp":"2026-07-10T10:00:00Z","model":"gpt-6-astra","input":100,"cached":0,"output":10,"reasoning":0,"total":110,"is_fast":false}]}"#).unwrap();
+        let events = scan_codex_events(
+            &storage,
+            std::slice::from_ref(&home),
+            NaiveDate::MIN,
+            Some("account"),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].speed, RequestSpeed::Ultrafast);
+        fs::remove_file(path).unwrap();
+        let retained =
+            scan_codex_events(&storage, &[home], NaiveDate::MIN, Some("account")).unwrap();
+        assert_eq!(retained, events);
     }
 
     #[test]
@@ -1573,7 +1834,7 @@ mod tests {
     }
 
     #[test]
-    fn period_breakdown_uses_model_names_and_excludes_unpriced_usage() {
+    fn period_breakdown_retains_unpriced_tokens() {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T08:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.4","info":{"last_token_usage":{"input_tokens":1000,"output_tokens":100,"total_tokens":1100}}}}
 {"timestamp":"2026-07-10T09:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":800,"output_tokens":100,"total_tokens":900}}}}
@@ -1583,7 +1844,7 @@ mod tests {
         let today = history.today.unwrap();
         let breakdown = today.model_breakdown.unwrap();
 
-        assert_eq!(today.tokens, 2_000);
+        assert_eq!(today.tokens, 2_500);
         assert_eq!(today.unknown_models, ["future-unpriced-model"]);
         assert_eq!(
             breakdown
@@ -1591,21 +1852,25 @@ mod tests {
                 .iter()
                 .map(|entry| entry.model.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5.4", "gpt-5.3-codex"]
+            ["gpt-5.4", "gpt-5.3-codex", "Other"]
         );
         assert_eq!(breakdown.source_note, "From your Codex logs (estimated)");
     }
 
     #[test]
-    fn unknown_only_usage_does_not_create_spend_periods() {
+    fn unknown_only_usage_retains_tokens_without_inventing_cost() {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let content = r#"{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"future-unpriced-model","info":{"last_token_usage":{"input_tokens":400,"output_tokens":100,"total_tokens":500}}}}"#;
         let pricing = test_bundled_pricing();
         let history = aggregate(parse_jsonl(content), now, &pricing);
 
-        assert!(history.today.is_none());
-        assert!(history.last_30_days.is_none());
-        assert!(history.daily.is_empty());
+        let today = history.today.unwrap();
+        assert_eq!(today.tokens, 500);
+        assert_eq!(today.estimated_cost_usd, None);
+        assert!(!today.estimate_complete);
+        assert_eq!(history.last_30_days.unwrap().estimated_cost_usd, None);
+        assert_eq!(history.daily[0].tokens, 500);
+        assert_eq!(history.daily[0].estimated_cost_usd, None);
         assert_eq!(history.unknown_models, ["future-unpriced-model"]);
     }
 
@@ -1637,13 +1902,13 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 1_000_000,
-            is_fast: false,
+            speed: RequestSpeed::Standard,
         };
         assert_eq!(estimate_cost(&event, &pricing), Some(2.0));
         assert_eq!(
             estimate_cost(
                 &TokenEvent {
-                    is_fast: true,
+                    speed: RequestSpeed::Fast,
                     ..event
                 },
                 &pricing
@@ -1673,7 +1938,7 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 1_000_000,
-            is_fast: false,
+            speed: RequestSpeed::Standard,
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(2.0));
@@ -1700,7 +1965,7 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 100_000,
-            is_fast: false,
+            speed: RequestSpeed::Standard,
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(0.2));
@@ -1725,7 +1990,7 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: input,
-            is_fast: false,
+            speed: RequestSpeed::Standard,
         };
 
         assert!((estimate_cost(&event(272_000), &pricing).unwrap() - 0.68).abs() < 0.000_001);
@@ -1806,7 +2071,7 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 100_000,
-            is_fast: true,
+            speed: RequestSpeed::Fast,
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(0.5));
@@ -1831,9 +2096,587 @@ mod tests {
             output: 0,
             reasoning: 0,
             total: 100_000,
-            is_fast: true,
+            speed: RequestSpeed::Fast,
         };
 
         assert_eq!(estimate_cost(&event, &pricing), Some(0.6));
+    }
+}
+
+#[cfg(test)]
+mod speed_and_cycle_regressions {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn old_cycle(started_at: DateTime<Utc>, tokens: u64) -> ResetCycleUsage {
+        let mut accumulator = DailyUsageAccumulator::default();
+        accumulator.add_variant(
+            started_at.with_timezone(&Local).date_naive(),
+            tokens,
+            999.0,
+            "gpt-6-astra",
+            "Codex",
+        );
+        ResetCycleUsage {
+            started_at,
+            ended_at: Some(started_at + chrono::Duration::days(6)),
+            scheduled_reset_at: started_at + chrono::Duration::days(7),
+            usage: cycle_period(accumulator, started_at, "old", Some(50.0)).unwrap(),
+        }
+    }
+
+    #[test]
+    fn ultrafast_turn_and_event_override_survive_persistence_and_price_once() {
+        let content = r#"{"type":"turn_context","payload":{"model":"gpt-6-astra","service_tier":"ultrafast"}}
+{"timestamp":"2026-07-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}
+{"timestamp":"2026-07-10T10:01:00Z","type":"event_msg","payload":{"type":"token_count","service_tier":"default","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#;
+        let events = parse_jsonl(content);
+        assert_eq!(events[0].speed, RequestSpeed::Ultrafast);
+        assert_eq!(events[1].speed, RequestSpeed::Standard);
+        let serialized = serde_json::to_value(&events[0]).unwrap();
+        assert_eq!(serialized["speed"], "ultrafast");
+        assert!(serialized.get("is_fast").is_none());
+        assert_eq!(
+            serde_json::from_value::<TokenEvent>(serialized.clone()).unwrap(),
+            events[0]
+        );
+        let mut legacy = serialized;
+        legacy.as_object_mut().unwrap().remove("speed");
+        legacy["is_fast"] = Value::Bool(true);
+        assert_eq!(
+            serde_json::from_value::<TokenEvent>(legacy).unwrap().speed,
+            RequestSpeed::Fast
+        );
+        let mut pricing = crate::pricing::test_bundled_pricing();
+        for credit_mode in [false, true] {
+            pricing.codex_credit_mode = credit_mode;
+            let standard = estimate_cost(&events[1], &pricing).unwrap();
+            let ultra = estimate_cost(&events[0], &pricing).unwrap();
+            assert!((ultra - standard * 6.0).abs() < 1e-12);
+            let mut alias = events[0].clone();
+            alias.model.push_str("-ultrafast");
+            assert_eq!(estimate_cost(&alias, &pricing), Some(ultra));
+            alias.model = "gpt-5.5".into();
+            assert_eq!(estimate_cost(&alias, &pricing), None);
+        }
+    }
+
+    #[test]
+    fn unpriced_tokens_survive_session_weekly_and_history_without_quota_extrapolation() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let start = now - chrono::Duration::hours(5);
+        let unknown = TokenEvent {
+            timestamp: now - chrono::Duration::hours(1),
+            model: "gpt-5.5".into(),
+            input: 100,
+            cached: 0,
+            output: 10,
+            reasoning: 0,
+            total: 110,
+            speed: RequestSpeed::Ultrafast,
+            source_id: Some("unknown".into()),
+        };
+        for mixed in [false, true] {
+            let mut events = vec![unknown.clone()];
+            if mixed {
+                events.push(TokenEvent {
+                    speed: RequestSpeed::Standard,
+                    source_id: Some("known".into()),
+                    ..unknown.clone()
+                });
+            }
+            let mut daily = DailyUsageAccumulator::default();
+            let mut session = DailyUsageAccumulator::default();
+            let mut weekly = DailyUsageAccumulator::default();
+            let mut buckets = build_cycle_buckets(
+                vec![omp_usage::QuotaCycleAnchor {
+                    started_at: start,
+                    scheduled_reset_at: start + chrono::Duration::days(7),
+                    used_percent: 50.0,
+                }],
+                now,
+            );
+            aggregate_into(
+                &events,
+                now,
+                &crate::pricing::test_bundled_pricing(),
+                &mut daily,
+                Some(start),
+                &mut session,
+                Some(start),
+                &mut weekly,
+                &mut buckets,
+            );
+            let historical = build_cycle_history(buckets, now, "test")
+                .pop()
+                .unwrap()
+                .cycle
+                .usage;
+            for period in [
+                daily.build(now, "test").today.unwrap(),
+                cycle_period(session, now, "test", Some(50.0)).unwrap(),
+                cycle_period(weekly, now, "test", Some(50.0)).unwrap(),
+                historical,
+            ] {
+                assert_eq!(period.tokens, if mixed { 220 } else { 110 });
+                assert_eq!(period.estimated_cost_usd.is_some(), mixed);
+                assert!(!period.estimate_complete);
+                assert_eq!(period.estimated_limit_usd, None);
+                assert!(period.unknown_models.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn deleted_source_retained_facts_reprice_old_cycles_with_original_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+        let home = directory.path().join("codex");
+        fs::create_dir_all(home.join("sessions")).unwrap();
+        let source = home.join("sessions/old.jsonl");
+        fs::write(&source, r#"{"timestamp":"2026-01-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-6-astra","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#).unwrap();
+        scan_codex_events(
+            &storage,
+            std::slice::from_ref(&home),
+            NaiveDate::MIN,
+            Some("account"),
+        )
+        .unwrap();
+        fs::remove_file(source).unwrap();
+        let events = scan_codex_events(&storage, &[home], NaiveDate::MIN, Some("account")).unwrap();
+        assert_eq!(events.len(), 1);
+        let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
+        let original = old_cycle(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(), 110);
+        let mut pricing = crate::pricing::test_bundled_pricing();
+        for credit_mode in [false, true] {
+            pricing.codex_credit_mode = credit_mode;
+            storage
+                .save_reset_cycles(
+                    "codex",
+                    "account",
+                    cycle_storage_key(credit_mode),
+                    &[StoredResetCycle {
+                        cycle: original.clone(),
+                        recovery: CycleRecovery {
+                            baseline_tokens: original.usage.tokens,
+                            covered_until: now,
+                            boundary_conflict: false,
+                        },
+                    }],
+                )
+                .unwrap();
+            let persisted = storage
+                .load_reset_cycles("codex", "account", cycle_storage_key(credit_mode))
+                .unwrap();
+            let mut buckets = restore_cycle_buckets(Vec::new(), &persisted, now);
+            let mut daily = DailyUsageAccumulator::default();
+            aggregate_into(
+                &events,
+                now,
+                &pricing,
+                &mut daily,
+                None,
+                &mut DailyUsageAccumulator::default(),
+                None,
+                &mut DailyUsageAccumulator::default(),
+                &mut buckets,
+            );
+            assert!(daily.build(now, "test").daily.is_empty());
+            let rebuilt = build_cycle_history(buckets, now, "test");
+            let saved = persist_cycles(&storage, Some("account"), rebuilt, credit_mode).unwrap();
+            assert_eq!(saved[0].started_at, original.started_at);
+            assert_eq!(saved[0].ended_at, original.ended_at);
+            assert_eq!(saved[0].scheduled_reset_at, original.scheduled_reset_at);
+            assert_eq!(
+                saved[0].usage.estimated_cost_usd,
+                estimate_cost(&events[0], &pricing)
+            );
+            assert!(saved[0].usage.estimate_complete);
+            assert_eq!(saved[0].usage.tokens, 110);
+        }
+    }
+
+    #[test]
+    fn missing_historical_facts_preserve_tokens_and_boundaries_not_stale_amounts() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
+        let original = old_cycle(now - chrono::Duration::days(180), 110);
+        let stored = StoredResetCycle {
+            cycle: original.clone(),
+            recovery: CycleRecovery {
+                baseline_tokens: original.usage.tokens,
+                covered_until: now,
+                boundary_conflict: false,
+            },
+        };
+        for recovered in [false, true] {
+            let mut buckets = restore_cycle_buckets(Vec::new(), std::slice::from_ref(&stored), now);
+            if recovered {
+                add_cycle_event(
+                    &mut buckets,
+                    original.started_at,
+                    "gpt-6-astra",
+                    50,
+                    Some(0.5),
+                    "Codex",
+                    false,
+                );
+            }
+            let cycles: Vec<_> = build_cycle_history(buckets, now, "test")
+                .into_iter()
+                .map(|record| record.cycle)
+                .collect();
+            assert_eq!(cycles.len(), 1);
+            assert_eq!(cycles[0].ended_at, original.ended_at);
+            assert_eq!(cycles[0].usage.tokens, 110);
+            assert_eq!(cycles[0].usage.estimated_cost_usd, recovered.then_some(0.5));
+            assert!(!cycles[0].usage.estimate_complete);
+            assert_eq!(cycles[0].usage.estimated_limit_usd, None);
+            assert!(cycles[0].usage.unknown_models.is_empty());
+            assert_eq!(cycles[0].usage.quota_used_percent, Some(50.0));
+        }
+    }
+}
+
+#[cfg(test)]
+mod model_classification_regressions {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn unsupported_speed_is_not_an_unknown_model_in_api_or_credit_dtos() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
+        let mut pricing = crate::pricing::test_bundled_pricing();
+        for credit_mode in [false, true] {
+            pricing.codex_credit_mode = credit_mode;
+            for (model, known) in [
+                ("gpt-5.5", true),
+                ("gpt-5.5-ultrafast", true),
+                ("missing-model", false),
+            ] {
+                assert_eq!(model_has_rates(&now, model, &pricing), known);
+                let history = aggregate(
+                    vec![TokenEvent {
+                        timestamp: now,
+                        model: model.into(),
+                        input: 100,
+                        cached: 0,
+                        output: 10,
+                        reasoning: 0,
+                        total: 110,
+                        speed: RequestSpeed::Ultrafast,
+                        source_id: None,
+                    }],
+                    now,
+                    &pricing,
+                );
+                let dto = serde_json::to_value(history).unwrap();
+                assert_eq!(dto["today"]["estimateComplete"], false);
+                assert_eq!(dto["last30Days"]["estimateComplete"], false);
+                assert_eq!(dto["today"]["tokens"], 110);
+                assert!(dto["today"]["estimatedCostUsd"].is_null());
+                assert_eq!(
+                    dto["today"]["unknownModels"],
+                    if known {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::json!([model])
+                    }
+                );
+            }
+        }
+        pricing.codex_credit_mode = false;
+        assert!(model_has_rates(&now, "gpt-5.3-codex", &pricing));
+        pricing.codex_credit_mode = true;
+        assert!(!model_has_rates(&now, "gpt-5.3-codex", &pricing));
+    }
+}
+
+#[cfg(test)]
+mod persistent_cycle_recovery_regressions {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+
+    fn day(value: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, value, 0, 0, 0).unwrap()
+    }
+
+    fn snapshot(tokens: u64, end: Option<DateTime<Utc>>) -> StoredResetCycle {
+        StoredResetCycle {
+            cycle: ResetCycleUsage {
+                started_at: day(1),
+                ended_at: end,
+                scheduled_reset_at: day(8),
+                usage: UsagePeriod {
+                    tokens,
+                    estimated_cost_usd: Some(999.0),
+                    estimated_limit_usd: Some(1998.0),
+                    quota_used_percent: Some(50.0),
+                    cost_estimated: true,
+                    estimate_complete: true,
+                    model_breakdown: None,
+                    unknown_models: Vec::new(),
+                },
+            },
+            recovery: CycleRecovery {
+                baseline_tokens: tokens,
+                covered_until: day(2),
+                boundary_conflict: false,
+            },
+        }
+    }
+
+    fn seed_legacy(path: &Path, record: &StoredResetCycle, credit_mode: bool) {
+        drop(Storage::open(path).unwrap());
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO reset_cycle_usage
+             (provider_id, identity_key, window_id, cycle_key, payload, updated_at)
+             VALUES ('codex', 'account', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    cycle_storage_key(credit_mode),
+                    record.cycle.started_at.timestamp().div_euclid(300),
+                    serde_json::to_string(&record.cycle).unwrap(),
+                    record.recovery.covered_until.to_rfc3339(),
+                ],
+            )
+            .unwrap();
+    }
+
+    // Every refresh opens a new connection, so these assertions exercise persisted
+    // coverage, not a process-local balance or a source-note heuristic.
+    fn refresh(
+        path: &Path,
+        now: DateTime<Utc>,
+        events: &[(DateTime<Utc>, u64, Option<f64>)],
+        anchors: Vec<omp_usage::QuotaCycleAnchor>,
+        credit_mode: bool,
+    ) -> (Vec<ResetCycleUsage>, Option<UsagePeriod>) {
+        let storage = Storage::open(path).unwrap();
+        let persisted = storage
+            .load_reset_cycles("codex", "account", cycle_storage_key(credit_mode))
+            .unwrap();
+        let mut buckets = restore_cycle_buckets(anchors, &persisted, now);
+        for &(timestamp, tokens, cost) in events {
+            add_cycle_event(
+                &mut buckets,
+                timestamp,
+                "gpt-6-astra",
+                tokens,
+                cost,
+                "Codex",
+                false,
+            );
+        }
+        let mut rebuilt = build_cycle_history(buckets, now, "test");
+        let weekly = current_weekly_period(&mut rebuilt, Some(day(1)), now, Some(50.0));
+        let history = persist_cycles(&storage, Some("account"), rebuilt, credit_mode).unwrap();
+        (history, weekly)
+    }
+
+    fn unpriced_tokens(period: &UsagePeriod) -> u64 {
+        period
+            .model_breakdown
+            .iter()
+            .flat_map(|breakdown| &breakdown.models)
+            .filter(|model| model.cost_usd.is_none())
+            .map(|model| model.total_tokens)
+            .sum()
+    }
+
+    #[test]
+    fn new_requests_do_not_consume_legacy_coverage_after_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.db");
+        let original = snapshot(100, None);
+        for credit_mode in [false, true] {
+            seed_legacy(&path, &original, credit_mode);
+            let mut events = Vec::new();
+            for count in 0..=2 {
+                if count > 0 {
+                    events.push((day(2) + Duration::hours(count), 50, Some(0.5)));
+                }
+                let (history, weekly) = refresh(&path, day(3), &events, Vec::new(), credit_mode);
+                let usage = &history[0].usage;
+                assert_eq!(usage.tokens, 100 + count as u64 * 50);
+                assert_eq!(unpriced_tokens(usage), 100);
+                assert!(!usage.estimate_complete);
+                assert_eq!(usage.estimated_limit_usd, None);
+                assert_eq!(weekly.as_ref(), Some(usage));
+                let reopened = Storage::open(&path)
+                    .unwrap()
+                    .load_reset_cycles("codex", "account", cycle_storage_key(credit_mode))
+                    .unwrap();
+                assert_eq!(reopened[0].recovery, original.recovery);
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_pre_snapshot_facts_clear_only_the_original_balance() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.db");
+        for credit_mode in [false, true] {
+            seed_legacy(&path, &snapshot(100, None), credit_mode);
+        }
+        let new_events = [(day(3), 50, Some(0.5)), (day(4), 50, Some(0.5))];
+        let (before, _) = refresh(&path, day(5), &new_events, Vec::new(), false);
+        assert_eq!(before[0].usage.tokens, 200);
+        assert_eq!(unpriced_tokens(&before[0].usage), 100);
+        let recovered = [new_events[0], new_events[1], (day(2), 100, Some(1.0))];
+        for _ in 0..2 {
+            let (after, weekly) = refresh(&path, day(5), &recovered, Vec::new(), false);
+            assert_eq!(after[0].usage.tokens, 200);
+            assert_eq!(unpriced_tokens(&after[0].usage), 0);
+            assert!(after[0].usage.estimate_complete);
+            assert_eq!(after[0].usage.estimated_cost_usd, Some(2.0));
+            assert_eq!(after[0].usage.estimated_limit_usd, Some(4.0));
+            assert_eq!(weekly.as_ref(), Some(&after[0].usage));
+        }
+        let (credits, _) = refresh(&path, day(5), &new_events, Vec::new(), true);
+        assert_eq!(unpriced_tokens(&credits[0].usage), 100);
+        assert!(!credits[0].usage.estimate_complete);
+    }
+
+    #[test]
+    fn current_week_and_history_share_recovered_partial_and_quota() {
+        let original = snapshot(100, None);
+        let mut buckets = restore_cycle_buckets(Vec::new(), &[original], day(3));
+        add_cycle_event(
+            &mut buckets,
+            day(2),
+            "gpt-6-astra",
+            50,
+            Some(0.5),
+            "Codex",
+            false,
+        );
+        let mut cycles = build_cycle_history(buckets, day(3), "test");
+        // The live server percentage replaces the old percentage in both views.
+        let weekly = current_weekly_period(&mut cycles, Some(day(1)), day(3), Some(25.0)).unwrap();
+        assert_eq!(weekly, cycles[0].cycle.usage);
+        assert_eq!(weekly.tokens, 100);
+        assert!(!weekly.estimate_complete);
+        assert_eq!(weekly.quota_used_percent, Some(25.0));
+        assert_eq!(weekly.estimated_cost_usd, Some(0.5));
+        assert_eq!(weekly.estimated_limit_usd, None);
+    }
+
+    #[test]
+    fn conflicting_middle_anchor_keeps_closed_window_nonoverlapping() {
+        let mut original = snapshot(200, Some(day(8)));
+        original.recovery.covered_until = day(8);
+        let anchors = [day(5), day(8) - Duration::minutes(2), day(8)]
+            .map(|start| omp_usage::QuotaCycleAnchor {
+                started_at: start,
+                scheduled_reset_at: start + Duration::days(7),
+                used_percent: 50.0,
+            })
+            .to_vec();
+        let mut buckets = restore_cycle_buckets(anchors, &[original], day(9));
+        for (timestamp, tokens) in [(day(3), 100), (day(6), 100), (day(8), 20)] {
+            add_cycle_event(
+                &mut buckets,
+                timestamp,
+                "gpt-6-astra",
+                tokens,
+                Some(1.0),
+                "Codex",
+                false,
+            );
+        }
+        let cycles = build_cycle_history(buckets, day(9), "test");
+        assert_eq!(cycles.len(), 2);
+        assert_eq!(cycles[0].cycle.started_at, day(1));
+        assert_eq!(cycles[0].cycle.ended_at, Some(day(8)));
+        assert_eq!(cycles[0].cycle.usage.tokens, 200);
+        assert!(cycles[0].cycle.usage.estimate_complete);
+        assert_eq!(cycles[1].cycle.started_at, day(8));
+        assert_eq!(cycles[1].cycle.usage.tokens, 20);
+        assert_eq!(
+            cycles
+                .iter()
+                .map(|record| record.cycle.usage.tokens)
+                .sum::<u64>(),
+            220
+        );
+    }
+
+    #[test]
+    fn open_coverage_conflict_stays_partial_but_later_anchor_can_close_it() {
+        let mut original = snapshot(100, None);
+        original.recovery.covered_until = day(4);
+        let anchor = |start| omp_usage::QuotaCycleAnchor {
+            started_at: day(start),
+            scheduled_reset_at: day(8),
+            used_percent: 50.0,
+        };
+        let mut buckets = restore_cycle_buckets(vec![anchor(3)], &[original], day(4));
+        add_cycle_event(
+            &mut buckets,
+            day(2),
+            "gpt-6-astra",
+            100,
+            Some(1.0),
+            "Codex",
+            false,
+        );
+        let mut cycles = build_cycle_history(buckets, day(4), "test");
+        let weekly = current_weekly_period(&mut cycles, Some(day(3)), day(4), Some(50.0)).unwrap();
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(weekly.tokens, 100);
+        assert!(!weekly.estimate_complete);
+        assert_eq!(weekly.estimated_limit_usd, None);
+        let buckets = restore_cycle_buckets(vec![anchor(5)], &cycles, day(6));
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].ended_at, Some(day(5)));
+        assert_eq!(buckets[1].started_at, day(5));
+    }
+
+    #[test]
+    fn missing_costs_remain_null_partial_and_zero_clean() {
+        for (baseline, known_tokens) in [(100, 0), (100, 50), (0, 0)] {
+            let mut buckets =
+                restore_cycle_buckets(Vec::new(), &[snapshot(baseline, None)], day(3));
+            add_cycle_event(
+                &mut buckets,
+                day(2),
+                "missing-model",
+                0,
+                None,
+                "Codex",
+                true,
+            );
+            if known_tokens > 0 {
+                add_cycle_event(
+                    &mut buckets,
+                    day(2),
+                    "gpt-6-astra",
+                    known_tokens,
+                    Some(0.5),
+                    "Codex",
+                    false,
+                );
+            }
+            let cycles = build_cycle_history(buckets, day(3), "test");
+            let usage = &cycles[0].cycle.usage;
+            assert_eq!(usage.tokens, baseline);
+            assert_eq!(usage.estimate_complete, baseline == 0);
+            assert!(usage.unknown_models.is_empty());
+            assert_eq!(usage.estimated_limit_usd, None);
+            assert_eq!(
+                usage.estimated_cost_usd,
+                if baseline == 0 {
+                    Some(0.0)
+                } else {
+                    (known_tokens > 0).then_some(0.5)
+                }
+            );
+            let dto = serde_json::to_value(usage).unwrap();
+            assert_eq!(
+                dto["estimatedCostUsd"].is_null(),
+                baseline > 0 && known_tokens == 0
+            );
+        }
     }
 }

@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn sol_6_1_survives_stale_and_equal_revision_dynamic_feeds() {
-        for updated_at in ["2026-09-23", "2026-09-30T00:00:00Z"] {
+        for updated_at in ["2026-09-23", "2026-09-30T00:00:00Z", "2026-10-15T00:00:00Z"] {
             let directory = tempdir().unwrap();
             let http = Arc::new(StubHttp::default());
             http.push(response(br#"{"gpt-6.1-sol":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-6.1-sol-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198}}"#));
@@ -683,7 +683,7 @@ mod tests {
                 br#"{"openai":{"models":{"gpt-6.1-sol":{"cost":{"input":88,"output":88}}}}}"#,
             ));
             http.push(response(&supplement(Some(updated_at), 9.0)));
-            let now = Utc.with_ymd_and_hms(2026, 9, 30, 12, 0, 0).unwrap();
+            let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
             let store = PricingStore::with_dependencies(
                 directory.path().to_path_buf(),
                 BundledSources::default(),
@@ -710,6 +710,17 @@ mod tests {
                 reloaded.estimated_cost_dollars("gpt-6.1-sol-fast", tokens, false),
                 Some(0.2)
             );
+            let ultrafast = reloaded
+                .estimated_cost_dollars(
+                    "openai-codex/gpt-6.1-sol-high-ultrafast",
+                    super::super::TokenBreakdown {
+                        speed: super::super::RequestSpeed::Ultrafast,
+                        ..tokens
+                    },
+                    false,
+                )
+                .unwrap();
+            assert!((ultrafast - 0.6).abs() < 1e-9, "revision {updated_at}");
         }
     }
 

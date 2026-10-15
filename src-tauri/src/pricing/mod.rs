@@ -8,7 +8,7 @@ mod supplement;
 
 pub use catalog::PricingCatalog;
 pub use model_pricing::ModelPricing;
-pub use rates::{ModelRates, TokenBreakdown};
+pub use rates::{ModelRates, RequestSpeed, TokenBreakdown};
 pub use store::PricingStore;
 pub use supplement::PricingSupplement;
 
@@ -180,6 +180,159 @@ mod bundled_resource_tests {
                 .estimated_cost_dollars(model, long_tokens, true)
                 .unwrap();
             assert!((long - (0.272_001 * input_rate * 2.0 + output_rate * 1.5)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn supported_models_have_three_api_and_purchased_credit_speeds() {
+        use super::RequestSpeed;
+        for credit_mode in [false, true] {
+            let mut pricing = test_bundled_pricing();
+            pricing.codex_credit_mode = credit_mode;
+            for (model, input_rate) in [("gpt-6-astra", 10.0), ("gpt-6.1-sol", 2.0)] {
+                for (speed, multiplier) in [
+                    (RequestSpeed::Standard, 1.0),
+                    (RequestSpeed::Fast, 2.0),
+                    (RequestSpeed::Ultrafast, 6.0),
+                ] {
+                    let tokens = TokenBreakdown {
+                        input: 1_000_000,
+                        speed,
+                        ..Default::default()
+                    };
+                    assert_eq!(
+                        pricing.estimated_cost_dollars(model, tokens, false),
+                        Some(input_rate * multiplier),
+                        "{model}/{speed:?}/credits={credit_mode}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ultrafast_aliases_do_not_conflate_ultra_reasoning_or_double_charge() {
+        use super::RequestSpeed;
+        for credit_mode in [false, true] {
+            let mut pricing = test_bundled_pricing();
+            pricing.codex_credit_mode = credit_mode;
+            for (base, input_rate) in [("gpt-6-astra", 10.0), ("gpt-6.1-sol", 2.0)] {
+                for (suffix, suffix_multiplier) in [
+                    ("-ultrafast", 6.0),
+                    ("-ultra-fast", 2.0),
+                    ("-fast-ultra", 2.0),
+                    ("-high-ultrafast", 6.0),
+                    ("-ultrafast-max", 6.0),
+                ] {
+                    for prefix in ["", "openai/", "openai-codex/"] {
+                        let model = format!("{prefix}{base}-20261001{suffix}");
+                        assert_eq!(pricing.display_family(&model), base);
+                        for (speed, multiplier) in [
+                            (RequestSpeed::Standard, suffix_multiplier),
+                            (RequestSpeed::Fast, 2.0),
+                            (RequestSpeed::Ultrafast, 6.0),
+                        ] {
+                            let tokens = TokenBreakdown {
+                                input: 1_000_000,
+                                speed,
+                                ..Default::default()
+                            };
+                            assert_eq!(
+                                pricing.estimated_cost_dollars(&model, tokens, false),
+                                Some(input_rate * multiplier),
+                                "{model}/{speed:?}/credits={credit_mode}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_ultrafast_and_unknown_suffixes_never_fall_back_to_standard() {
+        use super::RequestSpeed;
+        for credit_mode in [false, true] {
+            let mut pricing = test_bundled_pricing();
+            pricing.codex_credit_mode = credit_mode;
+            for model in ["gpt-5.5", "gpt-6-sol", "gpt-6-luna", "claude-opus-5"] {
+                let tokens = TokenBreakdown {
+                    input: 100,
+                    speed: RequestSpeed::Ultrafast,
+                    ..Default::default()
+                };
+                assert_eq!(pricing.estimated_cost_dollars(model, tokens, false), None);
+                for speed in [
+                    RequestSpeed::Standard,
+                    RequestSpeed::Fast,
+                    RequestSpeed::Ultrafast,
+                ] {
+                    assert_eq!(
+                        pricing.estimated_cost_dollars(
+                            &format!("{model}-ultrafast"),
+                            TokenBreakdown { speed, ..tokens },
+                            false
+                        ),
+                        None
+                    );
+                }
+            }
+            for model in [
+                "gpt-6-astra-unknown",
+                "gpt-6.1-sol-ultrafast-bogus",
+                "gpt-5.5-ultrafast-high",
+                "gpt-6-astra-hyperfast",
+            ] {
+                assert_eq!(
+                    pricing.estimated_cost_dollars(model, TokenBreakdown::default(), false),
+                    None,
+                    "{model}/credits={credit_mode}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ultrafast_preserves_api_long_context_and_credit_cache_write_rules() {
+        use super::RequestSpeed;
+        for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+            let mut pricing = test_bundled_pricing();
+            for prompt_read in [52_000, 52_001] {
+                let tokens = TokenBreakdown {
+                    input: 100_000,
+                    cache_write_5m: 100_000,
+                    cache_write_1h: 20_000,
+                    cache_read: prompt_read,
+                    output: 10_000,
+                    ..Default::default()
+                };
+                for credit_mode in [false, true] {
+                    pricing.codex_credit_mode = credit_mode;
+                    let base = pricing.estimated_cost_dollars(model, tokens, true).unwrap();
+                    let ultra = pricing
+                        .estimated_cost_dollars(
+                            model,
+                            TokenBreakdown {
+                                speed: RequestSpeed::Ultrafast,
+                                ..tokens
+                            },
+                            true,
+                        )
+                        .unwrap();
+                    assert!((ultra - base * 6.0).abs() < 1e-9);
+                    if credit_mode {
+                        let no_writes = TokenBreakdown {
+                            cache_write_5m: 0,
+                            cache_write_1h: 0,
+                            ..tokens
+                        };
+                        assert_eq!(
+                            pricing.estimated_cost_dollars(model, no_writes, false),
+                            Some(base)
+                        );
+                    }
+                }
+            }
         }
     }
 }

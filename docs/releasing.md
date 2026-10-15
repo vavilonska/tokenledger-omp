@@ -1,5 +1,23 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.5 请求速度与部分估算修复
+
+`package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 中应用自身包版本及
+`src-tauri/tauri.conf.json` 同步为 0.5.5。本次计价修复不更改依赖、应用身份、签名或更新源；
+保留下文已合入的依赖安全维护。
+
+发布前需验证 Standard／Fast／Ultrafast 的 API 与购买积分费率、OMP 主请求与辅助调用的速度
+证据、旧缓存／账本在有源和无源场景下的迁移，以及总计、模型、周期、Cost/MTok、分享中的
+partial／未知语义。未知速度须保留 tokens，不能冒充未知模型、零费用或完整额度。
+未采集且已删除的日志无法恢复，旧 Fast 标志也不能恢复 OMP 请求速度；保留首次观察账号归属
+和周期边界，不将证据不足的历史金额显示为完整估算。
+
+2026-10-15 验证：版本及前后端契约、ESLint／Prettier、Svelte 类型检查、242 项前端测试、
+前端生产构建、Rust 格式与 Clippy 均通过；完整 Rust 套件 625 项通过，无失败或忽略项。
+另运行 9 个隔离程序场景，调用本版实际 OMP parser、scanner、SQLite 账本与两套计价函数，
+覆盖三速度、两条辅助 memory 请求、删源重开后的重计价及无源旧记录保留 tokens。
+本次未执行公开版安装包构建、安装或已安装 EXE 的 GUI 验收，不将源码与隔离运行证据冒充安装验证。
+
 ## 未发布的依赖安全维护 / Unreleased dependency security maintenance
 
 前端锁文件统一使用 `source-map-js` 1.2.2，并将 `postcss-selector-parser` 更新至 7.1.6，

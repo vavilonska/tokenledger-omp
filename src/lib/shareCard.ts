@@ -377,7 +377,7 @@ function usageReading(period: UsagePeriod | null, credits = false) {
   if (!period) return 'No data';
   const tokens = formatMetricValue(period.tokens, 'count', 'row', 'tokens');
   if (period.estimatedCostUsd === null) return tokens;
-  return `${costReading(period.estimatedCostUsd, credits)} · ${tokens}`;
+  return `${costReading(period.estimatedCostUsd, credits)}${period.estimateComplete ? '' : ' partial'} · ${tokens}`;
 }
 
 function shareRowHeight(row: ShareRow) {
@@ -604,6 +604,13 @@ function drawSpendBody(
           ? 'No cost-per-token data for this period'
           : 'No cost data for this period';
     context.fillText(empty, canvasWidth / 2, top + TOTAL_SPEND_GEOMETRY.ringDiameter / 2 + 4);
+    if (projection.totalTokens > 0) {
+      context.fillText(
+        formatMetricValue(projection.totalTokens, 'count', 'row', 'tokens'),
+        canvasWidth / 2,
+        top + TOTAL_SPEND_GEOMETRY.ringDiameter / 2 + 22,
+      );
+    }
     context.textAlign = 'left';
     return;
   }
@@ -630,6 +637,15 @@ function drawSpendBody(
   context.fillStyle = palette.secondary;
   context.font = `600 ${TOTAL_SPEND_GEOMETRY.centerUnitFontSize}px system-ui`;
   context.fillText(center.unit, centerX, centerY + 13);
+  if (metric !== 'tokens' && !projection.estimateComplete) {
+    context.fillStyle = palette.warning;
+    context.font = '10px system-ui';
+    context.fillText(
+      metric === 'costPerMillion' ? 'Priced subset only' : 'Partial estimate',
+      centerX,
+      centerY + 27,
+    );
+  }
   context.textAlign = 'left';
 
   const legendLeft =

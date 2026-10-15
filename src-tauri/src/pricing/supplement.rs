@@ -38,6 +38,7 @@ impl PricingSupplement {
                 rates.output_above_200k_per_million = entry.output_above_200k_per_million;
                 rates.cache_read_above_200k_per_million = entry.cache_read_above_200k_per_million;
                 rates.cache_write_above_200k_per_million = entry.cache_write_above_200k_per_million;
+                rates.ultrafast_multiplier = entry.ultrafast_multiplier;
                 (model, rates)
             })
             .collect();
@@ -119,6 +120,8 @@ struct SupplementFile {
 struct SupplementEntry {
     input_per_million: f64,
     output_per_million: f64,
+    #[serde(default)]
+    ultrafast_multiplier: Option<f64>,
     #[serde(default)]
     cache_write_per_million: Option<f64>,
     #[serde(default)]

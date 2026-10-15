@@ -114,7 +114,7 @@ describe('share card layout', () => {
     );
 
     expect(rows.find((row) => row.kind === 'text' && row.label === 'Today')).toMatchObject({
-      value: '$0.03 · 500 tokens',
+      value: '$0.03 partial · 500 tokens',
     });
   });
 
@@ -347,6 +347,7 @@ describe('share card layout', () => {
           },
         ],
         centerValue: 12,
+        totalTokens: 1_000_000,
         costEstimated: true,
         estimateComplete: true,
       },

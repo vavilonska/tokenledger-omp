@@ -29,6 +29,22 @@ pub struct Storage {
     connection: Mutex<Connection>,
 }
 
+// Recovery evidence is storage-only; it is never part of the frontend DTO.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CycleRecovery {
+    pub baseline_tokens: u64,
+    pub covered_until: chrono::DateTime<chrono::Utc>,
+    pub boundary_conflict: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct StoredResetCycle {
+    #[serde(flatten)]
+    pub cycle: ResetCycleUsage,
+    #[serde(rename = "_recovery")]
+    pub recovery: CycleRecovery,
+}
+
 pub struct ProviderAccountUpdate {
     pub provider_family: String,
     pub identity_key: String,
@@ -385,21 +401,45 @@ impl Storage {
         provider_id: &str,
         identity_key: &str,
         window_id: &str,
-    ) -> Result<Vec<ResetCycleUsage>, StorageError> {
+    ) -> Result<Vec<StoredResetCycle>, StorageError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT payload FROM reset_cycle_usage
+            "SELECT payload, updated_at FROM reset_cycle_usage
              WHERE provider_id = ?1 AND identity_key = ?2 AND window_id = ?3
              ORDER BY cycle_key DESC",
         )?;
         let payloads = statement
             .query_map(params![provider_id, identity_key, window_id], |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         payloads
             .into_iter()
-            .map(|payload| serde_json::from_str(&payload).map_err(StorageError::from))
+            .map(|(payload, updated_at)| {
+                #[derive(serde::Deserialize)]
+                struct Payload {
+                    #[serde(flatten)]
+                    cycle: ResetCycleUsage,
+                    #[serde(default, rename = "_recovery")]
+                    recovery: Option<CycleRecovery>,
+                }
+                let payload: Payload = serde_json::from_str(&payload)?;
+                let recovery = match payload.recovery {
+                    Some(recovery) => recovery,
+                    None => CycleRecovery {
+                        baseline_tokens: payload.cycle.usage.tokens,
+                        // Legacy snapshots only attest to facts existing at their last save.
+                        covered_until: serde_json::from_value(serde_json::Value::String(
+                            updated_at,
+                        ))?,
+                        boundary_conflict: false,
+                    },
+                };
+                Ok(StoredResetCycle {
+                    cycle: payload.cycle,
+                    recovery,
+                })
+            })
             .collect()
     }
 
@@ -408,13 +448,13 @@ impl Storage {
         provider_id: &str,
         identity_key: &str,
         window_id: &str,
-        cycles: &[ResetCycleUsage],
+        cycles: &[StoredResetCycle],
     ) -> Result<(), StorageError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         for cycle in cycles {
             let payload = serde_json::to_string(cycle)?;
-            let cycle_key = cycle.started_at.timestamp().div_euclid(300);
+            let cycle_key = cycle.cycle.started_at.timestamp().div_euclid(300);
             transaction.execute(
                 "INSERT INTO reset_cycle_usage(
                    provider_id, identity_key, window_id, cycle_key, payload, updated_at
@@ -681,7 +721,7 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{ProviderAccountUpdate, Storage};
+    use super::{CycleRecovery, ProviderAccountUpdate, Storage, StoredResetCycle};
     use crate::models::{
         AppSettings, DailyUsage, ModelUsageBreakdown, ModelUsageEntry, ProviderSnapshot,
         QuotaFormat, QuotaWindow, ResetCycleUsage, UsageHistory, UsagePeriod,
@@ -761,6 +801,14 @@ mod tests {
                 model_breakdown: None,
                 unknown_models: Vec::new(),
             },
+        };
+        let cycle = StoredResetCycle {
+            recovery: CycleRecovery {
+                baseline_tokens: cycle.usage.tokens,
+                covered_until: cycle.started_at,
+                boundary_conflict: false,
+            },
+            cycle,
         };
         storage
             .save_reset_cycles("codex", "account-a", "weekly", std::slice::from_ref(&cycle))

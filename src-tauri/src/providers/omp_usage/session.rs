@@ -4,6 +4,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::pricing::RequestSpeed;
+
+mod speed;
+use speed::{resolve_speed, RecordedCost, SpeedEvidence};
+
+#[cfg(test)]
+mod regression;
+
 use super::super::log_usage::parse_log_timestamp;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,14 +33,88 @@ pub(super) struct SessionUsageEvent {
     pub(super) cache_write: u64,
     pub(super) cache_write_1h: u64,
     pub(super) total: u64,
-    pub(super) is_fast: bool,
+    // Legacy is_fast was inferred from the branch, including auxiliary calls. Ignore it.
+    #[serde(default)]
+    pub(super) speed: Option<RequestSpeed>,
+    #[serde(default)]
+    pub(super) entry_kind: Option<String>,
+    #[serde(default)]
+    pub(super) purpose: Option<String>,
+    #[serde(default)]
+    pub(super) recorded_cost: Option<RecordedCost>,
+    #[serde(default)]
+    pub(super) speed_evidence: Option<SpeedEvidence>,
+    /// Original independent orchestration buckets; input/output/cache_read above already include them.
+    #[serde(default)]
+    pub(super) orchestration: Option<OrchestrationUsage>,
+}
+
+impl SessionUsageEvent {
+    pub(super) fn has_complete_usage(&self) -> bool {
+        self.orchestration.as_ref().is_none_or(|usage| usage.valid)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct OrchestrationUsage {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    valid: bool,
+}
+
+impl OrchestrationUsage {
+    fn from_value(value: &Value) -> Self {
+        let mut usage = Self {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            valid: true,
+        };
+        let Some(object) = value.as_object() else {
+            usage.valid = false;
+            return usage;
+        };
+        for (key, value) in object {
+            let bucket = match key.as_str() {
+                "input" => &mut usage.input,
+                "output" => &mut usage.output,
+                "cacheRead" => &mut usage.cache_read,
+                _ => {
+                    usage.valid = false;
+                    continue;
+                }
+            };
+            if let Some(tokens) = value.as_u64() {
+                *bucket = tokens;
+            } else {
+                usage.valid = false;
+            }
+        }
+        usage
+    }
+
+    fn merge_into(&mut self, buckets: &mut [u64; 3]) {
+        for (bucket, extra) in buckets
+            .iter_mut()
+            .zip([self.input, self.output, self.cache_read])
+        {
+            match bucket.checked_add(extra) {
+                Some(total) => *bucket = total,
+                None => {
+                    *bucket = u64::MAX;
+                    self.valid = false;
+                }
+            }
+        }
+    }
 }
 
 pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
     let mut events = Vec::new();
     let mut has_header = false;
     let mut session_id = None;
-    let mut branch_tiers = HashMap::<String, bool>::new();
+    let mut branch_tiers = HashMap::<String, Option<RequestSpeed>>::new();
 
     for line in content.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
@@ -57,14 +139,16 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
             .and_then(Value::as_str)
             .and_then(|parent| branch_tiers.get(parent))
             .copied()
-            .unwrap_or(false);
+            .flatten();
         let branch_tier = if entry_type == Some("service_tier_change") {
-            // ServiceTierByFamily is a per-family map, not a single wire-tier string.
-            entry
-                .get("serviceTier")
-                .and_then(|tiers| tiers.get("openai"))
-                .and_then(Value::as_str)
-                == Some("priority")
+            match entry.get("serviceTier") {
+                Some(Value::Null) => Some(RequestSpeed::Standard),
+                Some(Value::Object(tiers)) if !tiers.contains_key("openai") => {
+                    Some(RequestSpeed::Standard)
+                }
+                Some(value) => speed::explicit_tier(value),
+                None => None,
+            }
         } else {
             inherited_tier
         };
@@ -102,6 +186,16 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
         let input = usage.get("input").and_then(Value::as_u64).unwrap_or(0);
         let output = usage.get("output").and_then(Value::as_u64).unwrap_or(0);
         let cache_read = usage.get("cacheRead").and_then(Value::as_u64).unwrap_or(0);
+        // OMP's top-level buckets exclude orchestration; producer cost includes both.
+        let mut orchestration = usage
+            .get("orchestration")
+            .map(OrchestrationUsage::from_value);
+        let mut billable = [input, output, cache_read];
+        if let Some(orchestration) = &mut orchestration {
+            orchestration.merge_into(&mut billable);
+        }
+        let [input, output, cache_read] = billable;
+        let complete_usage = orchestration.as_ref().is_none_or(|usage| usage.valid);
         let cache_write = usage.get("cacheWrite").and_then(Value::as_u64).unwrap_or(0);
         let cache_write_1h = usage
             .get("cacheWrite1h")
@@ -116,14 +210,20 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
                     .saturating_add(cache_read)
                     .saturating_add(cache_write)
             });
-        // A message-level wire tier describes only this call; it must not change the
-        // inherited configuration of descendants. Current AssistantMessage omits it,
-        // but honor it when a journal actually persists it.
-        let is_fast = message
-            .get("serviceTier")
-            .and_then(explicit_tier)
-            .or_else(|| message.get("service_tier").and_then(explicit_tier))
-            .unwrap_or(branch_tier);
+        let model = message
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let recorded_cost = usage.get("cost").and_then(RecordedCost::from_value);
+        let (speed, speed_evidence) = resolve_speed(
+            message,
+            entry_type == Some("message"),
+            branch_tier,
+            model,
+            [input, output, cache_read, cache_write],
+            recorded_cost.as_ref().filter(|_| complete_usage),
+        );
         events.push(SessionUsageEvent {
             session_id: session_id.clone(),
             anonymous_occurrence: 0,
@@ -138,19 +238,22 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
                 .filter(|id| !id.is_empty())
                 .map(str::to_owned),
             timestamp,
-            model: message
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
+            model: model.to_owned(),
             input,
             output,
             cache_read,
             cache_write,
             cache_write_1h,
             total,
-            is_fast,
+            speed,
+            entry_kind: entry_type.map(str::to_owned),
+            purpose: entry
+                .get("purpose")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            recorded_cost,
+            speed_evidence,
+            orchestration,
         });
     }
     events
@@ -178,24 +281,11 @@ fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     }
 }
 
-fn explicit_tier(value: &Value) -> Option<bool> {
-    match value {
-        Value::Null => Some(false),
-        Value::Object(tiers) => tiers.get("openai").map_or(Some(false), explicit_tier),
-        Value::String(tier) => match tier.as_str() {
-            "priority" => Some(true),
-            "auto" | "default" | "flex" | "scale" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
 
-    use super::parse_jsonl;
+    use super::{parse_jsonl, RequestSpeed};
 
     fn call(id: &str, parent: Option<&str>) -> Value {
         json!({
@@ -292,8 +382,19 @@ mod tests {
             call("unknown-parent", Some("missing")),
         ]));
         assert_eq!(
-            events.iter().map(|event| event.is_fast).collect::<Vec<_>>(),
-            [false, true, false, true, false, false, true, true, false, false]
+            events.iter().map(|event| event.speed).collect::<Vec<_>>(),
+            [
+                None,
+                Some(RequestSpeed::Fast),
+                Some(RequestSpeed::Standard),
+                Some(RequestSpeed::Fast),
+                None,
+                Some(RequestSpeed::Standard),
+                Some(RequestSpeed::Fast),
+                Some(RequestSpeed::Fast),
+                Some(RequestSpeed::Standard),
+                None,
+            ]
         );
     }
 

@@ -23,15 +23,23 @@
     if (!value) return credits ? 'Credit estimate unavailable' : 'No data';
     const tokens = formatMetricValue(value.tokens, 'count', 'row', 'tokens');
     if (value.estimatedCostUsd === null) return tokens;
-    if (value.estimatedLimitUsd != null) {
+    if (value.estimateComplete && value.estimatedLimitUsd != null) {
       const limit = costReading(value.estimatedLimitUsd, credits);
       const used = costReading(value.estimatedCostUsd, credits);
       return `~${limit} quota · ${used}`;
     }
-    return `${costReading(value.estimatedCostUsd, credits)} · ${tokens}`;
+    return `${costReading(value.estimatedCostUsd, credits)}${value.estimateComplete ? '' : ' partial'} · ${tokens}`;
   }
   function valueTooltip(value: UsagePeriod | null) {
     if (!value) return undefined;
+    if (!value.estimateComplete)
+      return [
+        costTooltip(value.estimatedCostUsd, credits),
+        formatMetricValue(value.tokens, 'count', 'full', 'tokens'),
+        'Partial estimate: some usage has unknown model pricing or request speed',
+      ]
+        .filter(Boolean)
+        .join('\n');
     if (credits)
       return [
         costTooltip(value.estimatedCostUsd, true),
@@ -40,7 +48,7 @@
           : `Estimated quota: ${costTooltip(value.estimatedLimitUsd, true)}`,
         value.estimateComplete
           ? undefined
-          : 'Partial estimate: some models have no published credit rate',
+          : 'Partial estimate: some usage has unknown model pricing or request speed',
       ]
         .filter(Boolean)
         .join('\n');
@@ -136,6 +144,7 @@
   <ModelUsageDetail
     title={label}
     breakdown={period.modelBreakdown}
+    estimateComplete={period.estimateComplete}
     {credits}
     top={detailTop}
     onEnter={keepOpen}

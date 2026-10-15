@@ -60,7 +60,7 @@ describe('UsageMetric model detail', () => {
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
   });
 
-  it('keeps incomplete cost text ordinary and reports local estimation separately', () => {
+  it('labels incomplete cost as partial without an approximation prefix', () => {
     render(UsageMetric, {
       label: 'Today',
       period: {
@@ -73,10 +73,10 @@ describe('UsageMetric model detail', () => {
       },
     });
 
-    const reading = screen.getByRole('button', { name: '$0.03 · 500 tokens' });
+    const reading = screen.getByRole('button', { name: '$0.03 partial · 500 tokens' });
     expect(reading).toHaveAttribute(
       'data-tooltip',
-      '$0.03\n500 tokens\nEstimated locally, so it may be off',
+      '$0.03 · API list price estimate\n500 tokens\nPartial estimate: some usage has unknown model pricing or request speed',
     );
     expect(reading).not.toHaveTextContent('~');
     expect(screen.getByLabelText('This period used a model with unknown pricing')).toBeVisible();

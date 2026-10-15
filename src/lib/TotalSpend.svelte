@@ -2,17 +2,12 @@
   import { onDestroy } from 'svelte';
   import { costReading, costTooltip, creditHistory } from './costDisplay';
   import Icon from './Icon.svelte';
-  import { formatSpendValue, totalSpendRingCenter } from './metricFormat';
+  import { formatMetricValue, formatSpendValue, totalSpendRingCenter } from './metricFormat';
   import SelectMenu from './SelectMenu.svelte';
   import type { ProviderCatalogIndex } from './metrics';
   import { TOTAL_SPEND_GEOMETRY } from './shareCard';
   import { ringSectorPath, spendRingArcs } from './spendRing';
-  import {
-    emptySpendMessage,
-    projectSpend,
-    selectedPeriod,
-    type SpendProjection,
-  } from './totalSpend';
+  import { emptySpendMessage, projectSpend, type SpendProjection } from './totalSpend';
   import { providerFamily } from './providerIconPaths';
   import type { AppSettings, UsageHistory } from './types';
 
@@ -76,15 +71,22 @@
         costTooltip(value, true),
         projection.estimateComplete
           ? undefined
-          : 'Partial estimate: some models have no published credit rate',
+          : 'Partial estimate: some usage has unknown model pricing or request speed',
       ]
         .filter(Boolean)
         .join('\n');
     const exact = formatSpendValue(value, settings.totalSpendMetric, 'full');
-    if (projection.costEstimated && settings.totalSpendMetric !== 'tokens') {
-      return `${exact} · Estimated locally, so it may be off`;
-    }
-    return exact;
+    return [
+      exact,
+      projection.estimateComplete || settings.totalSpendMetric === 'tokens'
+        ? undefined
+        : 'Partial estimate: some usage has unknown model pricing or request speed',
+      projection.costEstimated && settings.totalSpendMetric !== 'tokens'
+        ? 'Estimated locally, so it may be off'
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join(' · ');
   }
   function metricTitle() {
     if (settings.totalSpendMetric === 'tokens') return 'Tokens';
@@ -120,13 +122,15 @@
       onclick={() => patch({ costDisplay: 'codexCredits' })}>Codex credits</button
     >
   </div>
-  {#if credits && displayedProviders.some((provider) => selectedPeriod(provider.usage, settings.totalSpendPeriod)?.estimateComplete === false)}
+  {#if settings.totalSpendMetric !== 'tokens' && !projection.estimateComplete}
     <small
       class="cost-basis-note"
-      data-tooltip={displayedProviders
-        .flatMap((provider) => provider.usage.unknownModels)
-        .join(', ')}>Partial credit estimate</small
+      data-tooltip="Some usage has unknown model pricing or request speed"
+      >{credits ? 'Partial credit estimate' : 'Partial cost estimate'}</small
     >
+    {#if settings.totalSpendMetric === 'costPerMillion'}
+      <small class="cost-basis-note">Average covers fully priced providers only</small>
+    {/if}
   {/if}
   <div class="total-card__header">
     <div class="total-card__title">
@@ -176,6 +180,9 @@
     {#if projection.centerValue === null}
       <div class="total-card__empty">
         <span>{emptySpendMessage(settings.totalSpendMetric)}</span>
+        {#if projection.totalTokens > 0}
+          <span>{formatMetricValue(projection.totalTokens, 'count', 'row', 'tokens')}</span>
+        {/if}
       </div>
     {:else}
       <div class="total-card__body">
@@ -206,7 +213,10 @@
                 style={`background: var(--provider-${providerFamily(provider.id)}, var(--provider))`}
               ></i>{providerDisplayName(provider.id)}</span
             ><strong data-tooltip={credits ? costTooltip(provider.value, true) : undefined}
-              >{display(provider.value)}</strong
+              >{display(provider.value)}{settings.totalSpendMetric !== 'tokens' &&
+              !provider.period.estimateComplete
+                ? ' partial'
+                : ''}</strong
             >
           {/each}
         </div>

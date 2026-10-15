@@ -1,6 +1,6 @@
 {
   "$comment": "OpenQuota pricing supplement. Prices models that no public catalog carries, supplies fast-variant multipliers the catalogs omit, and maps provider log model slugs to canonical pricing keys (LiteLLM keys, models.dev ids, or entries in this file). The raw main-branch file is refreshed by installed apps, so merged corrections arrive without an app release. Rates are USD per million tokens.",
-  "updated_at": "2026-09-30T00:00:00Z",
+  "updated_at": "2026-10-15T00:00:00Z",
   "pricing": {
     "auto": {
       "input_per_million": 1.25,
@@ -140,11 +140,12 @@
       "output_per_million": 22.5
     },
     "gpt-6-astra": {
-      "$comment": "Standard API pricing verified 2026-09-30: https://developers.openai.com/api/docs/pricing. API Fast is 2x; Codex purchased credits use an independent rate card (Fast 2x), not included subscription usage (2.5x). Batch/Flex excluded.",
+      "$comment": "Standard API pricing verified 2026-09-30: https://developers.openai.com/api/docs/pricing. API Fast is 2x; Ultrafast is 6x. Codex purchased credits independently use Fast 2x/Ultrafast 6x, not included subscription usage (2.5x/8x). Batch/Flex excluded.",
       "input_per_million": 10.0,
       "cache_write_per_million": 12.5,
       "cache_read_per_million": 1.0,
       "output_per_million": 50.0,
+      "ultrafast_multiplier": 6.0,
       "long_context_threshold_tokens": 272000,
       "input_above_200k_per_million": 20.0,
       "cache_read_above_200k_per_million": 2.0,
@@ -163,11 +164,12 @@
       "output_above_200k_per_million": 15.0
     },
     "gpt-6.1-sol": {
-      "$comment": "Standard API pricing verified 2026-09-30: https://developers.openai.com/api/docs/models/gpt-6.1-sol. Cached input is 5% of input, not the previous Sol's 10%. Fast 2x; >272K prompt tokens doubles input/cache and multiplies output by 1.5.",
+      "$comment": "Standard API pricing verified 2026-09-30: https://developers.openai.com/api/docs/models/gpt-6.1-sol. Cached input is 5% of input, not the previous Sol's 10%. Fast 2x; Ultrafast 6x API/purchased credits (not included quota's 8x); >272K prompt tokens doubles input/cache and multiplies output by 1.5.",
       "input_per_million": 2.0,
       "cache_write_per_million": 2.5,
       "cache_read_per_million": 0.1,
       "output_per_million": 10.0,
+      "ultrafast_multiplier": 6.0,
       "long_context_threshold_tokens": 272000,
       "input_above_200k_per_million": 4.0,
       "cache_read_above_200k_per_million": 0.2,
@@ -265,12 +267,16 @@
     "gpt-5.6-luna": 2.0
   },
   "alias_rules": [
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-ultrafast$", "canonical": "gpt-6.1-sol-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?-ultrafast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.1-sol-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-ultrafast$", "canonical": "gpt-6-astra-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?-ultrafast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-astra-ultrafast"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6.1-sol-fast"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.1-sol-fast"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.1-sol"},
-    {"pattern": "^(?:openai/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-astra-fast"},
-    {"pattern": "^(?:openai/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6-astra-fast"},
-    {"pattern": "^(?:openai/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-astra"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-astra-fast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6-astra-fast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-astra"},
     {"pattern": "^(?:openai/)?gpt-6-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6-sol-fast"},
     {"pattern": "^(?:openai/)?gpt-6-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-sol-fast"},
     {"pattern": "^(?:openai/)?gpt-6-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6-sol"},

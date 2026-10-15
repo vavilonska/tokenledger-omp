@@ -52,8 +52,9 @@ parsed cache. Retained events stay with the account that first observed them; th
 the historical ownership of old logs. Server subscription quotas are fetched separately and are
 shared, so the quota is shown once instead of being added twice.
 
-The cycle allowance estimate divides the combined local API-value spend by the server-reported used
-percentage. It changes with model mix and is an estimate, not an OpenAI invoice or a cash balance.
+The cycle allowance estimate divides complete combined local API-value spend by the server-reported
+used percentage. Partial estimates do not infer an allowance. It changes with model mix and is an
+estimate, not an OpenAI invoice or a cash balance.
 Hover the weekly API-value row to see reset-cycle history. Its boundaries come from the reset times
 saved by Oh My Pi, so a banked reset starts a new window instead of being forced into a calendar
 week. TokenLedger OMP preserves those reconstructed cycles in its account-scoped database. It does not
@@ -84,7 +85,7 @@ third-party or carried client discounts. GPT-5.6 Sol's published Standard price 
 promotion through at least 2026-11-21; no unpublished post-promotion price is invented. API Fast
 uses its own multiplier. For GPT-6 and GPT-5.6, requests above 272,000 prompt tokens use the
 published long-context API rates for the entire request: 2× input and cache rates, 1.5× output,
-before any Fast multiplier. API cache writes cost 1.25× uncached input.
+before any speed multiplier. API cache writes cost 1.25× uncached input.
 
 Codex credit estimates use the independent published token credit card. They do not inherit API
 Batch/Flex discounts, API Fast multipliers, API-only long-context surcharges or cache-write charges.
@@ -94,20 +95,68 @@ At Standard speed, the seven models in the table have the same input, cached-inp
 numbers after this display conversion. Credit estimates use purchased-credit/Enterprise PAYG
 Fast rates (2×), not included subscription-limit consumption (2.5×). These are different quantities;
 do not infer subscription usage from the displayed credit estimate.
+Ultrafast is a distinct request speed: GPT-6 Astra and GPT-6.1 Sol use 6× for API USD and purchased
+credits, not the 8× included-quota consumption rate. Unsupported Ultrafast/model combinations stay
+unpriced. GPT-5.5 retains its distinct Fast rates: 2.5× API and 2× purchased credits.
+The `-ultrafast` suffix denotes this speed; `-ultra-fast` and `-fast-ultra` still mean ultra reasoning
+with ordinary Fast. An explicit tier and a model suffix never apply the multiplier twice.
 GPT-5.4 mini is also a small published exception: its output is 113 credits per million versus
 the API equivalent of 112.5 credits. At the display conversion, GPT-Image-2 image-token credits
 cost 2× its API image-token rates;
 image tokens are outside this local text-token estimator. Purchased credit prices and included
 subscription allowances depend on the plan and are not inferred from this display conversion.
 `cr` is the compact display unit. Unknown/unpublished rates, including Spark research preview,
-remain unpriced and partial periods are marked. Missing recorded Fast metadata is estimated at
-Standard speed. Estimates cover locally available Codex and same-account Oh My Pi logs, not
-unrecorded cloud activity or actual billed credit deductions.
+remain unpriced. For OMP, explicit request speed takes precedence; only assistant requests may
+inherit an explicitly configured session branch's speed. An assistant without either source also
+stays unknown. Auxiliary `model_usage` entries never inherit that branch or default to Standard.
+Historical numeric cost buckets can establish speed only for exact GPT-6 Astra / GPT-6.1 Sol
+identities (including provider prefixes), when they uniquely match documented, fixed producer-era
+OMP 18.11 `openai-codex` rates: Standard 1×, Fast 2.5× and Ultrafast 8×, with zero cache-write
+cost and no producer long-context surcharge. API display multipliers 2×/6× are not candidates
+for recovering this producer's historical speed. These buckets are evidence, not current display
+prices; display estimates still use their separate API/credit cards and API long-context rules.
+Codex's own legacy log format retains its Standard default when no speed is recorded; that default
+does not apply to OMP. Missing, conflicting or non-discriminating evidence remains unknown, even
+for a known model.
+
+OMP's separate `usage.orchestration` input, output and cache-read buckets are included in billable
+usage. An already supplied `totalTokens` is not incremented again. The ledger retains the merged
+token buckets and finite original orchestration evidence, not response text. Malformed or
+unsupported orchestration evidence cannot establish speed or a complete cost estimate.
+Estimates cover locally available Codex and same-account Oh My Pi logs, not unrecorded cloud
+activity or actual billed credit deductions.
+
+Unpriced requests retain tokens in daily, model, folded Other and cycle views. Known-cost subtotals
+are marked **partial** in API USD, credits and screenshots; fully unpriced amounts are unavailable,
+not zero. Cost/MTok excludes incomplete providers rather than dividing partial cost by all tokens,
+and labels averages that cover only the fully priced subset. Model shares use tokens for partial
+periods. Without per-model completeness in older snapshots, detail amounts are conservatively
+marked partial whenever their period is incomplete.
 
 The two histories and their persisted reset-cycle caches are separate. Existing settings default
 to API USD, and older snapshots without a credit history are never relabeled as credits. The new
 version rebuilds cycle estimates from available logs and retained usage facts; it preserves older
-cached cycle records under their existing keys. Model details retain sub-cent precision until display formatting.
+cached cycle records under their existing keys. If retained facts cannot reconstruct a cycle, its
+boundary is kept but its old amount is not presented as a complete estimate. Old OMP ledger rows
+with only `is_fast` retain tokens and identity but cannot establish request speed. Available logs
+are reparsed; deleted logs without sufficient retained evidence cannot recover their speed or
+complete cost. Model details retain sub-cent precision until display formatting.
+
+Cycle recovery keeps a storage-only `_recovery` record with the original token baseline and
+coverage cutoff. Legacy snapshots use their existing `updated_at` as that cutoff; subsequent
+refreshes do not advance it or replace the baseline. Only recovered events at or before the
+cutoff can discharge the old missing balance. Later requests are added independently: an
+unrecoverable 100-token snapshot plus 50 new tokens remains 150 tokens with 100 unpriced,
+including after reopening the database. Old cached dollar amounts are discarded, not used as
+known-cost subtotals. API and credit recovery records remain isolated under their existing keys.
+
+Events are assigned to non-overlapping, start-inclusive/end-exclusive cycles before recovery.
+Stored closed boundaries take priority over newly discovered anchors inside those boundaries.
+An anchor inside an open snapshot's covered range cannot safely split its old aggregate:
+the original boundary is kept and that cycle stays partial rather than inventing a split.
+An anchor after the coverage cutoff can close the old cycle and start a new one. The current
+weekly row and its history entry share the recovered tokens, completeness and live server
+percentage. Partial cycles never extrapolate a full monetary quota from a known-cost subtotal.
 
 Sources: [API pricing](https://developers.openai.com/api/docs/pricing),
 [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),

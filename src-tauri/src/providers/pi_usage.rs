@@ -50,7 +50,7 @@ impl PiTokenBreakdown {
             cache_write_1h: self.cache_write_1h,
             cache_read: self.cache_read,
             output: self.output,
-            is_fast: false,
+            speed: crate::pricing::RequestSpeed::Standard,
         }
     }
 }
@@ -277,7 +277,15 @@ fn aggregate_into(
                     "pi",
                 );
             } else if event.reported_total_tokens > 0 {
-                accumulator.add_unknown_model(date, display_model);
+                accumulator.add_unpriced_variant(
+                    date,
+                    event.reported_total_tokens,
+                    display_model,
+                    "pi",
+                );
+                if !super::codex::local_usage::model_has_rates(&event.timestamp, model, pricing) {
+                    accumulator.add_unknown_model(date, display_model);
+                }
             }
             contributed = true;
         } else if let Some(cost) = event.carried_cost.filter(|cost| *cost > 0.0) {
@@ -290,7 +298,10 @@ fn aggregate_into(
                 accumulator.add(date, event.reported_total_tokens, cost, model);
                 contributed = true;
             } else if event.reported_total_tokens > 0 {
-                accumulator.add_unknown_model(date, model);
+                accumulator.add_unpriced_variant(date, event.reported_total_tokens, model, "pi");
+                if pricing.resolve(model).is_none() {
+                    accumulator.add_unknown_model(date, model);
+                }
                 contributed = true;
             }
         }
@@ -420,6 +431,10 @@ mod tests {
         assert_eq!(event.tokens.cache_write_5m, 18);
         assert_eq!(event.tokens.cache_write_1h, 12);
         assert_eq!(event.reported_total_tokens, 202);
+        assert_eq!(
+            event.tokens.pricing_tokens().speed,
+            crate::pricing::RequestSpeed::Standard
+        );
         assert_eq!(mapped_card("openai-codex"), Some("codex"));
         assert_eq!(mapped_card("nvidia-nim"), None);
     }
@@ -449,7 +464,7 @@ mod tests {
         ));
         let history = accumulator.build(now(), "From pi");
         let period = history.today.unwrap();
-        assert_eq!(period.tokens, 404);
+        assert_eq!(period.tokens, 606);
         assert!(period.cost_estimated);
         assert!((period.estimated_cost_usd.unwrap() - 0.502_43).abs() < 0.000_001);
         assert_eq!(period.unknown_models, ["missing-model"]);

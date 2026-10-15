@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Mutex};
 
-use super::{ModelRates, PricingCatalog, PricingSupplement, TokenBreakdown};
+use super::{ModelRates, PricingCatalog, PricingSupplement, RequestSpeed, TokenBreakdown};
 
 pub struct ModelPricing {
     pub codex_credit_mode: bool,
@@ -50,17 +50,34 @@ impl ModelPricing {
         if self.codex_credit_mode {
             return super::codex_credits::equivalent_usd(self, model, tokens);
         }
-        let mut rates = self.resolve(model)?;
-        if rates.fast_multiplier == 1.0
-            && !self
-                .supplement
-                .canonical_name(model)
-                .unwrap_or(model)
-                .ends_with("-fast")
-        {
-            rates.fast_multiplier = self.supplement.fast_multiplier(model).unwrap_or(1.0);
+        let canonical = self.supplement.canonical_name(model).unwrap_or(model);
+        if canonical.ends_with("-ultrafast") {
+            self.resolve(canonical)?;
         }
-        Some(rates.cost_dollars(tokens, apply_long_context_rates))
+        // A tier is a request speed, not an additional premium on a speed slug.
+        // Explicit nonstandard speed overrides a suffix; Standard keeps slug pricing.
+        let rate_model = if tokens.speed == RequestSpeed::Ultrafast {
+            canonical
+                .strip_suffix("-ultrafast")
+                .or_else(|| canonical.strip_suffix("-fast"))
+                .unwrap_or(canonical)
+        } else if tokens.speed == RequestSpeed::Fast {
+            canonical.strip_suffix("-ultrafast").unwrap_or(canonical)
+        } else {
+            canonical
+        };
+        let mut rates = self.resolve(if rate_model == canonical {
+            model
+        } else {
+            rate_model
+        })?;
+        if rates.fast_multiplier == 1.0
+            && !rate_model.ends_with("-fast")
+            && !rate_model.ends_with("-ultrafast")
+        {
+            rates.fast_multiplier = self.supplement.fast_multiplier(rate_model).unwrap_or(1.0);
+        }
+        rates.cost_dollars(tokens, apply_long_context_rates)
     }
 
     /// Returns the stable display family used for provider exports that contain one slug per model
@@ -69,8 +86,9 @@ impl ModelPricing {
     pub fn display_family(&self, model: &str) -> String {
         let canonical = self.supplement.canonical_name(model).unwrap_or(model);
         canonical
-            .strip_suffix("-fast")
-            .filter(|base| !base.is_empty())
+            .strip_suffix("-ultrafast")
+            .or_else(|| canonical.strip_suffix("-fast"))
+            .filter(|base| !base.is_empty() && self.resolve(canonical).is_some())
             .unwrap_or(canonical)
             .to_owned()
     }
@@ -85,6 +103,12 @@ impl ModelPricing {
     }
 
     fn lookup(&self, name: &str) -> Option<ModelRates> {
+        if let Some(base) = name.strip_suffix("-ultrafast") {
+            // Only explicitly configured bases support this tier. Never fuzzy-match
+            // an unknown Ultrafast suffix onto a standard catalog entry.
+            let rates = self.supplement.pricing.get(base)?;
+            return Some(rates.scaled(rates.ultrafast_multiplier?));
+        }
         if let Some(rates) = self.supplement.pricing.get(name) {
             return Some(*rates);
         }
@@ -135,7 +159,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::ModelPricing;
-    use crate::pricing::{ModelRates, PricingCatalog, PricingSupplement, TokenBreakdown};
+    use crate::pricing::{
+        ModelRates, PricingCatalog, PricingSupplement, RequestSpeed, TokenBreakdown,
+    };
 
     fn rates(input: f64, output: f64) -> ModelRates {
         ModelRates::new(input, output)
@@ -280,7 +306,7 @@ mod tests {
                     cache_write_1h: 1_000_000,
                     cache_read: 1_000_000,
                     output: 1_000_000,
-                    is_fast: true,
+                    speed: RequestSpeed::Fast,
                 },
                 true,
             )
@@ -318,7 +344,7 @@ mod tests {
                 .estimated_cost_dollars(
                     model,
                     TokenBreakdown {
-                        is_fast: true,
+                        speed: RequestSpeed::Fast,
                         ..tokens
                     },
                     true,
@@ -351,7 +377,11 @@ mod tests {
                 .estimated_cost_dollars(
                     "gpt-6.1-sol",
                     TokenBreakdown {
-                        is_fast: fast,
+                        speed: if fast {
+                            RequestSpeed::Fast
+                        } else {
+                            RequestSpeed::Standard
+                        },
                         ..tokens
                     },
                     long_context,
@@ -384,16 +414,17 @@ mod tests {
             pricing.estimated_cost_dollars(
                 "gpt-6.1-sol-ultra-fast",
                 TokenBreakdown {
-                    is_fast: true,
+                    speed: RequestSpeed::Fast,
                     ..tokens
                 },
                 true
             ),
             Some(24.2)
         );
-        assert!(pricing
-            .estimated_cost_dollars("gpt-6.1-sol-ultrafast", tokens, true)
-            .is_none());
+        assert_eq!(
+            pricing.estimated_cost_dollars("gpt-6.1-sol-ultrafast", tokens, true),
+            Some(72.6)
+        );
         assert!(pricing
             .estimated_cost_dollars("gpt-6.1-sol-none", tokens, true)
             .is_none());

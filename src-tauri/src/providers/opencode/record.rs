@@ -23,6 +23,7 @@ pub(crate) struct UsageRecord {
     pub(crate) cost: Option<f64>,
     pub(crate) cost_provenance: CostProvenance,
     pub(crate) incomplete_cost: bool,
+    pub(crate) unknown_model: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +69,18 @@ impl ParsedMessage {
 
     pub(super) fn into_usage(self, parts: &[ParsedPart], pricing: &ModelPricing) -> UsageRecord {
         let (tokens, cost, cost_provenance, incomplete_cost) = self.pricing_details(parts, pricing);
+        let has_rates = |model: &str| {
+            let canonical = pricing.supplement.canonical_name(model).unwrap_or(model);
+            let base = canonical
+                .strip_suffix("-ultrafast")
+                .or_else(|| canonical.strip_suffix("-fast"))
+                .unwrap_or(canonical);
+            pricing.resolve(base).is_some() || pricing.resolve(canonical).is_some()
+        };
+        let unknown_model = (cost.is_none() || incomplete_cost)
+            && self.model != "Unattributed"
+            && !has_rates(&self.model)
+            && !has_rates(&format!("{}/{}", self.provider_id, self.model));
 
         UsageRecord {
             timestamp: self.timestamp,
@@ -76,6 +89,7 @@ impl ParsedMessage {
             cost,
             cost_provenance,
             incomplete_cost,
+            unknown_model,
         }
     }
 }
@@ -140,7 +154,15 @@ impl ParsedTokens {
                     .cache_read
                     .saturating_add(other.breakdown.cache_read),
                 output: self.breakdown.output.saturating_add(other.breakdown.output),
-                is_fast: self.breakdown.is_fast || other.breakdown.is_fast,
+                speed: match (self.breakdown.speed, other.breakdown.speed) {
+                    (crate::pricing::RequestSpeed::Ultrafast, _)
+                    | (_, crate::pricing::RequestSpeed::Ultrafast) => {
+                        crate::pricing::RequestSpeed::Ultrafast
+                    }
+                    (crate::pricing::RequestSpeed::Fast, _)
+                    | (_, crate::pricing::RequestSpeed::Fast) => crate::pricing::RequestSpeed::Fast,
+                    _ => crate::pricing::RequestSpeed::Standard,
+                },
             },
             total: self.total.saturating_add(other.total),
         }
@@ -382,4 +404,51 @@ fn finite_number(value: &Value) -> Option<f64> {
 fn non_empty(value: impl AsRef<str>) -> Option<String> {
     let value = value.as_ref().trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+#[cfg(test)]
+mod retained_speed_regressions {
+    use super::*;
+
+    #[test]
+    fn nested_legacy_speed_facts_reprice_but_recorded_cost_remains_authoritative() {
+        let mut stored = serde_json::json!({
+            "message": {
+                "message_id": "m", "session_id": "s", "timestamp": "2026-07-10T10:00:00Z",
+                "provider_id": "opencode", "model": "gpt-6-astra",
+                "tokens": { "total": 110, "breakdown": {
+                    "input": 100, "output": 10, "cache_read": 0,
+                    "cache_write_5m": 0, "cache_write_1h": 0, "is_fast": true
+                }},
+                "cost": "Missing"
+            },
+            "parts": []
+        });
+        let pricing = crate::pricing::test_bundled_pricing();
+        let legacy: OpenCodeUsageEvent = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(
+            legacy.message.tokens.unwrap().breakdown.speed,
+            crate::pricing::RequestSpeed::Fast
+        );
+        let fast_cost = legacy.into_usage(&pricing).cost.unwrap();
+        stored["message"]["tokens"]["breakdown"]["speed"] = serde_json::json!("standard");
+        let standard: OpenCodeUsageEvent = serde_json::from_value(stored.clone()).unwrap();
+        let roundtrip = serde_json::to_value(&standard).unwrap();
+        assert!(roundtrip["message"]["tokens"]["breakdown"]
+            .get("is_fast")
+            .is_none());
+        let standard_cost = standard.into_usage(&pricing).cost.unwrap();
+        assert!((fast_cost - standard_cost * 2.0).abs() < 1e-12);
+        stored["message"]["tokens"]["breakdown"]["speed"] = serde_json::json!("ultrafast");
+        let ultra: OpenCodeUsageEvent = serde_json::from_value(stored.clone()).unwrap();
+        assert!((ultra.into_usage(&pricing).cost.unwrap() - standard_cost * 6.0).abs() < 1e-12);
+        stored["message"]["model"] = serde_json::json!("unpriced-model");
+        stored["message"]["cost"] = serde_json::json!({"Exact": 0.75});
+        let exact: OpenCodeUsageEvent = serde_json::from_value(stored).unwrap();
+        let usage = exact.into_usage(&pricing);
+        assert_eq!(usage.tokens, 110);
+        assert_eq!(usage.cost, Some(0.75));
+        assert_eq!(usage.cost_provenance, CostProvenance::Exact);
+        assert!(!usage.incomplete_cost);
+    }
 }

@@ -471,7 +471,11 @@ fn aggregate_into(
             cache_write_1h: event.cache_write_1h,
             cache_read: event.cache_read,
             output: event.output,
-            is_fast: event.is_fast,
+            speed: if event.is_fast {
+                crate::pricing::RequestSpeed::Fast
+            } else {
+                crate::pricing::RequestSpeed::Standard
+            },
         };
         let model_name = event
             .model
@@ -481,15 +485,16 @@ fn aggregate_into(
         let cost = event
             .cost_usd
             .or_else(|| pricing.estimated_cost_dollars(model_name?, tokens, true));
+        let model = model_name.unwrap_or("Unattributed");
         if let Some(cost) = cost {
-            accumulator.add(
-                date,
-                tokens.total_tokens(),
-                cost,
-                model_name.unwrap_or("Unattributed"),
-            );
+            if event.cost_usd.is_some() {
+                accumulator.add_exact(date, tokens.total_tokens(), cost, model);
+            } else {
+                accumulator.add(date, tokens.total_tokens(), cost, model);
+            }
         } else if tokens.total_tokens() > 0 {
-            if let Some(model) = model_name {
+            accumulator.add_unpriced_variant(date, tokens.total_tokens(), model, model);
+            if model_name.is_some() && pricing.resolve(model).is_none() {
                 accumulator.add_unknown_model(date, model);
             }
         }
@@ -850,13 +855,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_usage_is_excluded_but_remains_visible_as_incomplete() {
+    fn unknown_usage_retains_tokens_and_marks_the_subtotal_incomplete() {
         let content = r#"{"timestamp":"2026-07-15T08:00:00Z","message":{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100,"output_tokens":10}}}
 {"timestamp":"2026-07-15T09:00:00Z","message":{"model":"future-unpriced-model","usage":{"input_tokens":500,"output_tokens":20}}}"#;
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
         let history = aggregate(parse_jsonl(content), now, &test_bundled_pricing());
         let today = history.today.unwrap();
-        assert_eq!(today.tokens, 110);
+        assert_eq!(today.tokens, 630);
         assert!(!today.estimate_complete);
         assert_eq!(today.unknown_models, ["future-unpriced-model"]);
     }
@@ -870,6 +875,7 @@ mod tests {
         assert_eq!(today.tokens, 520);
         assert_eq!(today.estimated_cost_usd, Some(1.75));
         assert!(today.estimate_complete);
+        assert!(!today.cost_estimated);
         assert!(today.unknown_models.is_empty());
     }
 
