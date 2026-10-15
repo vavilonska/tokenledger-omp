@@ -379,6 +379,14 @@ pub(crate) fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String
     #[cfg(not(target_os = "linux"))]
     {
         let manager = app.autolaunch();
+        // The OS registration can already be absent while saved preferences still say enabled.
+        if !enabled
+            && !manager
+                .is_enabled()
+                .map_err(|_| "Launch at login status could not be read.".to_owned())?
+        {
+            return Ok(());
+        }
         let result = if enabled {
             manager.enable()
         } else {
