@@ -156,12 +156,16 @@ pub struct ResetCycleUsage {
     pub model_usage: Option<Vec<CycleModelUsage>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CycleModelUsage {
     pub model: String,
     pub total_tokens: u64,
     pub request_count: Option<u64>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub cost_complete: bool,
 }
 
 fn default_true() -> bool {

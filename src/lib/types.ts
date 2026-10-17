@@ -66,6 +66,8 @@ export interface CycleModelUsage {
   model: string;
   totalTokens: number;
   requestCount: number | null;
+  costUsd?: number | null;
+  costComplete?: boolean;
 }
 
 export interface ModelUsageEntry {

@@ -806,11 +806,15 @@ mod tests {
                     model: "gpt-6-astra".into(),
                     total_tokens: 8,
                     request_count: Some(2),
+                    cost_usd: Some(1.5),
+                    cost_complete: true,
                 },
                 crate::models::CycleModelUsage {
                     model: "Unattributed".into(),
                     total_tokens: 4,
                     request_count: None,
+                    cost_usd: None,
+                    cost_complete: false,
                 },
             ]),
         };
@@ -836,6 +840,36 @@ mod tests {
             .load_reset_cycles("codex", "account-b", "weekly")
             .unwrap()
             .is_empty());
+
+        // Token-only model details from older caches retain their counts, but
+        // cannot claim a complete zero-dollar estimate.
+        let mut token_only = serde_json::to_value(&cycle.cycle).unwrap();
+        for model in token_only["modelUsage"].as_array_mut().unwrap() {
+            model.as_object_mut().unwrap().remove("costUsd");
+            model.as_object_mut().unwrap().remove("costComplete");
+        }
+        storage
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE reset_cycle_usage SET payload = ?1
+                 WHERE provider_id = 'codex' AND identity_key = 'account-a'",
+                rusqlite::params![serde_json::to_string(&token_only).unwrap()],
+            )
+            .unwrap();
+        let loaded = storage
+            .load_reset_cycles("codex", "account-a", "weekly")
+            .unwrap();
+        let models = loaded[0].cycle.model_usage.as_ref().unwrap();
+        assert_eq!(models[0].total_tokens, 8);
+        assert_eq!(models[0].request_count, Some(2));
+        assert_eq!(models[1].total_tokens, 4);
+        assert_eq!(models[1].request_count, None);
+        assert!(models
+            .iter()
+            .all(|model| model.cost_usd.is_none() && !model.cost_complete));
+        assert_eq!(loaded[0].cycle.usage.tokens, 12);
+        assert_eq!(loaded[0].recovery.baseline_tokens, 12);
 
         // A pre-detail snapshot remains unknown at the persistence boundary.
         let mut legacy = serde_json::to_value(&cycle.cycle).unwrap();

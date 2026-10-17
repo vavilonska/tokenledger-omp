@@ -2,7 +2,7 @@
   import { costReading, costTooltip } from './costDisplay';
   import { formatMetricNumber, formatMetricValue } from './metricFormat';
   import { resolvedLanguage } from './localization';
-  import type { ResetCycleUsage } from './types';
+  import type { CycleModelUsage, ResetCycleUsage } from './types';
 
   interface Props {
     title: string;
@@ -17,10 +17,19 @@
   const detailId = $props.id();
   let selectedCycle = $state<string | null>(null);
   let pointerInside = false;
-  const tokenShares = new Intl.NumberFormat(resolvedLanguage(), {
+  const shares = new Intl.NumberFormat(resolvedLanguage(), {
     style: 'percent',
     maximumFractionDigits: 2,
   });
+
+  function costShareReason(cycle: ResetCycleUsage, model: CycleModelUsage) {
+    if (model.costUsd == null) return 'Model cost is unknown.';
+    if (model.costComplete !== true) return 'Model cost is partial or unknown.';
+    if (!cycle.usage.estimateComplete) return 'Cycle cost is partial or unknown.';
+    if (cycle.usage.estimatedCostUsd == null) return 'Cycle cost is unknown.';
+    if (cycle.usage.estimatedCostUsd <= 0) return 'Cycle cost must be greater than zero.';
+    return undefined;
+  }
 
   function dismissModels(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
@@ -148,22 +157,38 @@
                 <thead>
                   <tr>
                     <th scope="col">Model</th>
-                    <th scope="col">Token usage</th>
-                    <th scope="col">Cycle token share</th>
+                    <th scope="col">Token usage<span>Cycle token share</span></th>
+                    <th scope="col">Consumption<span>Cycle cost share</span></th>
                     <th scope="col">Requests</th>
                   </tr>
                 </thead>
                 <tbody>
                   {#each [...cycle.modelUsage].sort((a, b) => b.totalTokens - a.totalTokens || a.model.localeCompare(b.model)) as model (model.model)}
+                    {@const unavailableCostShare = costShareReason(cycle, model)}
                     <tr>
                       <th scope="row">{model.model}</th>
-                      <td>{formatMetricNumber(model.totalTokens, 'count', 'full')}</td>
-                      <td
-                        >{cycle.usage.tokens > 0
-                          ? tokenShares.format(model.totalTokens / cycle.usage.tokens)
-                          : '—'}</td
-                      >
-                      <td
+                      <td>
+                        {formatMetricNumber(model.totalTokens, 'count', 'full')}
+                        <span
+                          >{cycle.usage.tokens > 0
+                            ? shares.format(model.totalTokens / cycle.usage.tokens)
+                            : '—'}</span
+                        >
+                      </td>
+                      <td>
+                        <span class="cycle-model-cost" title={costTooltip(model.costUsd, credits)}
+                          >{costReading(model.costUsd, credits, true)}
+                          {#if model.costUsd != null && model.costComplete !== true}
+                            <small>partial</small>
+                          {/if}</span
+                        >
+                        <span title={unavailableCostShare}
+                          >{unavailableCostShare === undefined
+                            ? shares.format(model.costUsd! / cycle.usage.estimatedCostUsd!)
+                            : '—'}</span
+                        >
+                      </td>
+                      <td class:cycle-model-unknown={model.requestCount == null}
                         >{model.requestCount == null
                           ? 'Unknown'
                           : formatMetricNumber(model.requestCount, 'count', 'full')}</td
@@ -173,7 +198,10 @@
                 </tbody>
               </table>
             {/if}
-            <p>Shares use this cycle’s total tokens, independent of pricing.</p>
+            <p>
+              Token shares use cycle tokens. Cost shares use complete cycle costs in the selected
+              pricing basis.
+            </p>
           </div>
         {/if}
         {#if sources.length}
@@ -313,13 +341,15 @@
 
     .cycle-model-detail table {
       width: 100%;
+      table-layout: fixed;
       border-collapse: collapse;
       font-variant-numeric: tabular-nums;
     }
 
     .cycle-model-detail th,
     .cycle-model-detail td {
-      padding: 5px;
+      box-sizing: border-box;
+      padding: 5px 3px;
       border-bottom: 1px solid var(--separator);
       text-align: right;
       vertical-align: top;
@@ -332,15 +362,46 @@
     }
 
     .cycle-model-detail th:first-child {
-      min-width: 70px;
-      max-width: 130px;
+      width: 24%;
       overflow-wrap: anywhere;
       text-align: left;
       font-weight: 550;
     }
 
+    .cycle-model-detail th:nth-child(2) {
+      width: 30%;
+    }
+
+    .cycle-model-detail th:nth-child(3) {
+      width: 31%;
+    }
+
+    .cycle-model-detail th:last-child {
+      width: 15%;
+      overflow-wrap: anywhere;
+    }
+
     .cycle-model-detail td {
       white-space: nowrap;
+    }
+
+    .cycle-model-detail td.cycle-model-unknown {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .cycle-model-detail th > span,
+    .cycle-model-detail td > span:not(.cycle-model-cost) {
+      display: block;
+      color: var(--secondary);
+      font-size: 9px;
+      font-weight: 400;
+    }
+
+    .cycle-model-detail small {
+      display: block;
+      color: var(--secondary);
+      font-size: 9px;
     }
 
     .cycle-model-detail p {

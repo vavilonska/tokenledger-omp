@@ -23,10 +23,34 @@ const cycle: ResetCycleUsage = {
     },
   },
   modelUsage: [
-    { model: 'formerly-folded-model', totalTokens: 1_500, requestCount: 17 },
-    { model: 'Unattributed', totalTokens: 500, requestCount: null },
-    { model: 'main-model', totalTokens: 7_000, requestCount: 1234 },
-    { model: 'unpriced-model', totalTokens: 1_000, requestCount: 0 },
+    {
+      model: 'formerly-folded-model',
+      totalTokens: 1_500,
+      requestCount: 17,
+      costUsd: 1,
+      costComplete: true,
+    },
+    {
+      model: 'Unattributed',
+      totalTokens: 500,
+      requestCount: null,
+      costUsd: null,
+      costComplete: false,
+    },
+    {
+      model: 'main-model',
+      totalTokens: 7_000,
+      requestCount: 1234,
+      costUsd: 99,
+      costComplete: true,
+    },
+    {
+      model: 'unpriced-model',
+      totalTokens: 1_000,
+      requestCount: 0,
+      costUsd: null,
+      costComplete: false,
+    },
   ],
 };
 
@@ -47,9 +71,9 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('cycle token model disclosure', () => {
+describe('cycle token and cost model disclosure', () => {
   it.each([false, true])(
-    'uses complete token-ranked models, not cost shares, with credits=%s',
+    'keeps complete token-ranked models and separate cost shares, with credits=%s',
     async (credits) => {
       show([cycle], credits);
       const trigger = screen.getByRole('button', { name: 'Show cycle model usage' });
@@ -63,19 +87,28 @@ describe('cycle token model disclosure', () => {
         'unpriced-model',
         'Unattributed',
       ]);
-      expect(
-        within(rows[0])
-          .getAllByRole('cell')
-          .map((cell) => cell.textContent),
-      ).toEqual(['7,000', '70%', '1,234']);
-      expect(
-        within(rows[1])
-          .getAllByRole('cell')
-          .map((cell) => cell.textContent),
-      ).toEqual(['1,500', '15%', '17']);
+      const mainCells = within(rows[0]).getAllByRole('cell');
+      expect(mainCells[0]).toHaveTextContent('7,000');
+      expect(mainCells[0]).toHaveTextContent('70%');
+      expect(mainCells[1]).toHaveTextContent(credits ? '2,475 cr' : '$99.00');
+      expect(mainCells[1]).toHaveTextContent('99%');
+      expect(mainCells[2]).toHaveTextContent('1,234');
+      const foldedCells = within(rows[1]).getAllByRole('cell');
+      expect(foldedCells[0]).toHaveTextContent('1,500');
+      expect(foldedCells[0]).toHaveTextContent('15%');
+      expect(foldedCells[1]).toHaveTextContent(credits ? '25 cr' : '$1.00');
+      expect(foldedCells[1]).toHaveTextContent('1%');
+      expect(foldedCells[2]).toHaveTextContent('17');
       expect(within(rows[2]).getAllByRole('cell').at(-1)).toHaveTextContent('0');
       expect(within(rows[3]).getAllByRole('cell').at(-1)).toHaveTextContent('Unknown');
       expect(detail).not.toHaveTextContent('Other');
+      expect(within(detail).getAllByRole('columnheader')).toHaveLength(4);
+      expect(within(rows[0]).getAllByRole('cell')[1].querySelector('[title]')).toHaveAttribute(
+        'title',
+        expect.stringContaining(credits ? '2,475 cr' : '$99.00'),
+      );
+      expect(within(rows[2]).getAllByRole('cell')[1]).toHaveTextContent(/^—\s*—$/);
+      expect(within(rows[2]).getByTitle('Model cost is unknown.')).toHaveTextContent('—');
       await fireEvent.mouseLeave(trigger);
       await fireEvent.mouseEnter(detail);
       expect(detail).toBeVisible();
@@ -108,11 +141,13 @@ describe('cycle token model disclosure', () => {
       {
         ...cycle,
         usage: { ...cycle.usage, tokens: 0 },
-        modelUsage: [{ model: 'zero-model', totalTokens: 0, requestCount: 0 }],
+        modelUsage: [
+          { model: 'zero-model', totalTokens: 0, requestCount: 0, costUsd: 0, costComplete: true },
+        ],
       },
     ]);
     await fireEvent.focus(screen.getByRole('button', { name: 'Show cycle model usage' }));
-    expect(within(screen.getAllByRole('row')[1]).getAllByRole('cell')[1]).toHaveTextContent('—');
+    expect(within(screen.getAllByRole('row')[1]).getAllByRole('cell')[0]).toHaveTextContent('—');
   });
 
   it('opens historical cycles by keyboard without sharing the current cycle denominator', async () => {
@@ -123,7 +158,15 @@ describe('cycle token model disclosure', () => {
         startedAt: '2026-09-08T09:59:41Z',
         endedAt: cycle.startedAt,
         usage: { ...cycle.usage, tokens: 200 },
-        modelUsage: [{ model: 'historical-model', totalTokens: 50, requestCount: 3 }],
+        modelUsage: [
+          {
+            model: 'historical-model',
+            totalTokens: 50,
+            requestCount: 3,
+            costUsd: 10,
+            costComplete: true,
+          },
+        ],
       },
     ]);
     const triggers = screen.getAllByRole('button', { name: 'Show cycle model usage' });
@@ -132,6 +175,7 @@ describe('cycle token model disclosure', () => {
     expect(triggers[0]).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByRole('dialog')).toHaveTextContent('historical-model');
     expect(screen.getByRole('dialog')).toHaveTextContent('25%');
+    expect(screen.getByRole('dialog')).toHaveTextContent('10%');
     expect(screen.getByRole('dialog')).not.toHaveTextContent('main-model');
   });
 
@@ -158,6 +202,8 @@ describe('cycle token model disclosure', () => {
           '周期 Token 占比',
         ),
       );
+      expect(screen.getByRole('columnheader', { name: /消费金额.*周期金额占比/ })).toBeVisible();
+      expect(screen.getAllByTitle('模型金额未知。')[0]).toHaveTextContent('—');
       expect(screen.getByRole('columnheader', { name: '请求数' })).toBeVisible();
       expect(screen.getByRole('rowheader', { name: '未归属' }).closest('tr')).toHaveTextContent(
         '未知',
@@ -167,6 +213,128 @@ describe('cycle token model disclosure', () => {
     } finally {
       stop();
     }
+  });
+
+  it.each([false, true])(
+    'reads the selected basis once, including small amounts, credits=%s',
+    async (credits) => {
+      const apiCycle = {
+        ...cycle,
+        usage: { ...cycle.usage, estimatedCostUsd: 0.5 },
+        modelUsage: [
+          {
+            model: 'basis-model',
+            totalTokens: 1_000,
+            requestCount: 1,
+            costUsd: 0.125,
+            costComplete: true,
+          },
+        ],
+      };
+      const creditCycle = {
+        ...apiCycle,
+        usage: { ...apiCycle.usage, estimatedCostUsd: 0.2 },
+        modelUsage: [{ ...apiCycle.modelUsage[0], costUsd: 0.01 }],
+      };
+      show([credits ? creditCycle : apiCycle], credits);
+      await fireEvent.focus(screen.getByRole('button', { name: 'Show cycle model usage' }));
+      const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell');
+      expect(cells[0]).toHaveTextContent('10%');
+      expect(cells[1]).toHaveTextContent(credits ? '0.25 cr' : '$0.13');
+      expect(cells[1]).toHaveTextContent(credits ? '5%' : '25%');
+      expect(cells[1].querySelector('[title]')).toHaveAttribute(
+        'title',
+        expect.stringContaining(credits ? '0.25 cr' : '$0.13'),
+      );
+    },
+  );
+
+  it.each([
+    {
+      costUsd: null,
+      costComplete: false,
+      total: 100,
+      complete: true,
+      reason: 'Model cost is unknown.',
+      amount: '—',
+    },
+    {
+      costUsd: 2,
+      costComplete: false,
+      total: 100,
+      complete: true,
+      reason: 'Model cost is partial or unknown.',
+      amount: '$2.00 partial',
+    },
+    {
+      costUsd: 2,
+      costComplete: true,
+      total: 100,
+      complete: false,
+      reason: 'Cycle cost is partial or unknown.',
+      amount: '$2.00',
+    },
+    {
+      costUsd: 2,
+      costComplete: true,
+      total: null,
+      complete: true,
+      reason: 'Cycle cost is unknown.',
+      amount: '$2.00',
+    },
+    {
+      costUsd: 0,
+      costComplete: true,
+      total: 0,
+      complete: true,
+      reason: 'Cycle cost must be greater than zero.',
+      amount: '$0.00',
+    },
+  ])(
+    'explains unavailable cost shares: $reason',
+    async ({ costUsd, costComplete, total, complete, reason, amount }) => {
+      show([
+        {
+          ...cycle,
+          usage: { ...cycle.usage, estimatedCostUsd: total, estimateComplete: complete },
+          modelUsage: [
+            { model: 'cost-state', totalTokens: 100, requestCount: 1, costUsd, costComplete },
+          ],
+        },
+      ]);
+      await fireEvent.focus(screen.getByRole('button', { name: 'Show cycle model usage' }));
+      const cell = within(screen.getAllByRole('row')[1]).getAllByRole('cell')[1];
+      expect(cell).toHaveTextContent(amount);
+      expect(within(cell).getByTitle(reason)).toHaveTextContent('—');
+      expect(cell).not.toHaveTextContent(/NaN|Infinity|%/);
+    },
+  );
+
+  it('preserves token-only cached model rows without inventing a zero cost', async () => {
+    show([{ ...cycle, modelUsage: [{ model: 'legacy-model', totalTokens: 50, requestCount: 3 }] }]);
+    await fireEvent.focus(screen.getByRole('button', { name: 'Show cycle model usage' }));
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell');
+    expect(cells[0]).toHaveTextContent('50');
+    expect(cells[0]).toHaveTextContent('0.5%');
+    expect(cells[1]).toHaveTextContent(/^—\s*—$/);
+    expect(cells[1]).not.toHaveTextContent('$0');
+    expect(cells[2]).toHaveTextContent('3');
+  });
+
+  it('shows an exactly known zero model cost as zero percent of a positive cycle', async () => {
+    show([
+      {
+        ...cycle,
+        modelUsage: [
+          { model: 'free', totalTokens: 100, requestCount: 1, costUsd: 0, costComplete: true },
+        ],
+      },
+    ]);
+    await fireEvent.focus(screen.getByRole('button', { name: 'Show cycle model usage' }));
+    const costCell = within(screen.getAllByRole('row')[1]).getAllByRole('cell')[1];
+    expect(costCell).toHaveTextContent('$0.00');
+    expect(costCell).toHaveTextContent('0%');
+    expect(costCell).not.toHaveTextContent('partial');
   });
 
   it('keeps the parent open across mouse transfer and focused reading, then closes after exit', async () => {

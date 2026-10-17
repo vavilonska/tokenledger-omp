@@ -402,9 +402,16 @@ fn add_cycle_event(
             model: model.to_owned(),
             total_tokens: 0,
             request_count: Some(0),
+            cost_usd: None,
+            cost_complete: true,
         });
     entry.total_tokens = entry.total_tokens.saturating_add(tokens);
     entry.request_count = entry.request_count.map(|count| count.saturating_add(1));
+    if let Some(cost) = cost {
+        entry.cost_usd = Some(entry.cost_usd.unwrap_or_default() + cost);
+    } else {
+        entry.cost_complete = false;
+    }
     bucket.observed_tokens = bucket.observed_tokens.saturating_add(tokens);
     if bucket
         .recovery
@@ -461,11 +468,14 @@ fn build_cycle_history(
                         model: "Unattributed".to_owned(),
                         total_tokens: 0,
                         request_count: None,
+                        cost_usd: None,
+                        cost_complete: false,
                     });
                 entry.total_tokens = entry.total_tokens.saturating_add(missing_tokens);
                 // A recovered balance is not an observed request, even when it
                 // shares the fallback model name with a real event.
                 entry.request_count = None;
+                entry.cost_complete = false;
             }
             let mut usage = cycle_period(
                 bucket.accumulator,
@@ -2621,6 +2631,8 @@ mod persistent_cycle_recovery_regressions {
                     model: "gpt-6-astra".into(),
                     total_tokens: 200,
                     request_count: Some(3),
+                    cost_usd: Some(2.0),
+                    cost_complete: true,
                 }])
             );
             assert_eq!(weekly.as_ref(), Some(&after[0].usage));
@@ -2726,32 +2738,36 @@ mod persistent_cycle_recovery_regressions {
     }
 
     #[test]
-    fn recovered_balance_makes_unattributed_request_count_unknown() {
+    fn recovered_balance_keeps_unattributed_subtotal_but_not_cost_completeness() {
         for observed in [20, 100] {
-            let mut buckets = restore_cycle_buckets(Vec::new(), &[snapshot(100, None)], day(3));
-            add_cycle_event(
-                &mut buckets,
-                day(2),
-                "  ",
-                observed,
-                None,
-                "Oh My Pi",
-                false,
-            );
-            let cycles = build_cycle_history(buckets, day(3), "test");
-            assert_eq!(
-                cycles[0].cycle.model_usage,
-                Some(vec![CycleModelUsage {
-                    model: "Unattributed".into(),
-                    total_tokens: 100,
-                    request_count: (observed == 100).then_some(1),
-                }])
-            );
-            let dto = serde_json::to_value(&cycles[0].cycle).unwrap();
-            assert_eq!(
-                dto["modelUsage"][0]["requestCount"].is_null(),
-                observed < 100
-            );
+            for cost in [None, Some(0.0), Some(0.25)] {
+                let mut buckets = restore_cycle_buckets(Vec::new(), &[snapshot(100, None)], day(3));
+                add_cycle_event(
+                    &mut buckets,
+                    day(2),
+                    "  ",
+                    observed,
+                    cost,
+                    "Oh My Pi",
+                    false,
+                );
+                let cycles = build_cycle_history(buckets, day(3), "test");
+                assert_eq!(
+                    cycles[0].cycle.model_usage,
+                    Some(vec![CycleModelUsage {
+                        model: "Unattributed".into(),
+                        total_tokens: 100,
+                        request_count: (observed == 100).then_some(1),
+                        cost_usd: cost,
+                        cost_complete: observed == 100 && cost.is_some(),
+                    }])
+                );
+                let dto = serde_json::to_value(&cycles[0].cycle).unwrap();
+                assert_eq!(
+                    dto["modelUsage"][0]["requestCount"].is_null(),
+                    observed < 100
+                );
+            }
         }
     }
 
@@ -2925,6 +2941,19 @@ mod cycle_model_usage_regressions {
             assert_eq!(models[0].model, "GPT-6-ASTRA");
             assert_eq!(models[0].total_tokens, 150);
             assert_eq!(models[0].request_count, Some(3));
+            let expected_cost: f64 = events[..events.len() / 2]
+                .iter()
+                .filter(|event| event.model.trim().eq_ignore_ascii_case("gpt-6-astra"))
+                .filter_map(|event| estimate_cost(event, &pricing))
+                .sum();
+            assert_eq!(models[0].cost_usd, Some(expected_cost));
+            // Case-folded attribution can combine an unrecognized price identity
+            // with priced events; keep the subtotal without claiming completeness.
+            assert!(!models[0].cost_complete);
+            assert!(models
+                .iter()
+                .filter(|model| model.model != "GPT-6-ASTRA")
+                .all(|model| model.cost_usd.is_none() && !model.cost_complete));
             assert!(models
                 .windows(2)
                 .all(|pair| pair[0].total_tokens >= pair[1].total_tokens));
@@ -2935,16 +2964,86 @@ mod cycle_model_usage_regressions {
                     model: "next-cycle".into(),
                     total_tokens: 20,
                     request_count: Some(1),
+                    cost_usd: None,
+                    cost_complete: false,
                 }])
             );
             let dto = serde_json::to_value(cycle).unwrap();
             assert_eq!(dto["modelUsage"][0]["requestCount"], 3);
+            let counts: Vec<_> = models
+                .iter()
+                .map(|model| (model.model.clone(), model.total_tokens, model.request_count))
+                .collect();
             if credit_mode {
-                assert_eq!(cycle.model_usage, api_models);
+                assert_eq!(Some(counts), api_models);
             } else {
-                api_models = cycle.model_usage.clone();
+                api_models = Some(counts);
             }
         }
+    }
+
+    #[test]
+    fn cycle_model_subtotals_zero_and_unknown_costs_survive_each_basis_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.db");
+        let storage = Storage::open(&path).unwrap();
+        for (credit_mode, cost) in [(false, 4.0), (true, 0.5)] {
+            let mut buckets = build_cycle_buckets(anchors(), day(7));
+            for (model, tokens, cost) in [
+                ("priced-and-missing", 80, Some(cost)),
+                ("PRICED-AND-MISSING", 20, None),
+                ("priced-and-missing", 10, Some(cost / 2.0)),
+                ("unknown", 10, None),
+                ("free", 10, Some(0.0)),
+            ] {
+                add_cycle_event(&mut buckets, day(2), model, tokens, cost, "Codex", false);
+            }
+            let saved = persist_cycles(
+                &storage,
+                Some("account"),
+                build_cycle_history(buckets, day(7), "test"),
+                credit_mode,
+            )
+            .unwrap();
+            let models = saved[0].model_usage.as_ref().unwrap();
+            let mixed = models
+                .iter()
+                .find(|model| model.model == "priced-and-missing")
+                .unwrap();
+            assert_eq!(mixed.total_tokens, 110);
+            assert_eq!(mixed.request_count, Some(3));
+            assert_eq!(mixed.cost_usd, Some(cost * 1.5));
+            assert!(!mixed.cost_complete);
+            let unknown = models
+                .iter()
+                .find(|model| model.model == "unknown")
+                .unwrap();
+            assert_eq!(unknown.cost_usd, None);
+            assert!(!unknown.cost_complete);
+            let free = models.iter().find(|model| model.model == "free").unwrap();
+            assert_eq!(free.cost_usd, Some(0.0));
+            assert!(free.cost_complete);
+            assert_eq!(saved[0].usage.estimated_cost_usd, Some(cost * 1.5));
+            assert!(!saved[0].usage.estimate_complete);
+            let reopened = Storage::open(&path)
+                .unwrap()
+                .load_reset_cycles("codex", "account", cycle_storage_key(credit_mode))
+                .unwrap();
+            assert_eq!(reopened[0].cycle, saved[0]);
+        }
+        let reopened = Storage::open(&path).unwrap();
+        let read_cost = |credit_mode| {
+            reopened
+                .load_reset_cycles("codex", "account", cycle_storage_key(credit_mode))
+                .unwrap()[0]
+                .cycle
+                .model_usage
+                .as_ref()
+                .unwrap()[0]
+                .cost_usd
+        };
+        assert_eq!(read_cost(false), Some(6.0));
+        assert_eq!(read_cost(true), Some(0.75));
     }
 
     #[test]
@@ -2956,13 +3055,14 @@ mod cycle_model_usage_regressions {
             serde_json::json!({"type":"session","id":"session"}),
             serde_json::json!({"type":"message","id":"main","timestamp":"2026-07-02T00:00:00Z",
                 "message":{"role":"assistant","provider":"openai-codex","model":"gpt-6-astra",
-                    "responseId":"response-main","usage":{"input":100,"output":10,"totalTokens":110}}}),
+                    "responseId":"response-main","serviceTier":"default",
+                    "usage":{"input":100,"output":10,"totalTokens":110}}}),
             serde_json::json!({"type":"model_usage","id":"title","parentId":"main",
                 "timestamp":"2026-07-02T00:01:00Z","purpose":"title","provider":"openai-codex",
-                "model":"gpt-5-mini","usage":{"input":3,"output":4,"totalTokens":7}}),
+                "model":"gpt-5-mini","serviceTier":"default","usage":{"input":3,"output":4,"totalTokens":7}}),
             serde_json::json!({"type":"model_usage","id":"memory","parentId":"main",
                 "timestamp":"2026-07-02T00:02:00Z","purpose":"memory","provider":"openai-codex",
-                "model":"gpt-5-mini","usage":{"input":6,"output":7,"totalTokens":13}}),
+                "model":"gpt-5-mini","serviceTier":"default","usage":{"input":6,"output":7,"totalTokens":13}}),
             serde_json::json!({"type":"message","id":"empty","timestamp":"2026-07-02T00:03:00Z",
                 "message":{"role":"assistant","provider":"openai-codex","model":"gpt-6-astra",
                     "usage":{"input":0,"output":0,"totalTokens":0}}}),
@@ -2999,6 +3099,25 @@ mod cycle_model_usage_regressions {
             )
             .unwrap();
             assert_eq!(outcome.events.len(), 3);
+            let main_cost = outcome
+                .events
+                .iter()
+                .find(|event| event.model == "gpt-6-astra")
+                .unwrap()
+                .cost;
+            let mini_costs: Vec<_> = outcome
+                .events
+                .iter()
+                .filter(|event| event.model == "gpt-5-mini")
+                .map(|event| event.cost)
+                .collect();
+            let mini_cost = mini_costs
+                .iter()
+                .flatten()
+                .copied()
+                .reduce(|sum, cost| sum + cost);
+            assert!(main_cost.is_some());
+            assert_eq!(mini_cost.is_some(), !credit_mode);
             let mut buckets = build_cycle_buckets(anchors(), day(9));
             for event in outcome.events {
                 add_cycle_event(
@@ -3021,18 +3140,29 @@ mod cycle_model_usage_regressions {
                         model: "gpt-6-astra".into(),
                         total_tokens: 110,
                         request_count: Some(1),
+                        cost_usd: main_cost,
+                        cost_complete: true,
                     },
                     CycleModelUsage {
                         model: "gpt-5-mini".into(),
                         total_tokens: 20,
                         request_count: Some(2),
+                        cost_usd: mini_cost,
+                        cost_complete: mini_costs.iter().all(Option::is_some),
                     },
                 ])
             );
+            let counts: Vec<_> = cycle
+                .model_usage
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|model| (model.model.clone(), model.total_tokens, model.request_count))
+                .collect();
             if credit_mode {
-                assert_eq!(cycle.model_usage, api_models);
+                assert_eq!(Some(counts), api_models);
             } else {
-                api_models = cycle.model_usage.clone();
+                api_models = Some(counts);
             }
         }
     }
