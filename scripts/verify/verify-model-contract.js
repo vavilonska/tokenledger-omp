@@ -16,6 +16,8 @@ const contracts = [
   'StatusMetric',
   'ProviderNotice',
   'UsagePeriod',
+  'ResetCycleUsage',
+  'CycleModelUsage',
   'ModelUsageEntry',
   'ModelUsageVariant',
   'ModelUsageBreakdown',

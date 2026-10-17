@@ -59,6 +59,13 @@ export interface ResetCycleUsage {
   endedAt?: string | null;
   scheduledResetAt: string;
   usage: UsagePeriod;
+  modelUsage?: CycleModelUsage[] | null;
+}
+
+export interface CycleModelUsage {
+  model: string;
+  totalTokens: number;
+  requestCount: number | null;
 }
 
 export interface ModelUsageEntry {

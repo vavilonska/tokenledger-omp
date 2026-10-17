@@ -152,6 +152,16 @@ pub struct ResetCycleUsage {
     pub ended_at: Option<DateTime<Utc>>,
     pub scheduled_reset_at: DateTime<Utc>,
     pub usage: UsagePeriod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<Vec<CycleModelUsage>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CycleModelUsage {
+    pub model: String,
+    pub total_tokens: u64,
+    pub request_count: Option<u64>,
 }
 
 fn default_true() -> bool {

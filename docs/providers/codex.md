@@ -55,11 +55,19 @@ shared, so the quota is shown once instead of being added twice.
 The cycle allowance estimate divides complete combined local API-value spend by the server-reported
 used percentage. Partial estimates do not infer an allowance. It changes with model mix and is an
 estimate, not an OpenAI invoice or a cash balance.
-Hover the weekly API-value row to see reset-cycle history. Its boundaries come from the reset times
-saved by Oh My Pi, so a banked reset starts a new window instead of being forced into a calendar
-week. TokenLedger OMP preserves those reconstructed cycles in its account-scoped database. It does not
-guess whether a reset was automatic, global, or banked, and does not upload local records or
-credentials.
+Hover the weekly API-value or Codex-credit row to see reset-cycle history. Hover, focus, or click a
+cycle's Token count to open its complete model table: Token usage, share of that cycle's total
+Tokens, and deduplicated requests with valid usage. Models are not folded into “Other”, and Token
+shares and request counts are the same in API USD and Codex-credit mode. The table stays open while
+the pointer or keyboard focus remains in the history card; use Tab to enter the scrollable table
+and Escape to close it and return focus to the Token count. Selecting another cycle replaces it.
+Old cached cycles without model details show unknown usage. A recovered `Unattributed` balance has
+an unknown request count; it is not treated as zero or as one reconstructed request.
+
+Cycle boundaries come from the reset times saved by Oh My Pi, so a banked reset starts a new window
+instead of being forced into a calendar week. TokenLedger OMP preserves those reconstructed cycles
+in its account-scoped database. It does not guess whether a reset was automatic, global, or banked,
+and does not upload local records or credentials.
 
 ## API USD and Codex credits
 

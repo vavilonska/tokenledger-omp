@@ -801,6 +801,18 @@ mod tests {
                 model_breakdown: None,
                 unknown_models: Vec::new(),
             },
+            model_usage: Some(vec![
+                crate::models::CycleModelUsage {
+                    model: "gpt-6-astra".into(),
+                    total_tokens: 8,
+                    request_count: Some(2),
+                },
+                crate::models::CycleModelUsage {
+                    model: "Unattributed".into(),
+                    total_tokens: 4,
+                    request_count: None,
+                },
+            ]),
         };
         let cycle = StoredResetCycle {
             recovery: CycleRecovery {
@@ -818,12 +830,31 @@ mod tests {
             storage
                 .load_reset_cycles("codex", "account-a", "weekly")
                 .unwrap(),
-            vec![cycle]
+            vec![cycle.clone()]
         );
         assert!(storage
             .load_reset_cycles("codex", "account-b", "weekly")
             .unwrap()
             .is_empty());
+
+        // A pre-detail snapshot remains unknown at the persistence boundary.
+        let mut legacy = serde_json::to_value(&cycle.cycle).unwrap();
+        legacy.as_object_mut().unwrap().remove("modelUsage");
+        storage
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE reset_cycle_usage SET payload = ?1
+                 WHERE provider_id = 'codex' AND identity_key = 'account-a'",
+                rusqlite::params![serde_json::to_string(&legacy).unwrap()],
+            )
+            .unwrap();
+        let loaded = storage
+            .load_reset_cycles("codex", "account-a", "weekly")
+            .unwrap();
+        assert_eq!(loaded[0].cycle.model_usage, None);
+        assert_eq!(loaded[0].cycle.usage.tokens, 12);
+        assert_eq!(loaded[0].recovery.baseline_tokens, 12);
     }
 
     #[test]

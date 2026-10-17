@@ -78,8 +78,8 @@
     return [heading, ...models.map((model) => `- ${model}`)].join('\n');
   }
   function scheduleShow(event: Event) {
+    keepOpen();
     if ((!period?.modelBreakdown?.models.length && !cycles.length) || open || showTimer) return;
-    if (hideTimer) clearTimeout(hideTimer);
     const target = event.currentTarget as HTMLElement;
     const rect = target.getBoundingClientRect();
     const estimatedHeight = cycles.length

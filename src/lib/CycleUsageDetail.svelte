@@ -1,6 +1,6 @@
 <script lang="ts">
   import { costReading, costTooltip } from './costDisplay';
-  import { formatMetricValue } from './metricFormat';
+  import { formatMetricNumber, formatMetricValue } from './metricFormat';
   import { resolvedLanguage } from './localization';
   import type { ResetCycleUsage } from './types';
 
@@ -14,6 +14,28 @@
   }
 
   let { title, cycles, top, onEnter, onLeave, credits = false }: Props = $props();
+  const detailId = $props.id();
+  let selectedCycle = $state<string | null>(null);
+  let pointerInside = false;
+  const tokenShares = new Intl.NumberFormat(resolvedLanguage(), {
+    style: 'percent',
+    maximumFractionDigits: 2,
+  });
+
+  function dismissModels(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    if (
+      event.currentTarget instanceof HTMLElement &&
+      event.currentTarget.classList.contains('cycle-model-detail')
+    ) {
+      event.currentTarget
+        .closest('section')
+        ?.querySelector<HTMLButtonElement>('.cycle-token-trigger')
+        ?.focus();
+    }
+    selectedCycle = null;
+    event.stopPropagation();
+  }
 
   function range(cycle: ResetCycleUsage) {
     const dateTime = new Intl.DateTimeFormat(resolvedLanguage(), {
@@ -48,15 +70,26 @@
 
 <div
   class="cycle-usage-detail"
-  style={`top:${top}px`}
+  style={`top:${top}px;max-height:calc(100dvh - ${top + 8}px)`}
   role="tooltip"
   aria-label={`${title} reset cycle history`}
-  onmouseenter={onEnter}
-  onmouseleave={onLeave}
+  onmouseenter={() => {
+    pointerInside = true;
+    onEnter();
+  }}
+  onmouseleave={(event) => {
+    pointerInside = false;
+    if (!event.currentTarget.contains(document.activeElement)) onLeave();
+  }}
+  onfocusin={onEnter}
+  onfocusout={(event) => {
+    if (!pointerInside && !event.currentTarget.contains(event.relatedTarget as Node | null))
+      onLeave();
+  }}
 >
   <h3>Actual reset cycles</h3>
   <div class="cycle-usage-list">
-    {#each cycles as cycle (cycle.startedAt)}
+    {#each cycles as cycle, index (cycle.startedAt)}
       {@const sources = sourceTotals(cycle)}
       <section class:cycle-current={!cycle.endedAt}>
         <div class="cycle-heading">
@@ -81,8 +114,68 @@
         </div>
         <div class="cycle-meta">
           <span>{cycle.usage.quotaUsedPercent?.toFixed(0) ?? '—'}% observed</span>
-          <span>{formatMetricValue(cycle.usage.tokens, 'count', 'row', 'tokens')}</span>
+          <button
+            type="button"
+            class="cycle-token-trigger"
+            aria-label="Show cycle model usage"
+            aria-expanded={selectedCycle === cycle.startedAt}
+            aria-haspopup="dialog"
+            aria-controls={`${detailId}-${index}`}
+            title={formatMetricValue(cycle.usage.tokens, 'count', 'full', 'tokens')}
+            onmouseenter={() => (selectedCycle = cycle.startedAt)}
+            onfocus={() => (selectedCycle = cycle.startedAt)}
+            onclick={() => (selectedCycle = cycle.startedAt)}
+            onkeydown={dismissModels}
+            >{formatMetricValue(cycle.usage.tokens, 'count', 'row', 'tokens')}</button
+          >
         </div>
+        {#if selectedCycle === cycle.startedAt}
+          <div
+            id={`${detailId}-${index}`}
+            class="cycle-model-detail"
+            role="dialog"
+            aria-modal="false"
+            aria-label="Cycle model usage"
+            tabindex="0"
+            onkeydown={dismissModels}
+          >
+            {#if cycle.modelUsage == null}
+              <p>Model usage is unknown for this cycle.</p>
+            {:else if !cycle.modelUsage.length}
+              <p>No model usage in this cycle.</p>
+            {:else}
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Model</th>
+                    <th scope="col">Token usage</th>
+                    <th scope="col">Cycle token share</th>
+                    <th scope="col">Requests</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each [...cycle.modelUsage].sort((a, b) => b.totalTokens - a.totalTokens || a.model.localeCompare(b.model)) as model (model.model)}
+                    <tr>
+                      <th scope="row">{model.model}</th>
+                      <td>{formatMetricNumber(model.totalTokens, 'count', 'full')}</td>
+                      <td
+                        >{cycle.usage.tokens > 0
+                          ? tokenShares.format(model.totalTokens / cycle.usage.tokens)
+                          : '—'}</td
+                      >
+                      <td
+                        >{model.requestCount == null
+                          ? 'Unknown'
+                          : formatMetricNumber(model.requestCount, 'count', 'full')}</td
+                      >
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+            <p>Shares use this cycle’s total tokens, independent of pricing.</p>
+          </div>
+        {/if}
         {#if sources.length}
           <div class="cycle-sources">
             {#each sources as source (source[0])}
@@ -109,7 +202,7 @@
       right: 8px;
       z-index: 100;
       box-sizing: border-box;
-      width: 304px;
+      width: min(360px, calc(100vw - 16px));
       max-height: calc(100vh - 16px);
       padding: 14px;
       overflow-y: auto;
@@ -182,6 +275,79 @@
 
     .cycle-meta {
       color: var(--secondary);
+    }
+
+    .cycle-token-trigger {
+      padding: 0;
+      border: 0;
+      border-radius: 3px;
+      color: inherit;
+      background: none;
+      font: inherit;
+      font-variant-numeric: tabular-nums;
+      cursor: default;
+      white-space: nowrap;
+    }
+
+    .cycle-token-trigger:hover,
+    .cycle-token-trigger:focus-visible {
+      outline: 2px solid var(--button-hover);
+      background: var(--button-hover);
+    }
+
+    .cycle-model-detail {
+      max-height: min(260px, 50dvh);
+      margin-top: 5px;
+      overflow: auto;
+      overscroll-behavior: contain;
+      border: 1px solid var(--separator);
+      border-radius: 6px;
+      font-size: 10px;
+      line-height: 14px;
+    }
+
+    .cycle-model-detail:focus-visible {
+      outline: 2px solid var(--meter-fill);
+      outline-offset: 1px;
+    }
+
+    .cycle-model-detail table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .cycle-model-detail th,
+    .cycle-model-detail td {
+      padding: 5px;
+      border-bottom: 1px solid var(--separator);
+      text-align: right;
+      vertical-align: top;
+    }
+
+    .cycle-model-detail thead {
+      position: sticky;
+      top: 0;
+      background: var(--tray);
+    }
+
+    .cycle-model-detail th:first-child {
+      min-width: 70px;
+      max-width: 130px;
+      overflow-wrap: anywhere;
+      text-align: left;
+      font-weight: 550;
+    }
+
+    .cycle-model-detail td {
+      white-space: nowrap;
+    }
+
+    .cycle-model-detail p {
+      margin: 6px;
+      color: var(--secondary);
+      font-size: 9px;
+      line-height: 13px;
     }
 
     .cycle-sources {
