@@ -10,8 +10,8 @@ use crate::{
     },
 };
 
-fn memory(id: &str, input: u64, output: u64) -> Value {
-    json!({"type":"model_usage", "id":id, "parentId":"fast", "purpose":"memory",
+fn auxiliary(id: &str, input: u64, output: u64) -> Value {
+    json!({"type":"model_usage", "id":id, "parentId":"fast", "purpose":"title",
         "timestamp":"2026-07-12T14:00:00Z", "provider":"openai-codex", "model":"gpt-6.1-sol",
         "usage":{"input":input,"output":output,"cacheRead":0,"cacheWrite":0,"reasoningTokens":50,
             "cost":{"input":input as f64 * 2.0 / 1_000_000.0,
@@ -92,14 +92,14 @@ fn parser_schema_refreshes_legacy_tier_without_rekeying_and_retains_repriceable_
     let storage = Storage::open(&database).unwrap();
     write_session(
         directory.path(),
-        "memory.jsonl",
+        "auxiliary.jsonl",
         &[
             json!({"type":"service_tier_change","id":"fast","serviceTier":{"openai":"priority"}}),
-            memory("memory-a", 279, 145),
-            memory("memory-b", 270, 120),
+            auxiliary("title-a", 279, 145),
+            auxiliary("title-b", 270, 120),
         ],
     );
-    let path = directory.path().join("agent/sessions/memory.jsonl");
+    let path = directory.path().join("agent/sessions/auxiliary.jsonl");
     let events = parse_jsonl(&fs::read_to_string(&path).unwrap());
     let legacy = legacy_values(&events);
     storage
@@ -139,10 +139,9 @@ fn parser_schema_refreshes_legacy_tier_without_rekeying_and_retains_repriceable_
     );
     pricing.codex_credit_mode = true;
     let (credits, _) = source_scan(&storage, directory.path(), "account-a", &pricing);
-    for (id, expected_api, expected_credits) in [
-        ("memory-a", 0.002008, 0.0502),
-        ("memory-b", 0.00174, 0.0435),
-    ] {
+    for (id, expected_api, expected_credits) in
+        [("title-a", 0.002008, 0.0502), ("title-b", 0.00174, 0.0435)]
+    {
         let event = retained
             .iter()
             .find(|event| event.id.as_deref() == Some(id))
@@ -208,7 +207,7 @@ fn source_less_legacy_boolean_preserves_anonymous_keys_ownership_and_unknown_tok
     let directory = tempdir().unwrap();
     let database = directory.path().join("cache.db");
     let storage = Storage::open(&database).unwrap();
-    let mut anonymous = memory("unused", 279, 145);
+    let mut anonymous = auxiliary("unused", 279, 145);
     anonymous.as_object_mut().unwrap().remove("id");
     write_session(
         directory.path(),
@@ -277,7 +276,7 @@ fn zero_token_unknown_tier_replies_do_not_make_priced_periods_partial() {
     write_session(
         directory.path(),
         "zero.jsonl",
-        &[memory("paid", 279, 145), zero],
+        &[auxiliary("paid", 279, 145), zero],
     );
     let (outcome, histories) = source_scan(
         &storage,
@@ -326,7 +325,7 @@ fn scan_dto_distinguishes_unknown_speed_from_unknown_model_in_both_price_bases()
             for mixed in [false, true] {
                 let mut calls = vec![call.clone()];
                 if mixed {
-                    calls.push(memory("paid", 279, 145));
+                    calls.push(auxiliary("paid", 279, 145));
                 }
                 write_session(directory.path(), "partial.jsonl", &calls);
                 let (outcome, histories) =
@@ -365,7 +364,7 @@ fn orchestration_and_producer_long_context_reprice_from_retained_merged_buckets(
     let directory = tempdir().unwrap();
     let database = directory.path().join("cache.db");
     let storage = Storage::open(&database).unwrap();
-    let mut reported = memory("orchestration-reported", 5, 5);
+    let mut reported = auxiliary("orchestration-reported", 5, 5);
     reported["usage"]["input"] = json!(2);
     reported["usage"]["output"] = json!(2);
     reported["usage"]["orchestration"] = json!({"input":3,"output":3});
@@ -379,7 +378,7 @@ fn orchestration_and_producer_long_context_reprice_from_retained_merged_buckets(
     write_session(
         directory.path(),
         "producer.jsonl",
-        &[reported, derived, memory("long-context", 272_001, 1)],
+        &[reported, derived, auxiliary("long-context", 272_001, 1)],
     );
     for credits in [false, true] {
         let mut pricing = crate::pricing::test_bundled_pricing();
@@ -442,6 +441,83 @@ fn malformed_orchestration_with_explicit_tier_is_unpriced_not_unknown_model() {
             assert!(!period.estimate_complete);
             assert_eq!(period.estimated_cost_usd, None);
             assert!(period.unknown_models.is_empty());
+        }
+    }
+}
+
+#[test]
+fn only_explicit_memory_excludes_cost_without_losing_usage_in_both_price_bases() {
+    for credits in [false, true] {
+        let mut pricing = crate::pricing::test_bundled_pricing();
+        pricing.codex_credit_mode = credits;
+        for purpose in [
+            Some("memory"),
+            Some("title"),
+            Some("cache-warm"),
+            Some("other"),
+            None,
+        ] {
+            for known_speed in [false, true] {
+                let directory = tempdir().unwrap();
+                let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+                let mut call = auxiliary("call", 279, 145);
+                match purpose {
+                    Some(purpose) => call["purpose"] = json!(purpose),
+                    None => {
+                        call.as_object_mut().unwrap().remove("purpose");
+                    }
+                }
+                if !known_speed {
+                    call["usage"].as_object_mut().unwrap().remove("cost");
+                }
+                // A forked copy must still be deduplicated before applying the exclusion.
+                write_session(directory.path(), "purpose.jsonl", &[call.clone(), call]);
+                let (outcome, histories) =
+                    source_scan(&storage, directory.path(), "account-a", &pricing);
+                let excluded = purpose == Some("memory");
+                let expected = if excluded {
+                    Some(0.0)
+                } else {
+                    known_speed.then_some(0.002008)
+                };
+                assert_eq!(outcome.events.len(), 1);
+                assert_eq!(outcome.events[0].total, 424);
+                if let Some(expected) = expected {
+                    assert!((outcome.events[0].cost.unwrap() - expected).abs() < 1e-12);
+                } else {
+                    assert_eq!(outcome.events[0].cost, None);
+                }
+                for history in histories {
+                    let period = history.last_30_days.unwrap();
+                    assert_eq!(period.tokens, 424);
+                    assert_eq!(period.estimate_complete, excluded || known_speed);
+                    assert_eq!(period.estimated_cost_usd, outcome.events[0].cost);
+                    assert!(period.unknown_models.is_empty());
+                }
+                let retained: Vec<SessionUsageEvent> =
+                    storage.load_usage_events("omp", "account-a", 1).unwrap();
+                assert_eq!(retained.len(), 1);
+                assert_eq!(retained[0].purpose.as_deref(), purpose);
+                assert_eq!(retained[0].recorded_cost.is_some(), known_speed);
+                assert_eq!(retained[0].speed.is_some(), known_speed);
+            }
+        }
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let mut assistant = message("assistant", "2026-07-12T14:00:00Z");
+        assistant["purpose"] = json!("memory");
+        assistant["message"]["model"] = json!("gpt-6.1-sol");
+        assistant["message"]
+            .as_object_mut()
+            .unwrap()
+            .remove("serviceTier");
+        write_session(directory.path(), "assistant.jsonl", &[assistant]);
+        let (outcome, histories) = source_scan(&storage, directory.path(), "account-a", &pricing);
+        assert_eq!(outcome.events[0].cost, None);
+        for history in histories {
+            let period = history.last_30_days.unwrap();
+            assert_eq!(period.tokens, 180);
+            assert!(!period.estimate_complete);
         }
     }
 }

@@ -1,5 +1,54 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.5 memory 估算排除修复
+
+仅明确 `entry_kind == "model_usage"` 且 `purpose == "memory"` 的 OMP 事件排除估算费用贡献；
+API USD／Codex credits 及日、会话、周、历史周期均适用。该规则不表示上游调用免费。
+保留 tokens、去重请求数、原始成本／速度证据及账号归属；同模型普通请求、title／cache-warm、
+其他用途或缺失用途仍按原计价规则，未定价部分继续标记 partial。
+
+成功刷新会按保留的明确用途重算旧周期，包括源已删除但事实仍在账本中的 memory；
+保持原周期边界和 recovery baseline，不新增伪 `Unattributed`，不猜测缺失用途。
+无需 schema 或周期缓存 key 迁移；版本、应用身份、依赖保持不变。
+
+2026-10-18 在隔离 Windows profile 执行 `corepack pnpm verify`：版本及四项前后端契约、
+ESLint／Prettier、Svelte 检查（246 文件，0 错误／警告）、260 项前端测试、前端生产构建、
+Rust 格式与 Clippy 通过。首次 Rust 运行 628 通过、3 失败：新删源 fixture 和临时 DTO
+导出器漏了 session 头，另一周期 fixture 仍将“未知 title 加已排除 memory”的 subtotal
+误断言为 None。补齐合法日志头并改为 Some(0) 且保持 partial 断言后，
+`cargo test --manifest-path src-tauri/Cargo.toml --lib --locked providers::codex::local_usage`
+定向补验 53 项全部通过；复用未受影响成功证据，不宣称完整套件首次直接通过。
+
+两版各自真实生产 scanner／SQLite 账本／周期代码导出 DTO，短期 Vite 页面挂载实际
+`UsageMetric`／`CycleUsageDetail`。每版 12 个 Chromium 交互场景覆盖 API／credits、
+当前／删源重开历史、纯 memory／正常同模型 title／额外缺速 title。纯 memory 保留
+848 tokens／2 请求、贡献 0 且不推算零额度；正常调用合计 110,848 tokens／3 请求、
+$0.30／7.5 credits；额外缺速调用合计 110,958 tokens／4 请求，金额仍 partial。
+历史 baseline、token、请求数保持，不产生伪 Unattributed；hover、模型展开和 Escape
+关闭通过。此证据证明生产 scanner 加浏览器真实组件，不冒充默认账号发现或原生 Tauri
+桌面验收；未修改用户真实数据库、凭据或配置。
+
+两版共同语义／UI 通过后，`corepack pnpm build:installer` 成功生成 GNU x64 NSIS 包。
+当前本地交付路径为
+`F:/00.My_Pi/TokenLedger-OMP/release/TokenLedger-OMP_0.5.5_x64-setup.exe`，
+SHA-256：`f72dd693352e95fc36cc575d37c3d16427edd9e8966d32dbcfbbaf8297fddb2a`，
+相邻 `.sha256` 同步写入。版本和产品资源均为 0.5.5／TokenLedger OMP，旧版本安装包保留。
+临时 Rust 导出器及页面源码在打包前已清理，Vite 与独立 Chromium 已退出；
+去敏 DTO、截图、原始检查日志保留在 `.local/memory-exclusion-20261018/`。
+本节构建与浏览器证据不包含安装或原生桌面验收，不沿用下文历史安装记录作为本次证明。
+
+### 0.5.5 发布交付
+
+2026-10-18 核对公开仓库 `origin` 为 `https://github.com/vavilonska/tokenledger-omp.git`，
+远端已有版本仅 `v0.5.2`／`v0.5.3`，`v0.5.5` 无 tag／Release 冲突。因此沿用上述
+已验收的 0.5.5 包，不升版、不重复构建、不覆盖历史 Release 或资产。
+本次交付目标为 [v0.5.5](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.5)，
+包含 Windows x64 NSIS 安装包及相邻 `.sha256`；发布验收要求 tag 绑定本轮公开源码提交，
+且从 Release 实际下载的安装包 SHA-256 与上述本地包一致。
+仅发布公开源码及这两项资产，不上传 `.local` 证据、用户数据或凭据。
+继续通过 Releases 手动下载：安装包未做 Authenticode 签名，updater key／endpoints
+保持为空；继承 CI 模板仍未启用，未执行的 CI、签名和安装验收不声明通过。
+
 ## 0.5.5 请求速度与部分估算修复
 
 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 中应用自身包版本及
@@ -8,7 +57,7 @@
 
 发布前需验证 Standard／Fast／Ultrafast 的 API 与购买积分费率、OMP 主请求与辅助调用的速度
 证据、旧缓存／账本在有源和无源场景下的迁移，以及总计、模型、周期、Cost/MTok、分享中的
-partial／未知语义。未知速度须保留 tokens，不能冒充未知模型、零费用或完整额度。
+partial／未知语义。除明确 memory 估算排除项外，未知速度须保留 tokens，不能冒充未知模型、零费用或完整额度。
 未采集且已删除的日志无法恢复，旧 Fast 标志也不能恢复 OMP 请求速度；保留首次观察账号归属
 和周期边界，不将证据不足的历史金额显示为完整估算。
 
@@ -21,18 +70,18 @@ partial／未知语义。未知速度须保留 tokens，不能冒充未知模型
 覆盖三速度、两条辅助 memory 请求、删源重开后的重计价及无源旧记录保留 tokens。
 本次未执行公开版安装包构建、安装或已安装 EXE 的 GUI 验收，不将源码与隔离运行证据冒充安装验证。
 
-## 未发布的依赖安全维护 / Unreleased dependency security maintenance
+## 0.5.5 纳入的依赖安全维护 / Dependency security maintenance included in 0.5.5
 
 前端锁文件统一使用 `source-map-js` 1.2.2，并将 `postcss-selector-parser` 更新至 7.1.6，
 分别修复 [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q) 和
 [GHSA-rj75-hqrm-r3gf](https://github.com/advisories/GHSA-rj75-hqrm-r3gf)。
-这些是构建／开发工具的传递依赖；此次锁文件维护不升级应用版本，也不发布或替换现有安装包。
-发布前仍需完成下述验证和安装包构建。
+这些是构建／开发工具的传递依赖；此前锁文件维护本身不升级应用版本，也未发布或替换安装包。
+本节维护已纳入 0.5.5；本次验证与安装包身份见上文。
 
 The frontend lockfile now uses `source-map-js` 1.2.2 throughout and `postcss-selector-parser` 7.1.6
 to address the advisories above. These are transitive build/development dependencies. This lockfile
-maintenance does not bump the application version or publish/replace existing installers; the
-validation and installer build below remain required before release.
+maintenance itself did not bump the application version or publish/replace installers. These changes
+are included in 0.5.5; current validation evidence and installer identity are recorded above.
 
 合并 Rust 依赖更新后，Cargo 锁文件移除已不再被使用的 Windows 0.61 依赖图，并归一化
 Windows 0.62 的引用，保证后续 `--locked` 构建无需重写锁文件；此归一化本身不升级 Rust 包。

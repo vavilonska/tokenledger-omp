@@ -242,24 +242,31 @@ pub(super) fn scan_sessions_into(
         if duplicate_id || duplicate_response {
             continue;
         }
-        let cost = event
-            .speed
-            .filter(|_| event.has_complete_usage())
-            .and_then(|speed| {
-                estimate_token_cost(
-                    &event.timestamp,
-                    &event.model,
-                    TokenBreakdown {
-                        input: event.input,
-                        output: event.output,
-                        cache_read: event.cache_read,
-                        cache_write_5m: event.cache_write.saturating_sub(event.cache_write_1h),
-                        cache_write_1h: event.cache_write_1h,
-                        speed,
-                    },
-                    pricing,
-                )
-            });
+        let cost = if event.entry_kind.as_deref() == Some("model_usage")
+            && event.purpose.as_deref() == Some("memory")
+        {
+            // Exclude memory's estimate contribution, not its usage or original cost evidence.
+            Some(0.0)
+        } else {
+            event
+                .speed
+                .filter(|_| event.has_complete_usage())
+                .and_then(|speed| {
+                    estimate_token_cost(
+                        &event.timestamp,
+                        &event.model,
+                        TokenBreakdown {
+                            input: event.input,
+                            output: event.output,
+                            cache_read: event.cache_read,
+                            cache_write_5m: event.cache_write.saturating_sub(event.cache_write_1h),
+                            cache_write_1h: event.cache_write_1h,
+                            speed,
+                        },
+                        pricing,
+                    )
+                })
+        };
         let Some(cost) = cost else {
             let date = event.timestamp.with_timezone(&Local).date_naive();
             let unknown_model = !model_has_rates(&event.timestamp, &event.model, pricing);

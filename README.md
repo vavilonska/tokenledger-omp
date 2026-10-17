@@ -33,12 +33,13 @@
 - 保留 5 小时／周周期用量、服务端观察到的重置时间、历史周周期，以及折叠模型的来源明细。
 - 在独立 SQLite 的 `local_usage_events` 薄账本中留存已采集用量；归档、移动、截断或删除对话后不再丢失，重复扫描不重复计数。不保存对话正文或凭据，展示时间窗口保持不变。
 - **API USD** 与 **Codex credits** 使用独立估算和缓存，不能视为同一账单。
-- 周额度金额仅在计价完整时根据本地用量和服务端额度占比估算。未知模型或请求速度会保留 tokens、将已知金额标为 **partial**，不据此推算完整额度；估算不是官方余额或实际扣费。
+- 周额度金额仅在计价完整时根据本地用量和服务端额度占比估算。除下述 memory 排除项外，未知模型或请求速度会保留 tokens、将已知金额标为 **partial**，不据此推算完整额度；估算不是官方余额或实际扣费。
+- 仅明确 `model_usage` 且 `purpose: "memory"` 的调用排除估算费用贡献，API USD／Codex credits 及日、会话、周和历史周期统一适用；保留 tokens、请求数和原始成本／速度证据。显示为零贡献不代表上游免费。同模型普通请求、title／cache-warm 等其他用途仍按原规则计价，缺失用途不猜为 memory。
 - 保留其他提供商、托盘／浮动窗口、主题、用量历史和设置功能。详见 [Codex 提供商文档](docs/providers/codex.md)。
 
 首次更新后请先完成一次完整刷新，再删除希望保留统计的日志。未被采集且没有可恢复解析缓存的历史无法还原；账本保留首次观察时的账号归属，不事后猜测旧日志所属账号。
 
-旧账本仅有 Fast 布尔值时不足以证明 OMP 历史请求速度。有源日志会重新解析；已留存请求证据可用于重算，但源已删除且证据不足时只能保留 tokens 和未知费用，不能还原完整金额。历史周期边界和首次观察账号归属保持不变。
+旧账本仅有 Fast 布尔值时不足以证明 OMP 历史请求速度。有源日志会重新解析；已留存请求证据可用于重算，但源已删除且证据不足时只能保留 tokens 和未知费用，不能还原完整金额。保留了明确 memory 用途的历史在成功刷新后排除估算贡献，不丢失 tokens、请求数或原周期覆盖；缺失用途的历史不推断为 memory。历史周期边界和首次观察账号归属保持不变。
 
 ### 开发与验证
 
@@ -93,10 +94,13 @@ It does not migrate or share other TokenLedger/OpenQuota installations' data, ca
 - Preserves five-hour/weekly usage, server-observed reset times, historical weekly cycles and source labels inside folded model groups.
 - Retains observed usage in the independent SQLite `local_usage_events` ledger. Archiving, moving, truncating or deleting conversations does not erase collected usage, and repeat scans do not double-count it. Conversation text and credentials are not stored; rolling display windows are unchanged.
 - **API USD** and **Codex credits** have separate estimates and caches; they are not interchangeable bills.
-- Weekly monetary capacity is estimated from available local usage and the server quota percentage. Missing logs, unknown models and unrecorded cloud activity affect completeness. Estimates are not official balances or actual charges.
+- Weekly monetary capacity is estimated only from complete local estimates and the server quota percentage. Except for the explicit memory exclusion below, unknown models or request speeds retain tokens and mark known-cost subtotals **partial**, without inferring a full allowance. Estimates are not official balances or actual charges.
+- Only explicit `model_usage` calls with `purpose: "memory"` are excluded from estimated cost contributions, in API USD and Codex credits across daily, session, weekly and historical cycles. Tokens, requests and original cost/speed evidence are retained; a zero contribution does not mean the upstream call was free. Ordinary requests on the same model and other purposes such as title/cache-warm keep their normal pricing rules; missing purposes are never guessed to be memory.
 - Retains other providers, tray/floating modes, themes, history and settings. See the [Codex provider guide](docs/providers/codex.md).
 
 Complete a full refresh after updating before deleting logs you want to retain. Unobserved history without a recoverable parsed cache cannot be restored; retained events keep their first-observed account scope rather than guessing old logs' ownership.
+
+After a successful refresh, retained historical facts with explicit memory purpose are re-estimated under this exclusion even if the source log was deleted, without losing tokens, requests or original cycle coverage. Historical facts missing that purpose keep the previous pricing/partial rules; cycle boundaries and first-observed account ownership are unchanged.
 
 ### Development and validation
 

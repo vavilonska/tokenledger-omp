@@ -24,8 +24,9 @@ local usage history, but they cannot provide ChatGPT subscription limits.
 
 Spend history is calculated locally from the Codex `sessions` and `archived_sessions` logs. When Oh
 My Pi is authenticated to the same Codex account, TokenLedger OMP also reads its session JSONL files
-under `~/.omp/agent/sessions/**/*.jsonl`, combines both clients, and prices their tokens at the current
-API list rate. No `/stats` command or `stats.db` export is required. Assistant request usage and
+under `~/.omp/agent/sessions/**/*.jsonl`, combines both clients, and estimates their tokens at the current
+API list rate, except for the explicit memory exclusion below. No `/stats` command or `stats.db`
+export is required. Assistant request usage and
 `model_usage` entries include real subagent calls; parent `task` aggregate summaries are not added
 again. Parsed results are cached by file changes; a separate compact usage ledger preserves observed
 requests independently of their transcript files. Inherited fork records and archived copies are deduplicated.
@@ -135,14 +136,23 @@ Codex's own legacy log format retains its Standard default when no speed is reco
 does not apply to OMP. Missing, conflicting or non-discriminating evidence remains unknown, even
 for a known model.
 
-OMP's separate `usage.orchestration` input, output and cache-read buckets are included in billable
-usage. An already supplied `totalTokens` is not incremented again. The ledger retains the merged
+Only events explicitly recorded as `model_usage` with `purpose: "memory"` contribute zero to
+estimated costs. This exclusion applies to API USD and Codex credits in daily, session, weekly,
+model and historical-cycle views, even when memory speed is unknown or its usage evidence is
+incomplete. It does not assert that upstream memory calls are free. Their tokens, deduplicated
+request counts, original recorded cost and speed evidence remain intact. Ordinary assistant
+requests on the same model, title/cache-warm calls, other purposes and missing purposes keep
+the normal pricing and partial-estimate rules; model names alone never trigger the exclusion.
+
+OMP's separate `usage.orchestration` input, output and cache-read buckets are included in usage.
+An already supplied `totalTokens` is not incremented again. The ledger retains the merged
 token buckets and finite original orchestration evidence, not response text. Malformed or
-unsupported orchestration evidence cannot establish speed or a complete cost estimate.
+unsupported orchestration evidence cannot establish speed or a complete cost estimate for requests
+outside the explicit memory exclusion.
 Estimates cover locally available Codex and same-account Oh My Pi logs, not unrecorded cloud
 activity or actual billed credit deductions.
 
-Unpriced requests retain tokens in daily, model, folded Other and cycle views. Known-cost subtotals
+Other unpriced requests retain tokens in daily, model, folded Other and cycle views. Known-cost subtotals
 are marked **partial** in API USD, credits and screenshots; fully unpriced amounts are unavailable,
 not zero. Cost/MTok excludes incomplete providers rather than dividing partial cost by all tokens,
 and labels averages that cover only the fully priced subset. Model shares use tokens for partial
@@ -157,6 +167,12 @@ boundary is kept but its old amount is not presented as a complete estimate. Old
 with only `is_fast` retain tokens and identity but cannot establish request speed. Available logs
 are reparsed; deleted logs without sufficient retained evidence cannot recover their speed or
 complete cost. Model details retain sub-cent precision until display formatting.
+
+After a successful refresh, retained facts explicitly identifying memory also re-estimate deleted-source
+history under the exclusion. Replayed memory tokens still discharge their original cycle baseline,
+so this policy does not create an `Unattributed` balance or erase requests. No schema or cycle-key
+migration is needed. Historical facts missing kind or purpose cannot be inferred to be memory;
+truly unavailable facts still retain the existing partial/`Unattributed` behavior.
 
 Cycle recovery keeps a storage-only `_recovery` record with the original token baseline and
 coverage cutoff. Legacy snapshots use their existing `updated_at` as that cutoff; subsequent

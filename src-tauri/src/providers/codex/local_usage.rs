@@ -2281,9 +2281,41 @@ mod speed_and_cycle_regressions {
     }
 
     #[test]
-    fn deleted_source_retained_facts_reprice_old_cycles_with_original_boundaries() {
+    fn deleted_source_retained_facts_reprice_old_cycles_and_exclude_memory() {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+        let database = directory.path().join("usage.db");
+        let storage = Storage::open(&database).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
+        let omp_sessions = directory.path().join("omp/agent/sessions");
+        fs::create_dir_all(&omp_sessions).unwrap();
+        let memory_source = omp_sessions.join("memory.jsonl");
+        fs::write(&memory_source, concat!(
+            "{\"type\":\"session\",\"id\":\"memory-history\"}\n",
+            "{\"type\":\"model_usage\",\"id\":\"known\",\"purpose\":\"memory\",\"timestamp\":\"2026-01-01T02:00:00Z\",\"provider\":\"openai-codex\",\"model\":\"gpt-6.1-sol\",\"serviceTier\":\"default\",\"usage\":{\"input\":279,\"output\":145,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":424}}\n",
+            "{\"type\":\"model_usage\",\"id\":\"unknown\",\"purpose\":\"memory\",\"timestamp\":\"2026-01-01T03:00:00Z\",\"provider\":\"openai-codex\",\"model\":\"gpt-6.1-sol\",\"usage\":{\"input\":279,\"output\":145,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":424}}\n",
+        )).unwrap();
+        let scan_memory = |storage: &Storage, pricing: &ModelPricing| {
+            omp_usage::scan_sessions_into(
+                storage,
+                omp_usage::SessionSource {
+                    directory: &omp_sessions,
+                    cache_key: "omp",
+                    identity_key: "account",
+                    label: "Oh My Pi",
+                    allowed_models: &[],
+                },
+                now,
+                pricing,
+                None,
+                None,
+                &mut DailyUsageAccumulator::default(),
+                &mut DailyUsageAccumulator::default(),
+                &mut DailyUsageAccumulator::default(),
+            )
+            .unwrap()
+        };
+        let mut pricing = crate::pricing::test_bundled_pricing();
+        assert_eq!(scan_memory(&storage, &pricing).events.len(), 2);
         let home = directory.path().join("codex");
         fs::create_dir_all(home.join("sessions")).unwrap();
         let source = home.join("sessions/old.jsonl");
@@ -2296,13 +2328,17 @@ mod speed_and_cycle_regressions {
         )
         .unwrap();
         fs::remove_file(source).unwrap();
+        fs::remove_file(memory_source).unwrap();
+        drop(storage);
+        let storage = Storage::open(&database).unwrap();
         let events = scan_codex_events(&storage, &[home], NaiveDate::MIN, Some("account")).unwrap();
         assert_eq!(events.len(), 1);
-        let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
-        let original = old_cycle(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(), 110);
-        let mut pricing = crate::pricing::test_bundled_pricing();
+        let original = old_cycle(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(), 958);
         for credit_mode in [false, true] {
             pricing.codex_credit_mode = credit_mode;
+            let memory = scan_memory(&storage, &pricing);
+            assert_eq!(memory.events.len(), 2);
+            assert!(memory.events.iter().all(|event| event.cost == Some(0.0)));
             storage
                 .save_reset_cycles(
                     "codex",
@@ -2334,6 +2370,17 @@ mod speed_and_cycle_regressions {
                 &mut DailyUsageAccumulator::default(),
                 &mut buckets,
             );
+            for event in &memory.events {
+                add_cycle_event(
+                    &mut buckets,
+                    event.timestamp,
+                    &event.model,
+                    event.total,
+                    event.cost,
+                    "Oh My Pi",
+                    false,
+                );
+            }
             assert!(daily.build(now, "test").daily.is_empty());
             let rebuilt = build_cycle_history(buckets, now, "test");
             let saved = persist_cycles(&storage, Some("account"), rebuilt, credit_mode).unwrap();
@@ -2345,7 +2392,25 @@ mod speed_and_cycle_regressions {
                 estimate_cost(&events[0], &pricing)
             );
             assert!(saved[0].usage.estimate_complete);
-            assert_eq!(saved[0].usage.tokens, 110);
+            assert_eq!(saved[0].usage.tokens, 958);
+            let models = saved[0].model_usage.as_ref().unwrap();
+            assert_eq!(models.len(), 2);
+            assert!(!models.iter().any(|model| model.model == "Unattributed"));
+            let memory_model = models
+                .iter()
+                .find(|model| model.model == "gpt-6.1-sol")
+                .unwrap();
+            assert_eq!(memory_model.total_tokens, 848);
+            assert_eq!(memory_model.request_count, Some(2));
+            assert_eq!(memory_model.cost_usd, Some(0.0));
+            assert!(memory_model.cost_complete);
+            assert_eq!(
+                models
+                    .iter()
+                    .map(|model| model.request_count.unwrap())
+                    .sum::<u64>(),
+                3
+            );
         }
     }
 
@@ -3117,7 +3182,11 @@ mod cycle_model_usage_regressions {
                 .copied()
                 .reduce(|sum, cost| sum + cost);
             assert!(main_cost.is_some());
-            assert_eq!(mini_cost.is_some(), !credit_mode);
+            assert!(mini_cost.is_some());
+            assert_eq!(mini_costs.iter().all(Option::is_some), !credit_mode);
+            if credit_mode {
+                assert_eq!(mini_cost, Some(0.0));
+            }
             let mut buckets = build_cycle_buckets(anchors(), day(9));
             for event in outcome.events {
                 add_cycle_event(
