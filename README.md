@@ -61,6 +61,12 @@ corepack pnpm build:installer
 
 ### 上游与发布边界
 
+**0.5.6** 在主 Codex 账号周剩余额度大于 0%、不超过 3% 时，将刷新间隔从 300 秒缩短为 15 秒；归零后恢复普通频率，新周重新跟踪。首次观察周额度归零后，同周期后续 Token 消费按额外额度处理，其费用不计入订阅周期消费和额度外推，总消费账本仍保留 Token、请求和费用证据；不新增 UI 标记。既有价格和明确 memory 用途排除规则不变。刷新倒计时按后端精确 deadline 逐秒更新。
+
+本版还在现有周期历史浮层加入上下两张共享周期横轴的图：上图显示服务器观察到的额度消耗百分比，下图显示周期完整 Token 用量；支持历史范围导航，保留明细、中文和主题，未知值不补零。复用现有桌面界面，不增加独立 WebUI 服务、服务器或依赖。
+
+Windows x64 NSIS 包见 [v0.5.6](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.6)：`TokenLedger-OMP_0.5.6_x64-setup.exe`，10,338,797 bytes，SHA-256 为 `9fa7a2106d784b4409461a5286cd52355a5836ab4c878005d6e31856a678c598`，附 `.sha256`。本轮生产 scanner／SQLite、320px 真实浏览器组件和安装包构建通过；公开版未安装或验证原生 UI，完整范围与首次失败／定向修复见[发布记录](docs/releasing.md)。
+
 **0.5.5** 区分 Standard、Fast、Ultrafast；GPT-6 Astra 与 GPT-6.1 Sol 的 Ultrafast 按 API／购买积分 6× 计价，不采用套餐额度消耗倍率。OMP 辅助调用不再直接继承主会话速度，缺失或冲突证据保持未知。总计、模型、周期和分享明确标记部分估算；Cost/MTok 只纳入完整计价提供商，并说明覆盖范围，无可用费用时仍显示 tokens。
 
 **0.5.4** 更新价格目录并纳入 GPT-6.1 Sol（每百万 tokens：输入 $2、缓存读取 $0.10、缓存写入 $2.50、输出 $10），支持 Fast 与长上下文计价。Codex credits 按购买积分／PAYG 费率独立估算，不代表套餐内额度消耗。新增本地用量薄账本，覆盖 Codex、OMP、Claude、pi、Grok 和 OpenCode 的已采集用量。
@@ -107,6 +113,12 @@ After a successful refresh, retained historical facts with explicit memory purpo
 Requires Node.js 22+, pnpm 11.11.0, stable Rust and [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/). Windows builds use the Rust GNU target and MinGW. Use the clone, development, check and installer commands above.
 
 ### Upstream and release boundaries
+
+**0.5.6** shortens the primary Codex account's refresh interval from 300 to 15 seconds while weekly remaining quota is above 0% and at most 3%. Ordinary frequency resumes at zero; a new week restores quota tracking. After the first observed weekly zero, later consumption in that cycle is treated as extra allowance: its cost is excluded from subscription-cycle spend and allowance extrapolation, while the total ledger retains tokens, requests and cost evidence. No new UI badge is added. Existing pricing and explicit memory-purpose exclusions are unchanged. The countdown updates every second from the backend's precise deadline.
+
+The existing cycle-history popup also gains two stacked charts sharing the cycle axis: server-observed quota-used percentage above and complete cycle tokens below. Historical range navigation preserves details, Chinese labels and themes; unknown values remain gaps rather than zero. This uses the existing desktop UI, without a separate WebUI service, server or dependency.
+
+The [v0.5.6 Windows x64 NSIS package](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.6), `TokenLedger-OMP_0.5.6_x64-setup.exe`, is 10,338,797 bytes with SHA-256 `9fa7a2106d784b4409461a5286cd52355a5836ab4c878005d6e31856a678c598` and an adjacent `.sha256`. Production scanner/SQLite, 320px browser-component acceptance and installer build passed. This public edition was not installed or exercised in the native host; see the [release record](docs/releasing.md) for scope, original failures and targeted repairs.
 
 **0.5.4** refreshes price catalogs and adds GPT-6.1 Sol (USD per million tokens: input $2, cached input $0.10, cache writes $2.50, output $10), including Fast and long-context pricing. Codex credits independently estimate purchased-credit/PAYG rates, not included plan-limit consumption. A compact local ledger retains observed Codex, OMP, Claude, pi, Grok and OpenCode usage.
 

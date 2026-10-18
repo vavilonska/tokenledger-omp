@@ -67,6 +67,7 @@ struct CycleBucket {
     ended_at: Option<DateTime<Utc>>,
     scheduled_reset_at: DateTime<Utc>,
     used_percent: f64,
+    exhausted_at: Option<DateTime<Utc>>,
     observed_tokens: u64,
     recovered_tokens: u64,
     recovery: Option<CycleRecovery>,
@@ -232,8 +233,10 @@ fn scan_usage_basis(
         quota_used_percent(quotas, "weekly"),
     )
     .or_else(|| {
-        cycle_period(
+        weekly_fallback_period(
             weekly_accumulator,
+            &fresh_cycles,
+            weekly_start,
             now,
             source_note,
             quota_used_percent(quotas, "weekly"),
@@ -261,6 +264,7 @@ fn current_weekly_anchor(
         started_at,
         scheduled_reset_at,
         used_percent: quota.used_percent.clamp(0.0, 100.0),
+        exhausted_at: (quota.used_percent >= 100.0).then_some(now),
     })
 }
 
@@ -282,6 +286,11 @@ fn build_cycle_buckets(
                 previous.scheduled_reset_at =
                     previous.scheduled_reset_at.min(anchor.scheduled_reset_at);
                 previous.used_percent = previous.used_percent.max(anchor.used_percent);
+                previous.exhausted_at = previous
+                    .exhausted_at
+                    .into_iter()
+                    .chain(anchor.exhausted_at)
+                    .min();
                 continue;
             }
         }
@@ -293,6 +302,7 @@ fn build_cycle_buckets(
             ended_at: merged.get(index + 1).map(|anchor| anchor.started_at),
             scheduled_reset_at: merged[index].scheduled_reset_at,
             used_percent: merged[index].used_percent,
+            exhausted_at: merged[index].exhausted_at,
             observed_tokens: 0,
             recovered_tokens: 0,
             recovery: None,
@@ -316,6 +326,7 @@ fn restore_cycle_buckets(
                 ended_at: cycle.ended_at,
                 scheduled_reset_at: cycle.scheduled_reset_at,
                 used_percent: cycle.usage.quota_used_percent.unwrap_or_default(),
+                exhausted_at: record.exhausted_at,
                 observed_tokens: 0,
                 recovered_tokens: 0,
                 recovery: Some(record.recovery.clone()),
@@ -337,6 +348,11 @@ fn restore_cycle_buckets(
                 <= CYCLE_CLUSTER_SECONDS
         }) {
             bucket.used_percent = bucket.used_percent.max(candidate.used_percent);
+            bucket.exhausted_at = bucket
+                .exhausted_at
+                .into_iter()
+                .chain(candidate.exhausted_at)
+                .min();
             return false;
         }
         // Closed boundaries are authoritative. An open snapshot cannot be split
@@ -388,6 +404,13 @@ fn add_cycle_event(
             && bucket.ended_at.is_none_or(|ended_at| timestamp < ended_at)
     }) else {
         return;
+    };
+    // Extra-credit requests retain their facts, but contribute no subscription cost.
+    // Equal timestamps remain within the observed subscription allowance.
+    let cost = if bucket.exhausted_at.is_some_and(|cutoff| timestamp > cutoff) {
+        Some(0.0)
+    } else {
+        cost
     };
     let model = model.trim();
     let model = if model.is_empty() {
@@ -484,7 +507,7 @@ fn build_cycle_history(
                 Some(bucket.used_percent),
             )
             .or_else(|| {
-                had_snapshot.then_some(UsagePeriod {
+                (had_snapshot || bucket.exhausted_at.is_some()).then_some(UsagePeriod {
                     tokens: 0,
                     estimated_cost_usd: Some(0.0),
                     estimated_limit_usd: None,
@@ -515,6 +538,7 @@ fn build_cycle_history(
                     model_usage: (!model_usage.is_empty()).then_some(model_usage),
                 },
                 recovery,
+                exhausted_at: bucket.exhausted_at,
             })
         })
         .collect()
@@ -545,6 +569,27 @@ fn current_weekly_period(
         .zip(used_percent.filter(|percent| *percent > 0.0))
         .map(|(cost, percent)| cost / (percent / 100.0));
     Some(usage.clone())
+}
+
+fn weekly_fallback_period(
+    accumulator: DailyUsageAccumulator,
+    cycles: &[StoredResetCycle],
+    weekly_start: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    source_note: &str,
+    used_percent: Option<f64>,
+) -> Option<UsagePeriod> {
+    let start = weekly_start?;
+    if cycles.iter().any(|record| {
+        record.exhausted_at.is_some()
+            && (start - record.cycle.started_at).num_seconds() >= -CYCLE_CLUSTER_SECONDS
+            && record.cycle.ended_at.is_none_or(|end| start < end)
+    }) {
+        // A conflicting stored boundary can leave no authoritative current match.
+        // Do not replace its exhaustion-aware subtotal with the unfiltered fallback.
+        return None;
+    }
+    cycle_period(accumulator, now, source_note, used_percent)
 }
 
 fn cycle_storage_key(credit_mode: bool) -> &'static str {
@@ -2246,6 +2291,7 @@ mod speed_and_cycle_regressions {
                     started_at: start,
                     scheduled_reset_at: start + chrono::Duration::days(7),
                     used_percent: 50.0,
+                    exhausted_at: None,
                 }],
                 now,
             );
@@ -2345,6 +2391,7 @@ mod speed_and_cycle_regressions {
                     "account",
                     cycle_storage_key(credit_mode),
                     &[StoredResetCycle {
+                        exhausted_at: None,
                         cycle: original.clone(),
                         recovery: CycleRecovery {
                             baseline_tokens: original.usage.tokens,
@@ -2419,6 +2466,7 @@ mod speed_and_cycle_regressions {
         let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
         let original = old_cycle(now - chrono::Duration::days(180), 110);
         let stored = StoredResetCycle {
+            exhausted_at: None,
             cycle: original.clone(),
             recovery: CycleRecovery {
                 baseline_tokens: original.usage.tokens,
@@ -2541,6 +2589,7 @@ mod persistent_cycle_recovery_regressions {
 
     fn snapshot(tokens: u64, end: Option<DateTime<Utc>>) -> StoredResetCycle {
         StoredResetCycle {
+            exhausted_at: None,
             cycle: ResetCycleUsage {
                 started_at: day(1),
                 ended_at: end,
@@ -2740,6 +2789,7 @@ mod persistent_cycle_recovery_regressions {
                 started_at: start,
                 scheduled_reset_at: start + Duration::days(7),
                 used_percent: 50.0,
+                exhausted_at: None,
             })
             .to_vec();
         let mut buckets = restore_cycle_buckets(anchors, &[original], day(9));
@@ -2779,6 +2829,7 @@ mod persistent_cycle_recovery_regressions {
             started_at: day(start),
             scheduled_reset_at: day(8),
             used_percent: 50.0,
+            exhausted_at: None,
         };
         let mut buckets = restore_cycle_buckets(vec![anchor(3)], &[original], day(4));
         add_cycle_event(
@@ -2922,6 +2973,7 @@ mod cycle_model_usage_regressions {
                 started_at,
                 scheduled_reset_at: started_at + Duration::days(7),
                 used_percent: 50.0,
+                exhausted_at: None,
             })
             .to_vec()
     }
@@ -3232,6 +3284,405 @@ mod cycle_model_usage_regressions {
                 assert_eq!(Some(counts), api_models);
             } else {
                 api_models = Some(counts);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod weekly_exhaustion_regressions {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+    use serde_json::json;
+
+    fn day(value: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, value, 12, 0, 0).unwrap()
+    }
+
+    fn anchor(start: u32, cutoff: Option<DateTime<Utc>>) -> omp_usage::QuotaCycleAnchor {
+        omp_usage::QuotaCycleAnchor {
+            started_at: day(start),
+            scheduled_reset_at: day(start) + Duration::days(7),
+            used_percent: if cutoff.is_some() { 100.0 } else { 50.0 },
+            exhausted_at: cutoff,
+        }
+    }
+
+    fn event(timestamp: DateTime<Utc>, model: &str) -> TokenEvent {
+        TokenEvent {
+            timestamp,
+            model: model.into(),
+            input: 100,
+            cached: 0,
+            output: 0,
+            reasoning: 0,
+            total: 100,
+            speed: RequestSpeed::Standard,
+            source_id: None,
+        }
+    }
+
+    fn assert_breakdown_cost(period: &UsagePeriod, expected: f64) {
+        let breakdown = period.model_breakdown.as_ref().unwrap();
+        assert_eq!(
+            breakdown
+                .models
+                .iter()
+                .filter_map(|model| model.cost_usd)
+                .sum::<f64>(),
+            expected
+        );
+        let variants: Vec<_> = breakdown
+            .models
+            .iter()
+            .flat_map(|model| model.variants.iter().flatten())
+            .collect();
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant.total_tokens)
+                .sum::<u64>(),
+            period.tokens
+        );
+        assert_eq!(
+            variants
+                .iter()
+                .filter_map(|variant| variant.cost_usd)
+                .sum::<f64>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cutoff_preserves_equal_timestamp_totals_and_session_but_excludes_extra_costs() {
+        let events = [
+            event(day(2), "gpt-6-astra"),
+            event(day(3), "gpt-6-astra"),
+            event(day(3) + Duration::milliseconds(1), "gpt-6-astra"),
+            event(day(4), "unknown-after-exhaustion"),
+        ];
+        for credit_mode in [false, true] {
+            let mut pricing = crate::pricing::test_bundled_pricing();
+            pricing.codex_credit_mode = credit_mode;
+            let mut daily = DailyUsageAccumulator::default();
+            let mut session = DailyUsageAccumulator::default();
+            let mut buckets = build_cycle_buckets(vec![anchor(1, Some(day(3)))], day(5));
+            aggregate_into(
+                &events,
+                day(5),
+                &pricing,
+                &mut daily,
+                Some(day(1)),
+                &mut session,
+                Some(day(1)),
+                &mut DailyUsageAccumulator::default(),
+                &mut buckets,
+            );
+            let unit_cost = estimate_cost(&events[0], &pricing).unwrap();
+            let mut cycles = build_cycle_history(buckets, day(5), "test");
+            let weekly =
+                current_weekly_period(&mut cycles, Some(day(1)), day(5), Some(100.0)).unwrap();
+            assert_eq!(weekly, cycles[0].cycle.usage);
+            assert_eq!(weekly.tokens, 400);
+            assert_eq!(weekly.estimated_cost_usd, Some(unit_cost * 2.0));
+            assert_eq!(weekly.estimated_limit_usd, weekly.estimated_cost_usd);
+            assert!(weekly.estimate_complete);
+            assert!(weekly.unknown_models.is_empty());
+            assert_breakdown_cost(&weekly, unit_cost * 2.0);
+            let models = cycles[0].cycle.model_usage.as_ref().unwrap();
+            assert_eq!(models[0].total_tokens, 300);
+            assert_eq!(models[0].request_count, Some(3));
+            assert_eq!(models[0].cost_usd, Some(unit_cost * 2.0));
+            assert_eq!(models[1].request_count, Some(1));
+            assert_eq!(models[1].cost_usd, Some(0.0));
+            assert!(models.iter().all(|model| model.cost_complete));
+            for full in [daily, session] {
+                let full = full.build(day(5), "test").last_30_days.unwrap();
+                assert_eq!(full.tokens, 400);
+                assert_eq!(
+                    full.estimated_cost_usd,
+                    Some(unit_cost + unit_cost + unit_cost)
+                );
+                assert!(!full.estimate_complete);
+                assert_eq!(full.unknown_models, vec!["unknown-after-exhaustion"]);
+            }
+            assert_eq!(cycles[0].recovery.baseline_tokens, 400);
+        }
+    }
+
+    #[test]
+    fn persisted_earliest_cutoff_repairs_closed_cycles_and_isolates_accounts_and_new_weeks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.db");
+        for credit_mode in [false, true] {
+            let storage = Storage::open(&path).unwrap();
+            let mut buckets =
+                build_cycle_buckets(vec![anchor(1, Some(day(4))), anchor(8, None)], day(9));
+            for timestamp in [day(2), day(3), day(5), day(8)] {
+                add_cycle_event(
+                    &mut buckets,
+                    timestamp,
+                    "model",
+                    100,
+                    Some(1.0),
+                    "Oh My Pi",
+                    false,
+                );
+            }
+            let records = build_cycle_history(buckets, day(9), "test");
+            let recovery = records[0].recovery.clone();
+            persist_cycles(&storage, Some("account-a"), records, credit_mode).unwrap();
+            drop(storage);
+            let storage = Storage::open(&path).unwrap();
+            let persisted = storage
+                .load_reset_cycles("codex", "account-a", cycle_storage_key(credit_mode))
+                .unwrap();
+            assert!(storage
+                .load_reset_cycles("codex", "account-b", cycle_storage_key(credit_mode),)
+                .unwrap()
+                .is_empty());
+            assert_eq!(persisted[1].exhausted_at, Some(day(4)));
+            // Earlier OMP evidence repairs the stored closed cycle. A later live
+            // observation in the same cluster must not replace that evidence.
+            let mut buckets = restore_cycle_buckets(
+                vec![anchor(1, Some(day(2))), anchor(1, Some(day(6)))],
+                &persisted,
+                day(10),
+            );
+            for timestamp in [day(2), day(3), day(5), day(8)] {
+                add_cycle_event(
+                    &mut buckets,
+                    timestamp,
+                    "model",
+                    100,
+                    Some(1.0),
+                    "Oh My Pi",
+                    false,
+                );
+            }
+            let mut rebuilt = build_cycle_history(buckets, day(10), "test");
+            assert_eq!(rebuilt[0].exhausted_at, Some(day(2)));
+            assert_eq!(rebuilt[0].cycle.ended_at, Some(day(8)));
+            assert_eq!(rebuilt[0].recovery, recovery);
+            assert_eq!(rebuilt[0].cycle.usage.tokens, 300);
+            assert_eq!(rebuilt[0].cycle.usage.estimated_cost_usd, Some(1.0));
+            assert_eq!(
+                rebuilt[0].cycle.model_usage.as_ref().unwrap()[0].request_count,
+                Some(3)
+            );
+            assert!(rebuilt[0].cycle.usage.estimate_complete);
+            assert_eq!(rebuilt[1].exhausted_at, None);
+            let weekly =
+                current_weekly_period(&mut rebuilt, Some(day(8)), day(10), Some(50.0)).unwrap();
+            assert_eq!(weekly.estimated_cost_usd, Some(1.0));
+            assert_eq!(weekly.estimated_limit_usd, Some(2.0));
+            persist_cycles(&storage, Some("account-a"), rebuilt, credit_mode).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_exhausted_week_persists_without_previous_history_and_never_infers_legacy_cutoffs() {
+        let quotas = vec![QuotaWindow {
+            id: "weekly".into(),
+            label: "Weekly".into(),
+            used_percent: 100.0,
+            resets_at: Some(day(8)),
+            period_seconds: 604800,
+            format: Default::default(),
+            used_value: None,
+            limit_value: None,
+            unit: None,
+            estimated: false,
+            source_note: None,
+        }];
+        let live = current_weekly_anchor(&quotas, day(3)).unwrap();
+        assert_eq!(live.exhausted_at, Some(day(3)));
+        let mut cycles = build_cycle_history(
+            restore_cycle_buckets(vec![live], &[], day(3)),
+            day(3),
+            "test",
+        );
+        let weekly = current_weekly_period(&mut cycles, Some(day(1)), day(3), Some(100.0)).unwrap();
+        assert_eq!(weekly.tokens, 0);
+        assert_eq!(cycles[0].exhausted_at, Some(day(3)));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.db");
+        let storage = Storage::open(&path).unwrap();
+        persist_cycles(&storage, Some("account"), cycles.clone(), false).unwrap();
+        drop(storage);
+        let storage = Storage::open(&path).unwrap();
+        let loaded = storage
+            .load_reset_cycles("codex", "account", cycle_storage_key(false))
+            .unwrap();
+        let mut buckets = restore_cycle_buckets(Vec::new(), &loaded, day(5));
+        add_cycle_event(&mut buckets, day(4), "unknown", 100, None, "Codex", true);
+        let rebuilt = build_cycle_history(buckets, day(5), "test");
+        assert_eq!(rebuilt[0].cycle.usage.estimated_cost_usd, Some(0.0));
+        assert!(rebuilt[0].cycle.usage.estimate_complete);
+        // A stored 100% ratio and coverage time do not constitute observation evidence.
+        cycles[0].exhausted_at = None;
+        let mut buckets = restore_cycle_buckets(Vec::new(), &cycles, day(5));
+        add_cycle_event(&mut buckets, day(4), "unknown", 100, None, "Codex", true);
+        let legacy = build_cycle_history(buckets, day(5), "test");
+        assert_eq!(legacy[0].exhausted_at, None);
+        assert!(!legacy[0].cycle.usage.estimate_complete);
+    }
+
+    #[test]
+    fn unmatched_history_fallback_never_reintroduces_extra_allowance_cost() {
+        let mut cycles = build_cycle_history(
+            build_cycle_buckets(vec![anchor(1, Some(day(3)))], day(5)),
+            day(5),
+            "test",
+        );
+        cycles[0].cycle.ended_at = Some(day(8));
+        let raw = || {
+            let mut accumulator = DailyUsageAccumulator::default();
+            accumulator.add_variant(
+                day(4).with_timezone(&Local).date_naive(),
+                100,
+                1.0,
+                "model",
+                "Codex",
+            );
+            accumulator
+        };
+        assert!(current_weekly_period(&mut cycles, Some(day(1)), day(9), Some(100.0),).is_none());
+        assert!(
+            weekly_fallback_period(raw(), &cycles, Some(day(1)), day(9), "test", Some(100.0),)
+                .is_none()
+        );
+        for records in [&[][..], cycles.as_slice()] {
+            let next =
+                weekly_fallback_period(raw(), records, Some(day(8)), day(9), "test", Some(50.0))
+                    .unwrap();
+            assert_eq!(next.tokens, 100);
+            assert_eq!(next.estimated_cost_usd, Some(1.0));
+        }
+        cycles[0].exhausted_at = None;
+        assert!(
+            weekly_fallback_period(raw(), &cycles, Some(day(1)), day(9), "test", Some(100.0),)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn genuine_missing_or_unknown_subscription_facts_stay_partial() {
+        let mut buckets = build_cycle_buckets(vec![anchor(1, Some(day(3)))], day(5));
+        add_cycle_event(
+            &mut buckets,
+            day(2),
+            "unknown-before",
+            100,
+            None,
+            "Codex",
+            true,
+        );
+        add_cycle_event(
+            &mut buckets,
+            day(4),
+            "unknown-after",
+            100,
+            None,
+            "Codex",
+            true,
+        );
+        let records = build_cycle_history(buckets, day(5), "test");
+        assert!(!records[0].cycle.usage.estimate_complete);
+        assert_eq!(
+            records[0].cycle.usage.unknown_models,
+            vec!["unknown-before"]
+        );
+        let mut buckets = restore_cycle_buckets(Vec::new(), &records, day(6));
+        // Only the excluded request is recoverable. Its tokens must still discharge
+        // their original coverage, but the missing pre-cutoff request remains unknown.
+        add_cycle_event(
+            &mut buckets,
+            day(4),
+            "unknown-after",
+            100,
+            None,
+            "Codex",
+            true,
+        );
+        let rebuilt = build_cycle_history(buckets, day(6), "test");
+        assert_eq!(rebuilt[0].cycle.usage.tokens, 200);
+        assert!(!rebuilt[0].cycle.usage.estimate_complete);
+        assert_eq!(rebuilt[0].cycle.usage.estimated_limit_usd, None);
+        let models = rebuilt[0].cycle.model_usage.as_ref().unwrap();
+        assert!(models.iter().any(|model| model.model == "Unattributed"
+            && model.total_tokens == 100
+            && !model.cost_complete));
+    }
+
+    #[test]
+    fn deleted_source_and_database_reopen_keep_raw_spend_and_subscription_cutoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("codex");
+        let source = home.join("sessions/usage.jsonl");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let mut content = String::from(
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-6-astra\",\"service_tier\":\"default\"}}\n",
+        );
+        for timestamp in [day(2), day(4)] {
+            content.push_str(&json!({
+                "type": "event_msg", "timestamp": timestamp,
+                "payload": {"type": "token_count", "info": {
+                    "last_token_usage": {"input_tokens": 100, "output_tokens": 0, "total_tokens": 100}
+                }}
+            }).to_string());
+            content.push('\n');
+        }
+        fs::write(&source, content).unwrap();
+        let path = directory.path().join("usage.db");
+        for reopen in [false, true] {
+            let storage = Storage::open(&path).unwrap();
+            let events = scan_codex_events(
+                &storage,
+                std::slice::from_ref(&home),
+                NaiveDate::MIN,
+                Some("account"),
+            )
+            .unwrap();
+            assert_eq!(events.len(), 2);
+            for credit_mode in [false, true] {
+                let mut pricing = crate::pricing::test_bundled_pricing();
+                pricing.codex_credit_mode = credit_mode;
+                let persisted = storage
+                    .load_reset_cycles("codex", "account", cycle_storage_key(credit_mode))
+                    .unwrap();
+                let anchors = if reopen {
+                    Vec::new()
+                } else {
+                    vec![anchor(1, Some(day(3)))]
+                };
+                let mut buckets = restore_cycle_buckets(anchors, &persisted, day(5));
+                let mut daily = DailyUsageAccumulator::default();
+                aggregate_into(
+                    &events,
+                    day(5),
+                    &pricing,
+                    &mut daily,
+                    None,
+                    &mut DailyUsageAccumulator::default(),
+                    None,
+                    &mut DailyUsageAccumulator::default(),
+                    &mut buckets,
+                );
+                let cycles = build_cycle_history(buckets, day(5), "test");
+                let cost = estimate_cost(&events[0], &pricing).unwrap();
+                assert_eq!(cycles[0].exhausted_at, Some(day(3)));
+                assert_eq!(cycles[0].cycle.usage.tokens, 200);
+                assert_eq!(cycles[0].cycle.usage.estimated_cost_usd, Some(cost));
+                assert!(cycles[0].cycle.usage.estimate_complete);
+                let total = daily.build(day(5), "test").last_30_days.unwrap();
+                assert_eq!(total.tokens, 200);
+                assert_eq!(total.estimated_cost_usd, Some(cost * 2.0));
+                persist_cycles(&storage, Some("account"), cycles, credit_mode).unwrap();
+            }
+            drop(storage);
+            if !reopen {
+                fs::remove_file(&source).unwrap();
             }
         }
     }

@@ -118,6 +118,73 @@ describe('TokenLedger OMP dashboard', () => {
   });
   afterEach(cleanup);
 
+  it('shows the backend deadline and follows schedule changes from usage events', async () => {
+    const now = Date.now();
+    const state: UsageViewState = {
+      ...liveState,
+      lastFullRefreshAt: new Date(now - 240_000).toISOString(),
+      nextRefreshAt: new Date(now + 17 * 60_000).toISOString(),
+    };
+    mockInvoke((command: string) => {
+      if (command === 'get_usage_state') return Promise.resolve(state);
+      if (command === 'get_app_settings') return Promise.resolve(settingsState);
+      return Promise.resolve();
+    });
+    render(App);
+    expect(await screen.findByText('Next update in 17m')).toBeVisible();
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith('usage-state', expect.any(Function)),
+    );
+    const receiveUsage = mocks.listen.mock.calls.find(([name]) => name === 'usage-state')![1];
+    receiveUsage({ payload: { ...state, nextRefreshAt: new Date(now + 30_000).toISOString() } });
+    expect(await screen.findByText('Next update in 30s')).toBeVisible();
+    receiveUsage({ payload: { ...state, nextRefreshAt: null } });
+    expect(await screen.findByText('Waiting for first update')).toBeVisible();
+  });
+
+  it('uses the receiving wall clock and advances short deadlines until they expire', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+    let finishBootstrap!: (state: UsageViewState) => void;
+    const usage = new Promise<UsageViewState>((resolve) => (finishBootstrap = resolve));
+    mockInvoke((command: string) => {
+      if (command === 'get_usage_state') return usage;
+      if (command === 'get_app_settings') return Promise.resolve(settingsState);
+      return Promise.resolve();
+    });
+    try {
+      render(App);
+      await vi.advanceTimersByTimeAsync(0);
+      // Simulate a delayed response after suspension, before the next display tick.
+      vi.setSystemTime(new Date(Date.now() + 20_600));
+      const state: UsageViewState = {
+        ...liveState,
+        nextRefreshAt: new Date(Date.now() + 15_000).toISOString(),
+      };
+      finishBootstrap(state);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByText('Next update in 15s')).toBeVisible();
+      // A new deadline can arrive between display ticks; it must not use the previous tick.
+      await vi.advanceTimersByTimeAsync(500);
+      const receiveUsage = mocks.listen.mock.calls.find(([name]) => name === 'usage-state')![1];
+      receiveUsage({
+        payload: { ...state, nextRefreshAt: new Date(Date.now() + 300_000).toISOString() },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByText('Next update in 5m')).toBeVisible();
+      receiveUsage({
+        payload: { ...state, nextRefreshAt: new Date(Date.now() + 15_000).toISOString() },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByText('Next update in 15s')).toBeVisible();
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(screen.getByText('Next update in 0s')).toBeVisible();
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
   it('renders quota, total spend, and the 30-day trend from backend data', async () => {
     const { container } = render(App);
     expect(await screen.findByText('Plus')).toBeInTheDocument();
@@ -1055,6 +1122,7 @@ describe('TokenLedger OMP dashboard', () => {
     const multiProviderState: UsageViewState = {
       providers: { codex: codexState, claude: claudeState },
       lastFullRefreshAt: new Date(Date.now() - 240_000).toISOString(),
+      nextRefreshAt: new Date(Date.now() + 60_000).toISOString(),
     };
     const multiProviderSettings: SettingsViewState = {
       ...settingsState,
@@ -1114,6 +1182,7 @@ describe('TokenLedger OMP dashboard', () => {
     const state = {
       ...liveState,
       lastFullRefreshAt: new Date(Date.now() - 240_000).toISOString(),
+      nextRefreshAt: new Date(Date.now() + 60_000).toISOString(),
     };
     mockInvoke((command: string) => {
       if (command === 'get_usage_state') return Promise.resolve(state);
@@ -1378,6 +1447,7 @@ describe('TokenLedger OMP dashboard', () => {
     const state = {
       ...liveState,
       lastFullRefreshAt: new Date(Date.now() - 240_000).toISOString(),
+      nextRefreshAt: new Date(Date.now() + 60_000).toISOString(),
     };
     mockInvoke((command: string) => {
       if (command === 'get_usage_state') return Promise.resolve(state);

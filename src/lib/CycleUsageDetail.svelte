@@ -1,4 +1,5 @@
 <script lang="ts">
+  import CycleUsageChart from './CycleUsageChart.svelte';
   import { costReading, costTooltip } from './costDisplay';
   import { formatMetricNumber, formatMetricValue } from './metricFormat';
   import { resolvedLanguage } from './localization';
@@ -97,6 +98,7 @@
   }}
 >
   <h3>Actual reset cycles</h3>
+  <CycleUsageChart {cycles} />
   <div class="cycle-usage-list">
     {#each cycles as cycle, index (cycle.startedAt)}
       {@const sources = sourceTotals(cycle)}

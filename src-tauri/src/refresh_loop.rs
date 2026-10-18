@@ -15,8 +15,17 @@ pub fn spawn(
     notifications: Arc<NotificationEvaluator>,
 ) {
     tauri::async_runtime::spawn(async move {
+        let mut schedule_changed = service.subscribe_refresh_schedule();
         loop {
+            schedule_changed.borrow_and_update();
             let provider_ids = settings.enabled_provider_ids();
+            let delay = service
+                .next_refresh_delay(&provider_ids)
+                .unwrap_or(REFRESH_INTERVAL);
+            if !delay.is_zero() {
+                let _ = tokio::time::timeout(delay, schedule_changed.changed()).await;
+                continue;
+            }
             if !provider_ids.is_empty() {
                 let progress_app = app.clone();
                 let progress_settings = settings.clone();
@@ -37,7 +46,6 @@ pub fn spawn(
                 let _ = app.emit("usage-state", &state);
                 finish_refresh(&app, &state, &settings, &notifications);
             }
-            tokio::time::sleep(REFRESH_INTERVAL).await;
         }
     });
 }

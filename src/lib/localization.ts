@@ -251,6 +251,17 @@ const zhHans: Record<string, string> = {
   'From your Cursor usage export': '来自 Cursor 用量导出',
   'From your Grok logs (estimated)': '来自 Grok 日志（估算）',
   'Actual reset cycles': '实际重置周期',
+  'Reset cycle charts': '重置周期图',
+  'Chart cycle range': '图表周期范围',
+  'Older cycles': '更早周期',
+  'Newer cycles': '更新周期',
+  'Selected cycle': '选中周期',
+  'Observed quota consumption (%)': '观测额度消耗（%）',
+  'Cycle token usage': '周期 Token 用量',
+  Started: '开始',
+  Ended: '结束',
+  'Server-observed percentage; tokens cover the whole cycle. Current cycle is in progress.':
+    '百分比来自服务器观测；Token 为完整周期用量。当前周期尚未结束。',
   'Cycle model usage': '周期模型用量',
   'Show cycle model usage': '显示周期模型用量',
   Model: '模型',
@@ -351,6 +362,11 @@ function translateValue(value: string): string {
   if (value.includes(' · ')) return value.split(' · ').map(translateValue).join(' · ');
 
   const replacements: Array<[RegExp, (...parts: string[]) => string]> = [
+    [
+      /^(Observed quota consumption \(%\)|Cycle token usage): (.+)$/,
+      (label, amount) => `${translateValue(label)}：${translateValue(amount)}`,
+    ],
+    [/^(.+) – Current$/, (start) => `${start} – 当前`],
     [/^Next update in (\d+)m$/, (amount) => `${amount} 分钟后更新`],
     [/^Next update in (\d+)s$/, (amount) => `${amount} 秒后更新`],
     [/^Last updated (\d+)m ago$/, (amount) => `${amount} 分钟前更新`],

@@ -55,6 +55,7 @@ pub struct QuotaCycleAnchor {
     pub started_at: DateTime<Utc>,
     pub scheduled_reset_at: DateTime<Utc>,
     pub used_percent: f64,
+    pub exhausted_at: Option<DateTime<Utc>>,
 }
 
 pub(super) struct SessionSource<'a> {
@@ -350,7 +351,7 @@ fn read_weekly_anchors(
     let connection = open_read_only(path)?;
     let mut statement = connection
         .prepare(
-            "SELECT resets_at, COALESCE(used_fraction, 0.0)
+            "SELECT resets_at, COALESCE(used_fraction, 0.0), recorded_at
              FROM usage_history
              WHERE provider = 'openai-codex' AND label = '7 days'
                AND account_id = ?1 AND resets_at IS NOT NULL AND recorded_at <= ?2
@@ -359,28 +360,36 @@ fn read_weekly_anchors(
         .map_err(|_| OmpUsageError::Database)?;
     let rows = statement
         .query_map(params![account_id, now.timestamp_millis()], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })
         .map_err(|_| OmpUsageError::Database)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| OmpUsageError::Database)?;
 
-    let mut clustered: Vec<(i64, f64)> = Vec::new();
-    for (reset_ms, used_fraction) in rows {
-        if let Some((cluster_reset, cluster_used)) = clustered.last_mut() {
+    let mut clustered: Vec<(i64, f64, Option<DateTime<Utc>>)> = Vec::new();
+    for (reset_ms, used_fraction, recorded_ms) in rows {
+        let exhausted_at = (used_fraction >= 1.0)
+            .then(|| DateTime::from_timestamp_millis(recorded_ms))
+            .flatten();
+        if let Some((cluster_reset, cluster_used, cluster_exhausted)) = clustered.last_mut() {
             if reset_ms.saturating_sub(*cluster_reset) <= ANCHOR_CLUSTER_SECONDS * 1000 {
                 *cluster_reset = (*cluster_reset).min(reset_ms);
                 *cluster_used = cluster_used.max(used_fraction);
+                *cluster_exhausted = (*cluster_exhausted).into_iter().chain(exhausted_at).min();
                 continue;
             }
         }
-        clustered.push((reset_ms, used_fraction));
+        clustered.push((reset_ms, used_fraction, exhausted_at));
     }
 
     Ok(clustered
         .into_iter()
-        .filter(|(_, used_fraction)| *used_fraction > 0.0)
-        .filter_map(|(reset_ms, used_fraction)| {
+        .filter(|(_, used_fraction, _)| *used_fraction > 0.0)
+        .filter_map(|(reset_ms, used_fraction, exhausted_at)| {
             let scheduled_reset_at = DateTime::from_timestamp_millis(reset_ms)?;
             let started_at = scheduled_reset_at
                 .checked_sub_signed(chrono::Duration::seconds(WEEKLY_WINDOW_SECONDS))?;
@@ -388,6 +397,7 @@ fn read_weekly_anchors(
                 started_at,
                 scheduled_reset_at,
                 used_percent: (used_fraction * 100.0).clamp(0.0, 100.0),
+                exhausted_at,
             })
         })
         .collect())
@@ -562,6 +572,7 @@ mod tests {
         .unwrap();
         assert_eq!(anchors.len(), 1);
         assert_eq!(anchors[0].used_percent, 20.0);
+        assert_eq!(anchors[0].exhausted_at, None);
         assert_eq!(
             anchors[0].scheduled_reset_at.timestamp_millis(),
             1784469600000
@@ -570,6 +581,61 @@ mod tests {
             anchors[0].started_at,
             anchors[0].scheduled_reset_at - chrono::Duration::days(7)
         );
+    }
+
+    #[test]
+    fn weekly_exhaustion_uses_earliest_matching_millisecond_observation_in_reset_cluster() {
+        let directory = tempdir().unwrap();
+        create_databases(directory.path(), "account-a");
+        let path = directory.path().join("agent/agent.db");
+        let connection = Connection::open(&path).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 12, 15, 0, 0).unwrap();
+        let earliest = now - chrono::Duration::hours(1) + chrono::Duration::milliseconds(123);
+        let reset = 1784469600000_i64;
+        for (account, recorded, used, reset_ms) in [
+            (
+                "account-a",
+                earliest + chrono::Duration::minutes(10),
+                1.1,
+                reset,
+            ),
+            ("account-a", earliest, 1.0, reset + 120_000),
+            (
+                "account-a",
+                earliest - chrono::Duration::minutes(1),
+                0.99,
+                reset,
+            ),
+            (
+                "account-b",
+                earliest - chrono::Duration::minutes(2),
+                1.0,
+                reset,
+            ),
+            ("account-a", now + chrono::Duration::seconds(1), 1.0, reset),
+            ("account-a", now, 0.25, reset + 604_800_000),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO usage_history VALUES (?1, 'openai-codex', ?2, '7 days', ?3, ?4)",
+                    rusqlite::params![recorded.timestamp_millis(), account, used, reset_ms],
+                )
+                .unwrap();
+        }
+        let anchors = read_weekly_anchors(&path, Some("account-a"), now).unwrap();
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(anchors[0].scheduled_reset_at.timestamp_millis(), reset);
+        assert_eq!(anchors[0].used_percent, 100.0);
+        assert_eq!(anchors[0].exhausted_at, Some(earliest));
+        assert_eq!(anchors[1].exhausted_at, None);
+        assert_eq!(anchors[1].used_percent, 25.0);
+        let other = read_weekly_anchors(&path, Some("account-b"), now).unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(
+            other[0].exhausted_at,
+            Some(earliest - chrono::Duration::minutes(2))
+        );
+        assert!(read_weekly_anchors(&path, None, now).unwrap().is_empty());
     }
 
     fn message(id: &str, timestamp: &str) -> serde_json::Value {

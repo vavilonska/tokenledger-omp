@@ -10,7 +10,9 @@ use crate::{
     models::{
         MetricSource, ProviderErrorKind, ProviderSnapshot, ProviderViewState, SnapshotSource,
     },
-    policy::{FAILURE_RETRY_BACKOFF, REFRESH_INTERVAL, STALE_AFTER},
+    policy::{
+        FAILURE_RETRY_BACKOFF, LOW_CODEX_WEEKLY_REFRESH_INTERVAL, REFRESH_INTERVAL, STALE_AFTER,
+    },
     providers::{ProviderError, ProviderRefresh, ProviderRegistry},
     settings::SettingsService,
     storage::Storage,
@@ -25,6 +27,8 @@ const PROVIDER_REFRESH_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct UsageViewState {
     pub providers: BTreeMap<String, ProviderViewState>,
     pub last_full_refresh_at: Option<chrono::DateTime<Utc>>,
+    /// Earliest eligible enabled provider's background deadline; absent when none is scheduled.
+    pub next_refresh_at: Option<chrono::DateTime<Utc>>,
 }
 
 pub struct ProviderService {
@@ -35,6 +39,7 @@ pub struct ProviderService {
     last_live_refresh: Mutex<HashMap<String, Instant>>,
     last_failed_refresh: Mutex<HashMap<String, Instant>>,
     last_full_refresh_at: RwLock<Option<chrono::DateTime<Utc>>>,
+    refresh_schedule_changed: tokio::sync::watch::Sender<()>,
     refresh_timeout: Duration,
     settings: Option<Arc<SettingsService>>,
 }
@@ -95,6 +100,7 @@ impl ProviderService {
             states.insert(id.clone(), state);
             refresh_flights.insert(id, Arc::new(RefreshFlight::new()));
         }
+        let (refresh_schedule_changed, _) = tokio::sync::watch::channel(());
         Self {
             registry,
             storage,
@@ -103,6 +109,7 @@ impl ProviderService {
             last_live_refresh: Mutex::new(HashMap::new()),
             last_failed_refresh: Mutex::new(HashMap::new()),
             last_full_refresh_at: RwLock::new(None),
+            refresh_schedule_changed,
             refresh_timeout,
             settings,
         }
@@ -122,9 +129,19 @@ impl ProviderService {
             .read()
             .ok()
             .and_then(|value| value.to_owned());
+        let enabled_provider_ids = self
+            .settings
+            .as_ref()
+            .map(|settings| settings.enabled_provider_ids())
+            .unwrap_or_else(|| providers.keys().cloned().collect());
+        let next_refresh_at = self
+            .next_refresh_delay(&enabled_provider_ids)
+            .and_then(|delay| chrono::Duration::from_std(delay).ok())
+            .map(|delay| Utc::now() + delay);
         UsageViewState {
             providers,
             last_full_refresh_at,
+            next_refresh_at,
         }
     }
 
@@ -298,6 +315,7 @@ impl ProviderService {
             } else if let Ok(mut failures) = self.last_failed_refresh.lock() {
                 failures.insert(provider_id.clone(), Instant::now());
             }
+            self.refresh_schedule_changed.send_replace(());
 
             let run_follow_up = if let Some(worker) = late_worker {
                 let completed_generation = if let Ok(mut flight_state) = flight.state.lock() {
@@ -325,6 +343,7 @@ impl ProviderService {
                     flight_state.runner_active = false;
                     flight_state.requested_generation = flight_state.completed_generation;
                 }
+                self.refresh_schedule_changed.send_replace(());
                 false
             } else {
                 let run_follow_up = if let Ok(mut flight_state) = flight.state.lock() {
@@ -490,26 +509,118 @@ impl ProviderService {
         self.provider_state(provider_id)
     }
 
-    fn is_fresh_this_session(&self, provider_id: &str) -> bool {
-        self.last_live_refresh
+    pub fn subscribe_refresh_schedule(&self) -> tokio::sync::watch::Receiver<()> {
+        self.refresh_schedule_changed.subscribe()
+    }
+
+    pub fn next_refresh_delay(&self, provider_ids: &[String]) -> Option<Duration> {
+        provider_ids
+            .iter()
+            .filter(|provider_id| {
+                self.refresh_flights
+                    .get(provider_id.as_str())
+                    .and_then(|flight| flight.state.lock().ok())
+                    .is_none_or(|flight| {
+                        !flight.runner_active || flight.attempt_generation.is_some()
+                    })
+            })
+            .map(|provider_id| {
+                self.freshness_remaining(provider_id)
+                    // Background failures keep the ordinary cadence; the service's
+                    // shorter retry guard still applies to explicit non-forced calls.
+                    .max(self.failure_retry_remaining(provider_id, REFRESH_INTERVAL))
+            })
+            .min()
+    }
+
+    fn refresh_interval(&self, provider_id: &str, now: chrono::DateTime<Utc>) -> Duration {
+        self.states
+            .read()
+            .ok()
+            .and_then(|states| {
+                states
+                    .get(provider_id)
+                    .map(|state| refresh_interval_for_state(provider_id, state, now))
+            })
+            .unwrap_or(REFRESH_INTERVAL)
+    }
+
+    fn freshness_remaining(&self, provider_id: &str) -> Duration {
+        let last_refresh = self
+            .last_live_refresh
             .lock()
             .ok()
-            .and_then(|value| value.get(provider_id).copied())
-            .is_some_and(|instant| instant.elapsed() < REFRESH_INTERVAL)
+            .and_then(|value| value.get(provider_id).copied());
+        let Some(last_refresh) = last_refresh else {
+            return Duration::ZERO;
+        };
+        let elapsed = last_refresh.elapsed();
+        let now = Utc::now();
+        let interval = self.refresh_interval(provider_id, now);
+        let remaining = interval.saturating_sub(elapsed);
+        if interval == LOW_CODEX_WEEKLY_REFRESH_INTERVAL && !remaining.is_zero() {
+            // A quota that expires before its next accelerated poll cannot
+            // schedule that poll; report the same ordinary deadline the gate will use.
+            let due_at = now + chrono::Duration::milliseconds(remaining.as_millis() as i64);
+            return self
+                .refresh_interval(provider_id, due_at)
+                .saturating_sub(elapsed);
+        }
+        remaining
+    }
+
+    fn is_fresh_this_session(&self, provider_id: &str) -> bool {
+        !self.freshness_remaining(provider_id).is_zero()
     }
 
     fn is_in_failure_backoff(&self, provider_id: &str) -> bool {
+        !self
+            .failure_retry_remaining(provider_id, FAILURE_RETRY_BACKOFF)
+            .is_zero()
+    }
+
+    fn failure_retry_remaining(&self, provider_id: &str, retry_after: Duration) -> Duration {
         self.last_failed_refresh
             .lock()
             .ok()
             .and_then(|value| value.get(provider_id).copied())
-            .is_some_and(|instant| instant.elapsed() < FAILURE_RETRY_BACKOFF)
+            .map(|instant| retry_after.saturating_sub(instant.elapsed()))
+            .unwrap_or_default()
     }
 
     fn update_state(&self, provider_id: &str, update: impl FnOnce(&mut ProviderViewState)) {
         if let Ok(mut states) = self.states.write() {
             update(states.entry(provider_id.to_owned()).or_default());
         }
+    }
+}
+
+fn refresh_interval_for_state(
+    provider_id: &str,
+    state: &ProviderViewState,
+    now: chrono::DateTime<Utc>,
+) -> Duration {
+    if provider_id != "codex"
+        || state.source != SnapshotSource::Live
+        || state.stale
+        || state.error.is_some()
+    {
+        return REFRESH_INTERVAL;
+    }
+    let Some(snapshot) = state.snapshot.as_ref() else {
+        return REFRESH_INTERVAL;
+    };
+    if now.signed_duration_since(snapshot.refreshed_at) >= STALE_AFTER {
+        return REFRESH_INTERVAL;
+    }
+    if snapshot.quotas.iter().any(|quota| {
+        quota.id == "weekly"
+            && (97.0..100.0).contains(&quota.used_percent)
+            && quota.resets_at.is_some_and(|reset| reset > now)
+    }) {
+        LOW_CODEX_WEEKLY_REFRESH_INTERVAL
+    } else {
+        REFRESH_INTERVAL
     }
 }
 
@@ -1626,5 +1737,275 @@ mod tests {
             .lock()
             .unwrap()
             .contains_key("recovering"));
+    }
+    fn weekly_quota_state(used_percent: f64, now: chrono::DateTime<Utc>) -> ProviderViewState {
+        let mut snapshot = test_snapshot("codex");
+        snapshot.refreshed_at = now;
+        snapshot.quotas.push(QuotaWindow {
+            id: "weekly".into(),
+            label: "Weekly".into(),
+            used_percent,
+            resets_at: Some(now + chrono::Duration::days(1)),
+            period_seconds: 604_800,
+            format: QuotaFormat::Percent,
+            used_value: None,
+            limit_value: None,
+            unit: None,
+            estimated: false,
+            source_note: None,
+        });
+        ProviderViewState {
+            snapshot: Some(snapshot),
+            source: SnapshotSource::Live,
+            ..ProviderViewState::default()
+        }
+    }
+
+    struct WeeklyQuotaProvider {
+        used_percent: Arc<Mutex<f64>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl UsageProvider for WeeklyQuotaProvider {
+        fn definition(&self) -> ProviderDefinition {
+            crate::providers::codex::definition()
+        }
+
+        fn has_local_credentials(&self) -> bool {
+            true
+        }
+
+        fn refresh(&self) -> Result<ProviderSnapshot, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(
+                weekly_quota_state(*self.used_percent.lock().unwrap(), Utc::now())
+                    .snapshot
+                    .unwrap(),
+            )
+        }
+    }
+
+    #[test]
+    fn adaptive_refresh_requires_a_current_healthy_main_codex_weekly_quota() {
+        use crate::policy::{LOW_CODEX_WEEKLY_REFRESH_INTERVAL, REFRESH_INTERVAL};
+
+        let now = Utc::now();
+        for (used_percent, interval) in [
+            (0.0, REFRESH_INTERVAL),
+            (96.999, REFRESH_INTERVAL),
+            (97.0, LOW_CODEX_WEEKLY_REFRESH_INTERVAL),
+            (99.999, LOW_CODEX_WEEKLY_REFRESH_INTERVAL),
+            (100.0, REFRESH_INTERVAL),
+            (101.0, REFRESH_INTERVAL),
+            (f64::NAN, REFRESH_INTERVAL),
+        ] {
+            assert_eq!(
+                super::refresh_interval_for_state(
+                    "codex",
+                    &weekly_quota_state(used_percent, now),
+                    now
+                ),
+                interval
+            );
+        }
+        let healthy = weekly_quota_state(99.0, now);
+        assert_eq!(
+            super::refresh_interval_for_state("claude", &healthy, now),
+            REFRESH_INTERVAL
+        );
+        for quota_id in ["session", "spark", "sparkWeekly"] {
+            let mut state = healthy.clone();
+            state.snapshot.as_mut().unwrap().quotas[0].id = quota_id.into();
+            assert_eq!(
+                super::refresh_interval_for_state("codex", &state, now),
+                REFRESH_INTERVAL
+            );
+        }
+        let mut rejected_states = vec![ProviderViewState::default()];
+        let mut cached = healthy.clone();
+        cached.source = SnapshotSource::Cache;
+        rejected_states.push(cached);
+        let mut failed = healthy.clone();
+        failed.error = Some("offline".into());
+        rejected_states.push(failed);
+        let mut stale = healthy.clone();
+        stale.stale = true;
+        rejected_states.push(stale);
+        let mut aged = healthy.clone();
+        aged.snapshot.as_mut().unwrap().refreshed_at = now - STALE_AFTER;
+        rejected_states.push(aged);
+        let mut expired = healthy.clone();
+        expired.snapshot.as_mut().unwrap().quotas[0].resets_at = Some(now);
+        rejected_states.push(expired);
+        let mut unknown_reset = healthy;
+        unknown_reset.snapshot.as_mut().unwrap().quotas[0].resets_at = None;
+        rejected_states.push(unknown_reset);
+        for state in rejected_states {
+            assert_eq!(
+                super::refresh_interval_for_state("codex", &state, now),
+                REFRESH_INTERVAL
+            );
+        }
+    }
+
+    #[test]
+    fn manual_refresh_reschedules_low_quota_without_resetting_other_provider_deadlines() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("refresh.db")).unwrap());
+        let used_percent = Arc::new(Mutex::new(50.0));
+        let codex_calls = Arc::new(AtomicUsize::new(0));
+        let other_calls = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(
+            ProviderRegistry::new(vec![
+                Arc::new(WeeklyQuotaProvider {
+                    used_percent: used_percent.clone(),
+                    calls: codex_calls.clone(),
+                }) as Arc<dyn UsageProvider>,
+                Arc::new(SlowProvider {
+                    id: "claude",
+                    calls: other_calls.clone(),
+                    active: Arc::new(AtomicUsize::new(0)),
+                    maximum: Arc::new(AtomicUsize::new(0)),
+                    delay: Duration::ZERO,
+                }) as Arc<dyn UsageProvider>,
+            ])
+            .unwrap(),
+        );
+        let (settings, _) =
+            SettingsService::new_deferred(storage.clone(), registry.clone()).unwrap();
+        let settings = Arc::new(settings);
+        let service = Arc::new(ProviderService::new_with_settings(
+            registry,
+            storage,
+            settings.clone(),
+        ));
+        let provider_ids = vec!["codex".into(), "claude".into()];
+        tauri::async_runtime::block_on(service.refresh_all(&provider_ids, true));
+        assert!(service.next_refresh_delay(&provider_ids).unwrap() > Duration::from_secs(299));
+
+        let mut schedule_changed = service.subscribe_refresh_schedule();
+        let sleeping_delay = service.next_refresh_delay(&provider_ids).unwrap();
+        let (sleeping_tx, sleeping_rx) = tokio::sync::oneshot::channel();
+        let sleeper = tauri::async_runtime::spawn(async move {
+            sleeping_tx.send(()).unwrap();
+            tokio::time::timeout(sleeping_delay, schedule_changed.changed()).await
+        });
+        tauri::async_runtime::block_on(sleeping_rx).unwrap();
+        *used_percent.lock().unwrap() = 97.0;
+        refresh_with_test_timeout(&service, "codex", true);
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), sleeper)
+                .await
+                .expect("manual completion must wake the existing 300s sleep")
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        });
+        let delay = service.next_refresh_delay(&provider_ids).unwrap();
+        assert!(delay > Duration::from_secs(14) && delay <= Duration::from_secs(15));
+        let deadline = service.state().next_refresh_at.unwrap();
+        tauri::async_runtime::block_on(service.refresh_all(&provider_ids, false));
+        assert_eq!(codex_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(other_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            (service.state().next_refresh_at.unwrap() - deadline)
+                .num_milliseconds()
+                .abs()
+                < 100
+        );
+
+        service.update_state("codex", |state| {
+            state.snapshot.as_mut().unwrap().quotas[0].resets_at =
+                Some(Utc::now() + chrono::Duration::seconds(5));
+        });
+        assert!(service.next_refresh_delay(&provider_ids).unwrap() > Duration::from_secs(299));
+        service.update_state("codex", |state| {
+            state.snapshot.as_mut().unwrap().quotas[0].resets_at =
+                Some(Utc::now() + chrono::Duration::days(1));
+        });
+
+        service.last_live_refresh.lock().unwrap().insert(
+            "codex".into(),
+            Instant::now().checked_sub(Duration::from_secs(20)).unwrap(),
+        );
+        assert_eq!(
+            service.next_refresh_delay(&provider_ids),
+            Some(Duration::ZERO)
+        );
+        tauri::async_runtime::block_on(service.refresh_all(&provider_ids, false));
+        assert_eq!(codex_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(other_calls.load(Ordering::SeqCst), 1);
+
+        let mut disabled = settings.get();
+        disabled
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == "codex")
+            .unwrap()
+            .enabled = false;
+        settings
+            .update_from_view(
+                disabled,
+                settings.settings_revision(),
+                settings.account_revision(),
+            )
+            .unwrap();
+        assert!((service.state().next_refresh_at.unwrap() - Utc::now()).num_seconds() >= 298);
+
+        for used in [100.0, 0.0] {
+            *used_percent.lock().unwrap() = used;
+            refresh_with_test_timeout(&service, "codex", true);
+            assert!(
+                service.next_refresh_delay(&["codex".into()]).unwrap() > Duration::from_secs(299)
+            );
+        }
+
+        *used_percent.lock().unwrap() = 99.0;
+        refresh_with_test_timeout(&service, "codex", true);
+        service.update_state("codex", |state| state.error = Some("offline".into()));
+        service.last_live_refresh.lock().unwrap().insert(
+            "codex".into(),
+            Instant::now()
+                .checked_sub(Duration::from_secs(290))
+                .unwrap(),
+        );
+        service
+            .last_failed_refresh
+            .lock()
+            .unwrap()
+            .insert("codex".into(), Instant::now());
+        let delay = service.next_refresh_delay(&["codex".into()]).unwrap();
+        assert!(delay > Duration::from_secs(299) && delay <= crate::policy::REFRESH_INTERVAL);
+        let calls = codex_calls.load(Ordering::SeqCst);
+        refresh_with_test_timeout(&service, "codex", false);
+        assert_eq!(codex_calls.load(Ordering::SeqCst), calls);
+
+        service.last_live_refresh.lock().unwrap().insert(
+            "codex".into(),
+            Instant::now()
+                .checked_sub(Duration::from_secs(301))
+                .unwrap(),
+        );
+        service.last_failed_refresh.lock().unwrap().insert(
+            "codex".into(),
+            Instant::now().checked_sub(Duration::from_secs(61)).unwrap(),
+        );
+        assert!(!service.is_in_failure_backoff("codex"));
+        assert!(service.next_refresh_delay(&["codex".into()]).unwrap() > Duration::from_secs(238));
+        refresh_with_test_timeout(&service, "codex", false);
+        assert_eq!(codex_calls.load(Ordering::SeqCst), calls + 1);
+
+        let mut disabled = settings.get();
+        for provider in &mut disabled.providers {
+            provider.enabled = false;
+        }
+        settings
+            .update_from_view(
+                disabled,
+                settings.settings_revision(),
+                settings.account_revision(),
+            )
+            .unwrap();
+        assert_eq!(service.state().next_refresh_at, None);
     }
 }

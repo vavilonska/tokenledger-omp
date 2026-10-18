@@ -1,5 +1,75 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.6 低额度刷新、归零周计价与周期图
+
+`package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 中应用自身包版本及
+`src-tauri/tauri.conf.json` 从 0.5.5 同步升至 0.5.6，不升级依赖，不改变应用／数据身份、
+价格体系、明确 memory 用途排除规则、签名或 updater 配置。
+
+- 主 Codex 账号周剩余额度大于 0%、不超过 3% 时，刷新间隔从 300 秒缩短为 15 秒。
+  归零后恢复普通频率，新周重新跟踪。
+- 首次观察周额度归零后，同周期后续 Token 消费按额外额度处理，其费用不计入订阅周期消费
+  和额度外推；总消费账本仍保留 Token、请求和原始计价证据。不新增 UI 标记。
+- 现有周期历史浮层加入上下两张共享周期横轴的图：上图为服务器观察到的
+  `quotaUsedPercent`，下图为周期完整 Token 用量。支持历史范围导航，保留明细、中文和主题；
+  未知值不补零。复用现有桌面 UI，不增加独立 WebUI 服务、服务器或依赖。
+
+2026-10-18 本轮公开版复用已完成的共同语义／UI 验收，未重复运行未受影响的整套检查：
+
+- 版本、29 项 Tauri 命令、28 项模型、提供商注册及单实例契约，Rust fmt／Clippy 通过。
+  首次 Rust 全套为 638 通过、1 失败；失败是失效的来源显示标签断言。修正测试后，
+  首次归零截断用例定向补验通过，保留模型／来源金额及全部 variant tokens 断言；
+  bins 编译补验通过。不宣称首次全套全绿。
+- 真实生产 scanner、Codex JSONL 与 SQLite 烟测覆盖 API USD／Codex credits：
+  cutoff 同时刻消费仍纳入周费用，晚 1ms 后周费用／额度保持 $3.00，总费用／会话费用
+  增至 $4.50，周期保留 330,000 tokens／3 请求；删源重开结果一致。
+  服务测试另覆盖 0%／3% 边界、15 秒与普通频率、重启恢复、新周及账号隔离。
+- Svelte 检查 248 文件、0 错误／警告；首轮定向前端 99 项通过，时钟修复后 App
+  定向 60 项通过，8 个受影响文件 ESLint／Prettier 通过。真实 Chromium 中生产组件
+  在 320px、明暗主题、中英文覆盖双图、未知／零值、14 周期导航、模型展开和焦点；
+  精确 deadline 显示 300s → 5m、15s → 15s，并自然逐秒倒数至 0s。
+
+后端烟测调用真实生产模块，但不是默认账号发现或真实 OAuth／HTTP 验收；前端使用注入 DTO
+与隔离事件桥，不代表原生 Tauri 宿主或安装验收。临时 runner、页面和浏览器均已清理，
+去敏前端证据留在 `.local/cycle-chart-ui-20261018/`；该目录不提交或公开上传。
+
+### 0.5.6 安装包与公开发布
+
+公开 origin 为 `https://github.com/vavilonska/tokenledger-omp.git`；本轮从公开基线
+`89778ef8e823e1e3e913a70047367794c4cbab39` 接续。发布前确认远端 main 未前移、
+`v0.5.6` tag／Release 无冲突，禁止移动旧 tag 或覆盖历史资产。
+
+共同门禁闭合后，`corepack pnpm build:installer` 退出 0，Vite 转换 217 模块，
+Rust GNU x64 release 构建完成，NSIS 成功生成。构建原名为
+`src-tauri/target/x86_64-pc-windows-gnu/release/bundle/nsis/TokenLedger OMP_0.5.6_x64-setup.exe`；
+交付副本为 `release/TokenLedger-OMP_0.5.6_x64-setup.exe` 及相邻 `.sha256`。
+
+- 大小：**10,338,797 bytes**。
+- SHA-256：`9fa7a2106d784b4409461a5286cd52355a5836ab4c878005d6e31856a678c598`。
+- 安装程序和应用资源的产品名称均为 **TokenLedger OMP**，产品／文件版本均为 **0.5.6**；
+  应用 PE machine 为 `0x8664`（x64），安装包 Authenticode 状态为 `NotSigned`。
+- 交付入口：[v0.5.6 Release](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.6)。
+  `v0.5.6` 绑定本轮源码提交，main 正常推送；Release 只上传本包与校验文件。
+  `release/` 二进制按既有忽略约定留本地并作为 Release 资产分发，不加入 Git 源码历史。
+
+发布使用环境提供的认证凭据调用 GitHub REST API，不新增 CI／密钥或改变全局工具配置。
+发布收据在 `.local/publish-public-056/` 留存远端 main／tag 身份、Release 资产大小，
+以及无认证的实际 Release 安装包和校验文件独立下载核对结果；不公开该目录或凭据。
+临时下载与发布 runner 在交付时清理。签名与 updater 均未配置，继续手动下载更新。
+公开版未在用户宿主安装或启动原生 UI；其他平台安装包、真实 OAuth／HTTP 和 CI 亦未验收。
+
+### English summary
+
+Version 0.5.6 adds 15-second primary-Codex refreshes when weekly remaining quota is above 0% and at
+most 3%, returning to ordinary frequency at zero. Consumption after the first observed weekly zero
+is excluded from subscription-cycle spend and allowance extrapolation, while the total ledger keeps
+tokens, requests and pricing evidence. New weeks restore quota tracking; no UI badge is added.
+The existing cycle-history popup adds stacked, shared-axis charts for server-observed quota usage
+and complete cycle tokens, with historical navigation, unknown gaps, details, Chinese and themes.
+There is no separate WebUI service or new dependency. Existing pricing/memory rules and identities
+are unchanged. Backend scanner/SQLite and narrow-window production-component browser acceptance
+passed, with targeted repairs and reruns recorded above; neither proves native-host or installation acceptance.
+
 ## 0.5.5 memory 估算排除修复
 
 仅明确 `entry_kind == "model_usage"` 且 `purpose == "memory"` 的 OMP 事件排除估算费用贡献；

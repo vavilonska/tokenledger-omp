@@ -43,6 +43,8 @@ pub struct StoredResetCycle {
     pub cycle: ResetCycleUsage,
     #[serde(rename = "_recovery")]
     pub recovery: CycleRecovery,
+    #[serde(rename = "_exhaustedAt", skip_serializing_if = "Option::is_none")]
+    pub exhausted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct ProviderAccountUpdate {
@@ -422,6 +424,8 @@ impl Storage {
                     cycle: ResetCycleUsage,
                     #[serde(default, rename = "_recovery")]
                     recovery: Option<CycleRecovery>,
+                    #[serde(default, rename = "_exhaustedAt")]
+                    exhausted_at: Option<chrono::DateTime<chrono::Utc>>,
                 }
                 let payload: Payload = serde_json::from_str(&payload)?;
                 let recovery = match payload.recovery {
@@ -438,6 +442,7 @@ impl Storage {
                 Ok(StoredResetCycle {
                     cycle: payload.cycle,
                     recovery,
+                    exhausted_at: payload.exhausted_at,
                 })
             })
             .collect()
@@ -819,6 +824,7 @@ mod tests {
             ]),
         };
         let cycle = StoredResetCycle {
+            exhausted_at: Some(cycle.started_at + chrono::Duration::hours(1)),
             recovery: CycleRecovery {
                 baseline_tokens: cycle.usage.tokens,
                 covered_until: cycle.started_at,
@@ -861,6 +867,7 @@ mod tests {
             .load_reset_cycles("codex", "account-a", "weekly")
             .unwrap();
         let models = loaded[0].cycle.model_usage.as_ref().unwrap();
+        assert_eq!(loaded[0].exhausted_at, None);
         assert_eq!(models[0].total_tokens, 8);
         assert_eq!(models[0].request_count, Some(2));
         assert_eq!(models[1].total_tokens, 4);

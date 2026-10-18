@@ -92,7 +92,6 @@
   let shareTimer: ReturnType<typeof setTimeout> | undefined;
   const providerStates = $derived(Object.values(viewState.providers));
   const anyRefreshing = $derived(providerStates.some((state) => state.refreshing));
-  const lastFullRefresh = $derived(viewState.lastFullRefreshAt ?? undefined);
   const platform = desktopPlatform();
   const shortcuts = shortcutLabels(platform);
   const settingsController = new SettingsController((message) => (settingsError = message));
@@ -308,6 +307,7 @@
     };
     try {
       viewState = await refreshUsage();
+      now = Date.now();
     } catch {
       viewState = {
         ...viewState,
@@ -333,6 +333,7 @@
     };
     try {
       viewState = await refreshProviderUsage(providerId);
+      now = Date.now();
     } catch {
       const failed = viewState.providers[providerId];
       if (failed) {
@@ -732,11 +733,16 @@
       }
     };
     document.addEventListener('keydown', handleKeydown);
-    const clock = window.setInterval(() => (now = Date.now()), 30_000);
+    const clock = window.setInterval(() => (now = Date.now()), 1_000);
     const listeners = createListenerRegistry(() => {
       settingsError ??= 'TokenLedger OMP event bridge is unavailable.';
     });
-    listeners.add(onUsageState((state) => (viewState = state)));
+    listeners.add(
+      onUsageState((state) => {
+        now = Date.now();
+        viewState = state;
+      }),
+    );
     listeners.add(
       onSettingsState((state) => {
         settingsController.acceptExternalState(state);
@@ -760,6 +766,7 @@
       .then((state) => {
         catalog = new ProviderCatalogIndex(state.catalog);
         viewState = state.usage;
+        now = Date.now();
         settingsController.setState(state.settings);
         automaticUpdatesReady = true;
       })
@@ -949,7 +956,7 @@
           aria-label="Refresh all provider usage"
         >
           <span>TokenLedger OMP {appVersion}</span><small
-            >{anyRefreshing ? 'Updating…' : nextUpdateLabel(lastFullRefresh, now)}</small
+            >{anyRefreshing ? 'Updating…' : nextUpdateLabel(viewState.nextRefreshAt, now)}</small
           >
         </button>
         {#if screen === 'dashboard'}

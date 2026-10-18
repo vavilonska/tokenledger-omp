@@ -190,6 +190,24 @@ An anchor after the coverage cutoff can close the old cycle and start a new one.
 weekly row and its history entry share the recovered tokens, completeness and live server
 percentage. Partial cycles never extrapolate a full monetary quota from a known-cost subtotal.
 
+The main weekly quota retains the earliest observed exhaustion time per account and cycle in
+storage-only `_exhaustedAt`. Evidence comes from a live main-week response observed at 100% used
+or a matching OMP `usage_history` observation with `used_fraction >= 1`; OMP timestamps are
+milliseconds. Earlier evidence repairs the same historical cycle without changing its boundaries
+or recovery baseline. Save times, recovery coverage and an old 100% aggregate do not establish
+exhaustion. Old records without this evidence retain the existing pricing rules.
+
+Requests strictly after that observation are extra allowance: their tokens, model request counts
+and recovery evidence remain in the cycle, while their contribution to weekly/model cost and
+monetary quota extrapolation is excluded in both API USD and credits. Requests at exactly the
+observation time remain included. Unknown prices only make the subscription subtotal partial
+when they belong before or at the cutoff; genuinely missing historical facts remain partial.
+Daily/total consumption and raw retained facts are unchanged, as is the main five-hour window.
+New weekly cycles do not inherit the old cutoff. No additional UI marker is added.
+If conflicting retained boundaries leave no authoritative current-week match, an unfiltered
+temporary subtotal cannot replace a cycle with exhaustion evidence; the current row stays
+unavailable rather than reintroducing extra-allowance costs. Stored history and its tokens remain.
+
 Sources: [API pricing](https://developers.openai.com/api/docs/pricing),
 [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),
 [Sol 6.1](https://developers.openai.com/api/docs/models/gpt-6.1-sol),

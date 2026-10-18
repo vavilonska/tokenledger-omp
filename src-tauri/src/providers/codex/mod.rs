@@ -282,6 +282,7 @@ impl CodexProvider {
                 .client
                 .fetch_usage(&auth.access_token, auth.account_id.as_deref())?;
         }
+        let observed_at = Utc::now();
         let reset_credits = if response.status.is_success() {
             self.client
                 .fetch_reset_credits(&auth.access_token, auth.account_id.as_deref())
@@ -289,7 +290,9 @@ impl CodexProvider {
         } else {
             None
         };
-        let mapped = map_usage(&response, reset_credits.as_ref(), now)?;
+        let mapped = map_usage(&response, reset_credits.as_ref(), observed_at)?;
+        // Reject a switched credential source before the scan persists quota evidence.
+        Self::ensure_candidate_source_current(auth, account_identity)?;
         let pricing = self.pricing.current();
         let usage = scan_or_cached_usage(
             &self.storage,
@@ -301,7 +304,7 @@ impl CodexProvider {
             || {
                 scan_local_usage(
                     &self.storage,
-                    now,
+                    observed_at,
                     &pricing,
                     &mapped.quotas,
                     auth.account_id.as_deref(),
@@ -320,7 +323,7 @@ impl CodexProvider {
             notices: Vec::new(),
             usage,
             warnings,
-            refreshed_at: now,
+            refreshed_at: observed_at,
         })
     }
 
