@@ -135,6 +135,10 @@ pub enum CursorError {
     TokenExpired,
     #[error("The refreshed Cursor login could not be saved.")]
     AuthWrite,
+    #[error("Cursor credentials changed during refresh. Refresh again to use the current login.")]
+    CredentialsChanged,
+    #[error("Cursor credentials are managed by Cursor. Refresh or sign in in the Cursor app or run `agent login`, then refresh here.")]
+    ClientRefreshRequired,
     #[error("Could not connect to Cursor. Check your internet connection.")]
     ConnectionFailed,
     #[error("Cursor returned an invalid usage response.")]
@@ -175,9 +179,15 @@ impl CursorProvider {
         mut auth: CursorAuthState,
         now: chrono::DateTime<Utc>,
     ) -> Result<ProviderSnapshot, CursorError> {
-        if auth.needs_refresh(now) {
+        if !auth.can_refresh() && (auth.access_token.is_none() || auth.is_expired(now)) {
+            return Err(CursorError::ClientRefreshRequired);
+        }
+        if auth.can_refresh() && auth.needs_refresh(now) {
             match self.refresh_access_token(&mut auth) {
                 Ok(Some(_)) => {}
+                Err(CursorError::CredentialsChanged) => {
+                    return Err(CursorError::CredentialsChanged)
+                }
                 Ok(None) if auth.access_token.is_none() => return Err(CursorError::NotLoggedIn),
                 Err(error) if auth.access_token.is_none() => return Err(error),
                 Ok(None) | Err(_) => {}
@@ -263,6 +273,9 @@ impl CursorProvider {
         &self,
         auth: &mut CursorAuthState,
     ) -> Result<Option<String>, CursorError> {
+        if !auth.can_refresh() {
+            return Err(CursorError::ClientRefreshRequired);
+        }
         let Some(refresh_token) = auth
             .refresh_token
             .as_deref()
@@ -299,12 +312,18 @@ impl CursorProvider {
             .filter(|token| !token.is_empty())
             .map(str::to_owned);
         if let Some(access_token) = access_token {
-            if auth.save_access_token(access_token.clone()).is_err() {
-                auth.access_token = Some(access_token.clone());
-                crate::app_error!(
-                    "auth:cursor",
-                    "failed to persist rotated access token; using it for this session only"
-                );
+            match auth.save_access_token(access_token.clone()) {
+                Ok(()) => {}
+                Err(CursorError::CredentialsChanged) => {
+                    return Err(CursorError::CredentialsChanged)
+                }
+                Err(_) => {
+                    auth.access_token = Some(access_token.clone());
+                    crate::app_error!(
+                        "auth:cursor",
+                        "failed to persist rotated access token; using it for this session only"
+                    );
+                }
             }
             crate::app_info!("auth:cursor", "token refresh succeeded");
             return Ok(Some(access_token));
@@ -495,6 +514,8 @@ impl crate::providers::UsageProvider for CursorProvider {
             let kind = match error {
                 CursorError::NotLoggedIn
                 | CursorError::SessionExpired
+                | CursorError::CredentialsChanged
+                | CursorError::ClientRefreshRequired
                 | CursorError::TokenExpired => Kind::Authentication,
                 CursorError::AuthWrite => Kind::CredentialStorage,
                 CursorError::RequestFailed(429) => Kind::RateLimited,
@@ -522,7 +543,7 @@ mod tests {
 
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use chrono::{TimeZone, Utc};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OptionalExtension};
     use tempfile::tempdir;
 
     use super::{
@@ -697,6 +718,247 @@ mod tests {
     }
 
     #[test]
+    fn keychain_tokens_remain_read_only_and_valid_near_expiry_tokens_are_queried() {
+        let directory = tempdir().unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let token = |expiration| {
+            let payload = URL_SAFE_NO_PAD.encode(
+                serde_json::json!({"sub": "auth0|keychain", "exp": expiration}).to_string(),
+            );
+            format!("a.{payload}.c")
+        };
+        let mut auth = CursorAuthState {
+            access_token: Some(token((now + chrono::Duration::minutes(2)).timestamp())),
+            refresh_token: Some("shared-refresh-token".into()),
+            source: CursorAuthSource::Keychain {
+                account: "fixture-only".into(),
+            },
+        };
+        let original = auth.clone();
+        assert!(matches!(
+            auth.save_access_token("must-not-be-written".into()),
+            Err(super::CursorError::ClientRefreshRequired)
+        ));
+        assert_eq!(auth, original);
+        let (base, requests) = enterprise_server();
+        let provider = CursorProvider {
+            pricing: Arc::new(
+                PricingStore::new_without_refresh_for_test(directory.path().join("pricing"))
+                    .unwrap(),
+            ),
+            client: CursorClient::with_endpoints(Endpoints {
+                usage: format!("{base}/usage"),
+                plan: format!("{base}/plan"),
+                refresh: format!("{base}/token"),
+                rest_usage: format!("{base}/rest"),
+                usage_summary: format!("{base}/summary"),
+                csv: format!("{base}/csv"),
+                ..Endpoints::default()
+            })
+            .unwrap(),
+        };
+
+        assert_eq!(
+            provider
+                .refresh_with_auth(auth.clone(), now)
+                .unwrap()
+                .plan
+                .as_deref(),
+            Some("Enterprise")
+        );
+        assert_eq!(requests.lock().unwrap().len(), 5);
+        assert!(!requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.starts_with("/token")));
+        // These branches must return before either HTTP or any OS keychain access.
+        assert!(matches!(
+            provider.refresh_access_token(&mut auth),
+            Err(super::CursorError::ClientRefreshRequired)
+        ));
+        auth.access_token = Some(token((now - chrono::Duration::minutes(1)).timestamp()));
+        assert!(matches!(
+            provider.refresh_with_auth(auth, now),
+            Err(super::CursorError::ClientRefreshRequired)
+        ));
+        assert_eq!(requests.lock().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn keychain_unauthorized_response_requires_the_original_client_without_refreshing() {
+        let directory = tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 8192];
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("POST /usage "));
+            stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            listener
+        });
+        let provider = CursorProvider {
+            pricing: Arc::new(
+                PricingStore::new_without_refresh_for_test(directory.path().join("pricing"))
+                    .unwrap(),
+            ),
+            client: CursorClient::with_endpoints(Endpoints {
+                usage: format!("{base}/usage"),
+                refresh: format!("{base}/token"),
+                ..Endpoints::default()
+            })
+            .unwrap(),
+        };
+        let auth = CursorAuthState {
+            access_token: Some(jwt("auth0|keychain")),
+            refresh_token: Some("shared-refresh-token".into()),
+            source: CursorAuthSource::Keychain {
+                account: "fixture-only".into(),
+            },
+        };
+        let error = provider.refresh_with_auth(auth, Utc::now()).unwrap_err();
+        assert!(matches!(error, super::CursorError::ClientRefreshRequired));
+        assert!(error.to_string().contains("Cursor app"));
+        assert!(matches!(
+            server.join().unwrap().accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[test]
+    fn in_flight_refresh_cannot_restore_or_replace_changed_sqlite_credentials() {
+        use std::{sync::mpsc, time::Duration};
+
+        for scenario in [
+            "switch",
+            "refresh-token-changed",
+            "logout",
+            "normal",
+            "failed-switch",
+        ] {
+            let directory = tempdir().unwrap();
+            let database = directory.path().join("state.vscdb");
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);
+                     INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', 'old-access');
+                     INSERT INTO ItemTable VALUES ('cursorAuth/refreshToken', 'old-refresh');",
+                )
+                .unwrap();
+            let mut auth = CursorAuthState {
+                access_token: Some("old-access".into()),
+                refresh_token: Some("old-refresh".into()),
+                source: CursorAuthSource::Sqlite(database),
+            };
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut buffer = [0_u8; 8192];
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(String::from_utf8_lossy(&buffer[..read]).starts_with("POST /token "));
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                let (status, body) = if scenario == "failed-switch" {
+                    (401, r#"{"shouldLogout":true}"#)
+                } else {
+                    (200, r#"{"access_token":"rotated-access"}"#)
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            let provider = CursorProvider {
+                pricing: Arc::new(
+                    PricingStore::new_without_refresh_for_test(directory.path().join("pricing"))
+                        .unwrap(),
+                ),
+                client: CursorClient::with_endpoints(Endpoints {
+                    refresh: format!("{base}/token"),
+                    ..Endpoints::default()
+                })
+                .unwrap(),
+            };
+            let refresh = thread::spawn(move || {
+                let result = provider.refresh_access_token(&mut auth);
+                (result, auth)
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            match scenario {
+                "switch" | "failed-switch" => {
+                    connection
+                        .execute_batch(
+                            "UPDATE ItemTable SET value = 'new-access' WHERE key = 'cursorAuth/accessToken';
+                             UPDATE ItemTable SET value = 'new-refresh' WHERE key = 'cursorAuth/refreshToken';",
+                        )
+                        .unwrap();
+                }
+                "refresh-token-changed" => {
+                    connection
+                        .execute(
+                            "UPDATE ItemTable SET value = 'new-refresh' WHERE key = 'cursorAuth/refreshToken'",
+                            [],
+                        )
+                        .unwrap();
+                }
+                "logout" => {
+                    connection.execute("DELETE FROM ItemTable", []).unwrap();
+                }
+                "normal" => {}
+                _ => unreachable!(),
+            }
+            release_tx.send(()).unwrap();
+            let (result, auth) = refresh.join().unwrap();
+            server.join().unwrap();
+            let saved: Option<String> = connection
+                .query_row(
+                    "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            match scenario {
+                "normal" => {
+                    assert_eq!(result.unwrap().as_deref(), Some("rotated-access"));
+                    assert_eq!(saved.as_deref(), Some("rotated-access"));
+                    assert_eq!(auth.access_token.as_deref(), Some("rotated-access"));
+                }
+                "failed-switch" => {
+                    assert!(matches!(result, Err(super::CursorError::SessionExpired)));
+                    assert_eq!(saved.as_deref(), Some("new-access"));
+                }
+                _ => {
+                    assert!(matches!(
+                        result,
+                        Err(super::CursorError::CredentialsChanged)
+                    ));
+                    assert_eq!(auth.access_token.as_deref(), Some("old-access"));
+                    assert_eq!(
+                        saved.as_deref(),
+                        match scenario {
+                            "logout" => None,
+                            "refresh-token-changed" => Some("old-access"),
+                            _ => Some("new-access"),
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn provider_retries_auth_and_keeps_optional_csv_spend_additive() {
         let directory = tempdir().unwrap();
         let database = directory.path().join("state.vscdb");
@@ -705,6 +967,17 @@ mod tests {
             .execute(
                 "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
                 [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?1, ?2), (?3, ?4)",
+                (
+                    "cursorAuth/accessToken",
+                    jwt("google-oauth2|old_user"),
+                    "cursorAuth/refreshToken",
+                    "refresh-token".to_owned(),
+                ),
             )
             .unwrap();
         drop(connection);

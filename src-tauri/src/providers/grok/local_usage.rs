@@ -20,7 +20,7 @@ use crate::{
 
 use super::GrokError;
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 3;
 const SOURCE_NOTE: &str = "From your Grok logs (estimated)";
 
 #[derive(Debug, Clone)]
@@ -67,6 +67,8 @@ struct TokenEvent {
     cached_prompt: u64,
     completion: u64,
     reasoning: u64,
+    #[serde(default)]
+    cache_usage: Option<(u64, u64)>,
 }
 
 fn scan_path(
@@ -173,7 +175,13 @@ fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
             .and_then(integer_u64)
             .unwrap_or_default()
             .min(prompt);
+        let cache_usage = context
+            .get("cached_prompt_tokens")
+            .and_then(integer_u64)
+            .filter(|read| *read <= prompt)
+            .map(|read| (read, prompt));
         events.push(TokenEvent {
+            cache_usage,
             source_pid: pid,
             timestamp,
             model: pid.and_then(|pid| model_by_pid.get(&pid).cloned()),
@@ -234,7 +242,7 @@ fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing
             .saturating_add(event.completion)
             .saturating_add(event.reasoning);
         if let Some(cost) = pricing.estimated_cost_dollars(model, tokens, true) {
-            accumulator.add(date, total, cost, model);
+            accumulator.add(date, total, cost, model, event.cache_usage);
         } else if total > 0 {
             accumulator.add_unknown_model(date, model);
         }

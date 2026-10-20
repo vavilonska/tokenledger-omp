@@ -72,6 +72,41 @@ describe.each([false, true])('incomplete pricing consumers (credits=%s)', (credi
     ).not.toBeInTheDocument();
   });
 
+  it('shows complete cache evidence independently of unknown-speed prices in both pricing bases', async () => {
+    vi.useFakeTimers();
+    const period: UsagePeriod = {
+      ...unknown,
+      modelBreakdown: {
+        sourceNote: 'Local request speed unavailable',
+        models: [
+          {
+            model: 'gpt-6.1-sol',
+            totalTokens: 2_000,
+            costUsd: null,
+            cacheReadTokens: 100,
+            promptTokens: 200,
+            variants: [
+              {
+                model: 'Oh My Pi',
+                totalTokens: 2_000,
+                costUsd: null,
+                cacheReadTokens: 100,
+                promptTokens: 200,
+              },
+            ],
+          },
+        ],
+      },
+    };
+    render(UsageMetric, { label: 'Today', period, credits });
+    await fireEvent.mouseEnter(screen.getByRole('button', { name: '2K tokens' }));
+    await vi.advanceTimersByTimeAsync(400);
+    const detail = screen.getByRole('tooltip');
+    expect(detail.querySelector('.model-usage-cache-total')).toHaveTextContent('50%');
+    expect(detail.querySelector('.model-usage-variant-cache')).toHaveTextContent('50%');
+    expect(detail).toHaveTextContent('Partial estimate');
+  });
+
   it('passes incomplete coverage into model details and uses token shares', async () => {
     vi.useFakeTimers();
     const period: UsagePeriod = {

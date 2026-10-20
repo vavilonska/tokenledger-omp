@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 
-use crate::providers::credential_store::{read_generic_password, write_generic_password};
+use crate::providers::credential_store::read_generic_password;
 
 use super::CursorError;
 
@@ -49,15 +49,23 @@ impl CursorAuthState {
             .is_none_or(|expires| expires - now <= Duration::minutes(REFRESH_BUFFER_MINUTES))
     }
 
+    pub fn can_refresh(&self) -> bool {
+        matches!(self.source, CursorAuthSource::Sqlite(_))
+    }
+
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.access_token
+            .as_deref()
+            .and_then(token_expiration)
+            .is_some_and(|expires| now >= expires)
+    }
+
     pub fn save_access_token(&mut self, access_token: String) -> Result<(), CursorError> {
         match &self.source {
-            CursorAuthSource::Sqlite(path) => {
-                write_state_value(path, ACCESS_TOKEN_KEY, &access_token)
-            }
-            CursorAuthSource::Keychain { account } => {
-                write_generic_password(ACCESS_TOKEN_SERVICE, account, access_token.as_bytes())
-                    .map_err(|_| CursorError::AuthWrite)
-            }
+            CursorAuthSource::Sqlite(path) => save_sqlite_access_token(path, self, &access_token),
+            // System stores have no cross-client compare-and-swap. Do not rotate or write
+            // credentials whose login/logout lifecycle is owned by the original client.
+            CursorAuthSource::Keychain { .. } => Err(CursorError::ClientRefreshRequired),
         }?;
         self.access_token = Some(access_token);
         Ok(())
@@ -124,14 +132,41 @@ fn read_state_value(path: &Path, key: &str) -> Option<String> {
         .and_then(non_empty)
 }
 
-fn write_state_value(path: &Path, key: &str, value: &str) -> Result<(), CursorError> {
-    let connection = Connection::open(path).map_err(|_| CursorError::AuthWrite)?;
-    connection
+fn save_sqlite_access_token(
+    path: &Path,
+    expected: &CursorAuthState,
+    value: &str,
+) -> Result<(), CursorError> {
+    // BEGIN IMMEDIATE serializes this comparison and write with Cursor's login/logout writes.
+    // Never CREATE a missing database or restore credentials removed while HTTP was in flight.
+    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|_| CursorError::AuthWrite)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| CursorError::AuthWrite)?;
+    let read = |key: &str| -> Result<Option<String>, CursorError> {
+        transaction
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1 LIMIT 1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|value| value.and_then(non_empty))
+            .map_err(|_| CursorError::AuthWrite)
+    };
+    if read(ACCESS_TOKEN_KEY)? != expected.access_token
+        || read(REFRESH_TOKEN_KEY)? != expected.refresh_token
+    {
+        return Err(CursorError::CredentialsChanged);
+    }
+    transaction
         .execute(
             "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?1, ?2)",
-            (key, value),
+            (ACCESS_TOKEN_KEY, value),
         )
         .map_err(|_| CursorError::AuthWrite)?;
+    transaction.commit().map_err(|_| CursorError::AuthWrite)?;
     Ok(())
 }
 

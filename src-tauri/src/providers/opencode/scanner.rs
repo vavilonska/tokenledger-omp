@@ -203,15 +203,25 @@ fn aggregate_history(
         }
         if let Some(cost) = record.cost {
             match record.cost_provenance {
-                CostProvenance::Exact => {
-                    accumulator.add_exact(date, record.tokens, cost, &record.model)
-                }
+                CostProvenance::Exact => accumulator.add_exact(
+                    date,
+                    record.tokens,
+                    cost,
+                    &record.model,
+                    record.cache_usage,
+                ),
                 CostProvenance::Estimated => {
-                    accumulator.add(date, record.tokens, cost, &record.model)
+                    accumulator.add(date, record.tokens, cost, &record.model, record.cache_usage)
                 }
             }
         } else if record.tokens > 0 {
-            accumulator.add_unpriced_variant(date, record.tokens, &record.model, &record.model);
+            accumulator.add_unpriced_variant(
+                date,
+                record.tokens,
+                &record.model,
+                &record.model,
+                record.cache_usage,
+            );
         }
         if record.tokens > 0 && (record.incomplete_cost || record.cost.is_none()) {
             accumulator.mark_incomplete(date);
@@ -234,6 +244,7 @@ mod unit_tests {
 
     fn record(tokens: u64, cost: Option<f64>, exact: bool) -> UsageRecord {
         UsageRecord {
+            cache_usage: None,
             timestamp: Utc.with_ymd_and_hms(2026, 7, 18, 10, 0, 0).unwrap(),
             model: "model".into(),
             tokens,
@@ -309,6 +320,7 @@ mod unpriced_regressions {
         for cost in [None, Some(0.5)] {
             let history = aggregate_history(
                 [UsageRecord {
+                    cache_usage: None,
                     timestamp: now,
                     model: "model".into(),
                     tokens: 110,

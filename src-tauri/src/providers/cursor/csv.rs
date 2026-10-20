@@ -10,6 +10,7 @@ pub struct CursorCsvRow {
     pub model: String,
     pub tokens: TokenBreakdown,
     pub estimated_cost_usd: Option<f64>,
+    pub cache_usage: Option<(u64, u64)>,
 }
 
 pub fn parse_usage_csv(csv: &str, pricing: &ModelPricing) -> Vec<CursorCsvRow> {
@@ -22,15 +23,23 @@ pub fn parse_usage_csv(csv: &str, pricing: &ModelPricing) -> Vec<CursorCsvRow> {
                 .map_or("", String::as_str)
                 .trim()
                 .to_owned();
+            let input = parse_integer(record.get("Input (w/o Cache Write)"));
+            let cache_write = parse_integer(record.get("Input (w/ Cache Write)"));
+            let cache_read = parse_integer(record.get("Cache Read"));
             let tokens = TokenBreakdown {
-                input: parse_integer(record.get("Input (w/o Cache Write)")),
-                cache_write_5m: parse_integer(record.get("Input (w/ Cache Write)")),
-                cache_read: parse_integer(record.get("Cache Read")),
-                output: parse_integer(record.get("Output Tokens")),
+                input: input.unwrap_or_default(),
+                cache_write_5m: cache_write.unwrap_or_default(),
+                cache_read: cache_read.unwrap_or_default(),
+                output: parse_integer(record.get("Output Tokens")).unwrap_or_default(),
                 ..TokenBreakdown::default()
             };
             let estimated_cost_usd = pricing.estimated_cost_dollars(&model, tokens, false);
             Some(CursorCsvRow {
+                cache_usage: input.zip(cache_read).zip(cache_write).map(
+                    |((input, read), write)| {
+                        (read, input.saturating_add(read).saturating_add(write))
+                    },
+                ),
                 date,
                 model,
                 tokens,
@@ -107,11 +116,10 @@ fn parse_date(raw: &str) -> Option<DateTime<Utc>> {
         })
 }
 
-fn parse_integer(value: Option<&String>) -> u64 {
+fn parse_integer(value: Option<&String>) -> Option<u64> {
     value
         .map(|value| value.replace(',', ""))
         .and_then(|value| value.trim().parse().ok())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -150,6 +158,7 @@ mod tests {
         let rows = parse_usage_csv(&csv, &pricing());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tokens.input, 300_000);
+        assert_eq!(rows[0].cache_usage, Some((0, 300_000)));
         assert!((rows[0].estimated_cost_usd.unwrap() - 10.6).abs() < 0.000_001);
     }
 

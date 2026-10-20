@@ -507,7 +507,14 @@ pub fn usage_history(
                 } else {
                     pricing.display_family(row.model.trim())
                 };
-                accumulator.add_variant(date, tokens, cost, &family, row.model.trim());
+                accumulator.add_variant(
+                    date,
+                    tokens,
+                    cost,
+                    &family,
+                    row.model.trim(),
+                    row.cache_usage,
+                );
             }
             None if tokens > 0 => accumulator.add_unknown_model(date, &row.model),
             None => {}
@@ -841,6 +848,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
         let rows = vec![
             CursorCsvRow {
+                cache_usage: None,
                 date: now,
                 model: "claude-opus-4-8-thinking-max".into(),
                 tokens: TokenBreakdown {
@@ -850,6 +858,7 @@ mod tests {
                 estimated_cost_usd: Some(3.004),
             },
             CursorCsvRow {
+                cache_usage: None,
                 date: now,
                 model: "claude-opus-4-8-thinking-high".into(),
                 tokens: TokenBreakdown {
@@ -859,6 +868,7 @@ mod tests {
                 estimated_cost_usd: Some(1.006),
             },
             CursorCsvRow {
+                cache_usage: None,
                 date: now,
                 model: "unknown-cursor-model".into(),
                 tokens: TokenBreakdown {

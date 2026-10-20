@@ -32,6 +32,8 @@ pub struct TokenEvent {
     pub output: u64,
     pub reasoning: u64,
     pub total: u64,
+    #[serde(default)]
+    pub cache_usage: Option<(u64, u64)>,
     #[serde(
         default,
         alias = "is_fast",
@@ -59,7 +61,7 @@ fn deserialize_codex_speed<'de, D: serde::Deserializer<'de>>(
     })
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 6;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 8;
 const CYCLE_CLUSTER_SECONDS: i64 = 5 * 60;
 
 struct CycleBucket {
@@ -445,11 +447,19 @@ fn add_cycle_event(
     }
     let date = timestamp.with_timezone(&Local).date_naive();
     if let Some(cost) = cost {
-        add_priced_event(&mut bucket.accumulator, date, model, tokens, cost, source);
+        add_priced_event(
+            &mut bucket.accumulator,
+            date,
+            model,
+            tokens,
+            cost,
+            source,
+            None,
+        );
     } else if tokens > 0 {
         bucket
             .accumulator
-            .add_unpriced_variant(date, tokens, model, source);
+            .add_unpriced_variant(date, tokens, model, source, None);
         if unknown_model {
             bucket.accumulator.add_unknown_model(date, model);
         }
@@ -483,6 +493,7 @@ fn build_cycle_history(
                     missing_tokens,
                     "Unattributed",
                     "Retained facts unavailable",
+                    None,
                 );
                 let entry = bucket
                     .model_usage
@@ -790,13 +801,23 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
                 .map(str::to_owned);
             if payload.is_some_and(is_child_session_meta) {
                 replay_gate = Some(
-                    object
-                        .get("timestamp")
+                    // The payload marks session creation; the outer timestamp marks a
+                    // later recorder write and can follow the child's first task start.
+                    payload
+                        .and_then(|value| value.get("timestamp"))
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .and_then(parse_log_timestamp)
-                        .map(|timestamp| ChildReplayGate::UntilStartedAt(timestamp.timestamp()))
-                        .unwrap_or(ChildReplayGate::UntilSelfTimedTaskStarted),
+                        .map(ChildReplayGate::CreatedAt)
+                        .or_else(|| {
+                            object
+                                .get("timestamp")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .and_then(parse_log_timestamp)
+                                .map(|timestamp| ChildReplayGate::StartedAt(timestamp.timestamp()))
+                        })
+                        .unwrap_or(ChildReplayGate::SelfTimedTaskStarted),
                 );
             }
             continue;
@@ -811,6 +832,16 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
 
         let payload_type = payload.get("type").and_then(Value::as_str);
         if payload_type == Some("thread_settings_applied") {
+            // Fork initialization appends a snapshot owned by the new child after
+            // copying its ancestor history. A copied parent snapshot cannot open it.
+            if replay_gate.is_some()
+                && session_id.as_deref().is_some_and(|session| {
+                    !session.is_empty()
+                        && payload.get("thread_id").and_then(Value::as_str) == Some(session)
+                })
+            {
+                replay_gate = Some(ChildReplayGate::NextTaskStarted);
+            }
             if let Some(tier) = service_tier(payload) {
                 current_speed = request_speed(tier);
             }
@@ -893,6 +924,7 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
             })
         };
         events.push(TokenEvent {
+            cache_usage: usage.cache_complete.then_some((usage.cached, usage.input)),
             source_id,
             timestamp,
             model,
@@ -936,24 +968,64 @@ fn service_tier(payload: &Value) -> Option<&str> {
 
 #[derive(Debug, Clone, Copy)]
 enum ChildReplayGate {
-    UntilStartedAt(i64),
-    UntilSelfTimedTaskStarted,
+    CreatedAt(DateTime<Utc>),
+    NextTaskStarted,
+    StartedAt(i64),
+    SelfTimedTaskStarted,
 }
 
 impl ChildReplayGate {
     fn is_cleared(self, payload: &Value, line_timestamp: Option<&Value>) -> bool {
+        if matches!(self, Self::NextTaskStarted) {
+            return true;
+        }
         let Some(started_at) = payload.get("started_at").and_then(Value::as_f64) else {
             return false;
         };
         match self {
-            Self::UntilStartedAt(gate) => started_at >= gate as f64,
-            Self::UntilSelfTimedTaskStarted => line_timestamp
+            Self::NextTaskStarted => unreachable!(),
+            Self::CreatedAt(created_at) => {
+                let created_millis = created_at.timestamp_millis();
+                // started_at is only integer seconds in Codex. In its ambiguous
+                // creation second, the submission's UUIDv7 provides milliseconds.
+                // Equal milliseconds without the explicit child boundary remain
+                // ambiguous, so neither the parent nor child is guessed in.
+                started_at * 1000.0 > created_millis as f64
+                    || (started_at >= created_at.timestamp() as f64
+                        && payload
+                            .get("turn_id")
+                            .and_then(Value::as_str)
+                            .and_then(uuid_v7_timestamp_millis)
+                            .is_some_and(|millis| millis > created_millis))
+            }
+            Self::StartedAt(gate) => started_at >= gate as f64,
+            Self::SelfTimedTaskStarted => line_timestamp
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .and_then(parse_log_timestamp)
                 .is_some_and(|timestamp| started_at >= timestamp.timestamp() as f64),
         }
     }
+}
+
+fn uuid_v7_timestamp_millis(id: &str) -> Option<i64> {
+    let bytes = id.as_bytes();
+    if bytes.len() != 36
+        || bytes[14] != b'7'
+        || !matches!(bytes[19], b'8' | b'9' | b'a' | b'A' | b'b' | b'B')
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return None;
+    }
+    let high = i64::from_str_radix(&id[..8], 16).ok()?;
+    let low = i64::from_str_radix(&id[9..13], 16).ok()?;
+    Some((high << 16) | low)
 }
 
 fn is_child_session_meta(payload: &Value) -> bool {
@@ -981,6 +1053,7 @@ struct RawUsage {
     output: u64,
     reasoning: u64,
     total: u64,
+    cache_complete: bool,
 }
 
 impl RawUsage {
@@ -999,6 +1072,17 @@ impl RawUsage {
         let reported = integer(value, &["total_tokens"]);
         let recomputed = input + output + reasoning;
         Self {
+            cache_complete: ["input_tokens", "prompt_tokens", "input"]
+                .iter()
+                .any(|key| value.get(*key).and_then(Value::as_u64).is_some())
+                && [
+                    "cached_input_tokens",
+                    "cache_read_input_tokens",
+                    "cached_tokens",
+                ]
+                .iter()
+                .any(|key| value.get(*key).and_then(Value::as_u64).is_some())
+                && cached <= input,
             input,
             cached,
             output,
@@ -1018,8 +1102,10 @@ impl RawUsage {
             output: 0,
             reasoning: 0,
             total: 0,
+            cache_complete: true,
         });
         Self {
+            cache_complete: self.cache_complete && previous.cache_complete,
             input: self.input.saturating_sub(previous.input),
             cached: self.cached.saturating_sub(previous.cached),
             output: self.output.saturating_sub(previous.output),
@@ -1156,7 +1242,15 @@ fn aggregate_into(
             if date < since {
                 continue;
             }
-            add_priced_event(accumulator, date, &event.model, event.total, cost, "Codex");
+            add_priced_event(
+                accumulator,
+                date,
+                &event.model,
+                event.total,
+                cost,
+                "Codex",
+                event.cache_usage,
+            );
             if session_start.is_some_and(|start| event.timestamp >= start) {
                 add_priced_event(
                     session_accumulator,
@@ -1165,6 +1259,7 @@ fn aggregate_into(
                     event.total,
                     cost,
                     "Codex",
+                    event.cache_usage,
                 );
             }
             if weekly_start.is_some_and(|start| event.timestamp >= start) {
@@ -1175,23 +1270,42 @@ fn aggregate_into(
                     event.total,
                     cost,
                     "Codex",
+                    event.cache_usage,
                 );
             }
         } else if event.total > 0 {
             if date >= since {
-                accumulator.add_unpriced_variant(date, event.total, &event.model, "Codex");
+                accumulator.add_unpriced_variant(
+                    date,
+                    event.total,
+                    &event.model,
+                    "Codex",
+                    event.cache_usage,
+                );
                 if unknown_model {
                     accumulator.add_unknown_model(date, &event.model);
                 }
             }
             if session_start.is_some_and(|start| event.timestamp >= start) {
-                session_accumulator.add_unpriced_variant(date, event.total, &event.model, "Codex");
+                session_accumulator.add_unpriced_variant(
+                    date,
+                    event.total,
+                    &event.model,
+                    "Codex",
+                    event.cache_usage,
+                );
                 if unknown_model {
                     session_accumulator.add_unknown_model(date, &event.model);
                 }
             }
             if weekly_start.is_some_and(|start| event.timestamp >= start) {
-                weekly_accumulator.add_unpriced_variant(date, event.total, &event.model, "Codex");
+                weekly_accumulator.add_unpriced_variant(
+                    date,
+                    event.total,
+                    &event.model,
+                    "Codex",
+                    event.cache_usage,
+                );
                 if unknown_model {
                     weekly_accumulator.add_unknown_model(date, &event.model);
                 }
@@ -1207,8 +1321,9 @@ fn add_priced_event(
     tokens: u64,
     cost: f64,
     source: &str,
+    cache: Option<(u64, u64)>,
 ) {
-    accumulator.add_variant(date, tokens, cost, model.trim(), source);
+    accumulator.add_variant(date, tokens, cost, model.trim(), source, cache);
 }
 
 fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
@@ -1386,6 +1501,53 @@ mod tests {
         providers::log_usage::LogFileFingerprint,
         storage::Storage,
     };
+
+    #[test]
+    fn scanner_cache_buckets_exclude_output_and_preserve_zero_missing_and_weighted_days() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let content = r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","service_tier":"default"}}
+{"timestamp":"2026-09-07T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":900,"total_tokens":1000}}}}
+{"timestamp":"2026-09-06T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":900,"cached_input_tokens":0,"output_tokens":1,"total_tokens":901}}}}"#;
+        let mut events = parse_jsonl(content);
+        events.push(events[0].clone());
+        let history = aggregate(events, now, &test_bundled_pricing());
+        let today = history.today.unwrap().model_breakdown.unwrap().models;
+        assert_eq!(
+            (today[0].cache_read_tokens, today[0].prompt_tokens),
+            (Some(20), Some(100))
+        );
+        let yesterday = history.yesterday.unwrap().model_breakdown.unwrap().models;
+        assert_eq!(
+            (yesterday[0].cache_read_tokens, yesterday[0].prompt_tokens),
+            (Some(0), Some(900))
+        );
+        let models = history
+            .last_30_days
+            .unwrap()
+            .model_breakdown
+            .unwrap()
+            .models;
+        assert_eq!(
+            (models[0].cache_read_tokens, models[0].prompt_tokens),
+            (Some(20), Some(1_000))
+        );
+        let missing = content.replace(",\"cached_input_tokens\":20", "");
+        let history = aggregate(parse_jsonl(&missing), now, &test_bundled_pricing());
+        assert_eq!(
+            history.today.unwrap().model_breakdown.unwrap().models[0].cache_read_tokens,
+            None
+        );
+        assert_eq!(
+            history
+                .last_30_days
+                .unwrap()
+                .model_breakdown
+                .unwrap()
+                .models[0]
+                .prompt_tokens,
+            None
+        );
+    }
 
     #[test]
     fn astra_turn_tier_reprices_each_event_for_api_and_credits() {
@@ -1715,6 +1877,16 @@ mod tests {
             &test_bundled_pricing(),
         );
         assert_eq!(history.daily.iter().map(|day| day.tokens).sum::<u64>(), 110);
+        let models = &history
+            .last_30_days
+            .as_ref()
+            .unwrap()
+            .model_breakdown
+            .as_ref()
+            .unwrap()
+            .models;
+        assert_eq!(models[0].cache_read_tokens, None);
+        assert_eq!(models[0].prompt_tokens, None);
         let retained = aggregate(
             scan_codex_events(&storage, &[home], since, None).unwrap(),
             now,
@@ -1905,7 +2077,7 @@ mod tests {
     fn cycle_api_value_infers_the_full_allowance_from_used_share() {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let mut accumulator = DailyUsageAccumulator::default();
-        accumulator.add_variant(now.date_naive(), 1_000, 25.0, "gpt-test", "Codex");
+        accumulator.add_variant(now.date_naive(), 1_000, 25.0, "gpt-test", "Codex", None);
 
         let period = cycle_period(accumulator, now, "test", Some(20.0)).unwrap();
         assert_eq!(period.estimated_cost_usd, Some(25.0));
@@ -1991,6 +2163,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
             model: "test-model".into(),
@@ -2027,6 +2200,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
             model: "test-model".into(),
@@ -2054,6 +2228,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
             model: "gpt-5.5-pro".into(),
@@ -2079,6 +2254,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = |input| TokenEvent {
+            cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
             model: "gpt-5.4".into(),
@@ -2160,6 +2336,7 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
             model: "gpt-5.5-fast".into(),
@@ -2185,6 +2362,7 @@ mod tests {
             },
         );
         let event = TokenEvent {
+            cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
             model: "vendor-model-fast".into(),
@@ -2213,6 +2391,7 @@ mod speed_and_cycle_regressions {
             999.0,
             "gpt-6-astra",
             "Codex",
+            None,
         );
         ResetCycleUsage {
             started_at,
@@ -2264,6 +2443,7 @@ mod speed_and_cycle_regressions {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let start = now - chrono::Duration::hours(5);
         let unknown = TokenEvent {
+            cache_usage: None,
             timestamp: now - chrono::Duration::hours(1),
             model: "gpt-5.5".into(),
             input: 100,
@@ -2278,6 +2458,7 @@ mod speed_and_cycle_regressions {
             let mut events = vec![unknown.clone()];
             if mixed {
                 events.push(TokenEvent {
+                    cache_usage: None,
                     speed: RequestSpeed::Standard,
                     source_id: Some("known".into()),
                     ..unknown.clone()
@@ -2543,6 +2724,7 @@ mod model_classification_regressions {
                 assert_eq!(model_has_rates(&now, model, &pricing), known);
                 let history = aggregate(
                     vec![TokenEvent {
+                        cache_usage: None,
                         timestamp: now,
                         model: model.into(),
                         input: 100,
@@ -2894,6 +3076,7 @@ mod persistent_cycle_recovery_regressions {
                 restore_cycle_buckets(Vec::new(), &[snapshot(baseline, None)], day(3));
             aggregate_into(
                 &[TokenEvent {
+                    cache_usage: None,
                     timestamp: day(2),
                     model: "missing-model".into(),
                     input: 0,
@@ -2981,6 +3164,7 @@ mod cycle_model_usage_regressions {
     #[test]
     fn codex_cycle_models_are_complete_deduplicated_and_price_independent() {
         let event = |timestamp, model: &str, total, source: &str| TokenEvent {
+            cache_usage: None,
             timestamp,
             model: model.into(),
             input: total,
@@ -3310,6 +3494,7 @@ mod weekly_exhaustion_regressions {
 
     fn event(timestamp: DateTime<Utc>, model: &str) -> TokenEvent {
         TokenEvent {
+            cache_usage: None,
             timestamp,
             model: model.into(),
             input: 100,
@@ -3544,6 +3729,7 @@ mod weekly_exhaustion_regressions {
                 1.0,
                 "model",
                 "Codex",
+                None,
             );
             accumulator
         };
@@ -3687,3 +3873,7 @@ mod weekly_exhaustion_regressions {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "child_session_regressions.rs"]
+mod child_session_regressions;

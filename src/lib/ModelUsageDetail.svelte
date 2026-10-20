@@ -23,6 +23,21 @@
     estimateComplete = true,
   }: Props = $props();
 
+  function cacheRate(read: number | null | undefined, prompt: number | null | undefined) {
+    if (read == null || prompt == null || prompt <= 0) return 'Unknown';
+    return `${((read / prompt) * 100).toFixed(1).replace(/\.0$/, '')}%`;
+  }
+
+  const cacheTotal = $derived.by(() => {
+    let read = 0;
+    let prompt = 0;
+    for (const model of breakdown.models) {
+      if (model.cacheReadTokens == null || model.promptTokens == null) return 'Unknown';
+      read += model.cacheReadTokens;
+      prompt += model.promptTokens;
+    }
+    return cacheRate(read, prompt);
+  });
   const shares = $derived.by(() => {
     const allPriced = estimateComplete && breakdown.models.every((model) => model.costUsd !== null);
     const costTotal = breakdown.models.reduce((sum, model) => sum + (model.costUsd ?? 0), 0);
@@ -54,13 +69,16 @@
 
 <div
   class="model-usage-detail"
-  style={`top:${top}px`}
+  style={`top:${top}px;max-height:max(0px,calc(100vh - ${top}px - 8px))`}
   role="tooltip"
   aria-label={`${title} model usage`}
   onmouseenter={onEnter}
   onmouseleave={onLeave}
 >
   <h3>{title}</h3>
+  <div class="model-usage-cache model-usage-cache-total">
+    <span>Cache rate</span><span>{cacheTotal}</span>
+  </div>
   <div class="model-usage-list">
     {#each breakdown.models as model, index (model.model)}
       <div class="model-usage-row">
@@ -77,6 +95,9 @@
           <span>{percents[index]}%</span><span
             >{formatMetricValue(model.totalTokens, 'count', 'row', 'tokens')}</span
           >
+        </div>
+        <div class="model-usage-cache">
+          <span>Cache rate</span><span>{cacheRate(model.cacheReadTokens, model.promptTokens)}</span>
         </div>
         <div class="model-usage-meter" aria-hidden="true">
           <i style={`width:${Math.min(shares[index] * 100, 100)}%`}></i>
@@ -96,6 +117,11 @@
                     : ''}</span
                 >
               </div>
+              <div class="model-usage-cache model-usage-variant-cache">
+                <span>Cache rate</span><span
+                  >{cacheRate(variant.cacheReadTokens, variant.promptTokens)}</span
+                >
+              </div>
             {/each}
           </div>
         {/if}
@@ -107,6 +133,10 @@
       Partial estimate: some usage has unknown model pricing or request speed. Shares use tokens.
     </p>
   {/if}
+  <p>
+    Cache rate is cache-read tokens divided by all prompt tokens; missing buckets or no prompt
+    tokens are unknown.
+  </p>
   <p>{breakdown.sourceNote}</p>
 </div>
 
@@ -118,7 +148,7 @@
       z-index: 100;
       box-sizing: border-box;
       width: 280px;
-      max-height: calc(100vh - 16px);
+      max-width: calc(100vw - 16px);
       padding: 14px;
       overflow-y: auto;
       border: 1px solid var(--separator);
@@ -171,6 +201,26 @@
 
     .model-usage-secondary {
       color: var(--secondary);
+    }
+
+    .model-usage-cache {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--secondary);
+      font-size: 10px;
+      line-height: 14px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .model-usage-cache-total {
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--separator);
+      font-size: 11px;
+    }
+
+    .model-usage-variants > .model-usage-variant-cache {
+      display: flex;
     }
 
     .model-usage-meter {

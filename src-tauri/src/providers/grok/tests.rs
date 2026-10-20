@@ -135,69 +135,91 @@ fn weekly_status_plan_and_local_history_form_one_snapshot() {
 }
 
 #[test]
-fn billing_auth_failure_refreshes_once_persists_and_retries() {
-    let mut credits_calls = 0;
-    let server = TestServer::new(4, move |request| {
-        if request.starts_with("GET /credits ") {
-            credits_calls += 1;
-            if credits_calls == 1 {
-                (401, "{}".into())
+fn shared_cli_credentials_are_never_rotated_or_rewritten() {
+    use std::sync::mpsc;
+
+    for scenario in [
+        "valid",
+        "expired",
+        "rejected",
+        "switch",
+        "logout",
+        "failed-switch",
+    ] {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let expected = match scenario {
+            "expired" => 0,
+            "rejected" | "failed-switch" => 1,
+            _ => 2,
+        };
+        let server = TestServer::new(expected, move |request| {
+            assert!(
+                request.starts_with("GET "),
+                "shared credentials must not be refreshed"
+            );
+            if request.starts_with("GET /credits ") {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                if matches!(scenario, "rejected" | "failed-switch") {
+                    (401, "{}".into())
+                } else {
+                    (200, CREDITS.into())
+                }
             } else {
-                (200, CREDITS.into())
+                (200, r#"{"subscription_tier_display":"Heavy"}"#.into())
             }
-        } else if request.starts_with("POST /token ") {
-            (
-                200,
-                r#"{
-                  "access_token":"new-token",
-                  "refresh_token":"new-refresh",
-                  "id_token":"new-id",
-                  "expires_in":3600
-                }"#
-                .into(),
-            )
-        } else if request.starts_with("GET /settings ") {
-            (200, r#"{"subscription_tier_display":"Heavy"}"#.into())
-        } else {
-            (404, "{}".into())
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let auth_path = directory.path().join("auth.json");
+        // A still-valid token inside the old five-minute refresh window must remain usable.
+        let original = valid_auth().replace(
+            "2027-01-01T00:00:00.000Z",
+            if scenario == "expired" {
+                "2026-06-18T11:59:00.000Z"
+            } else {
+                "2026-06-18T12:02:00.000Z"
+            },
+        );
+        let (provider, _) = build_provider(
+            &directory,
+            server.client(),
+            &original,
+            directory.path().join("missing-log.jsonl"),
+        );
+        let scan = thread::spawn(move || UsageProvider::refresh(&provider));
+        let replacement = valid_auth()
+            .replace("old-token", "new-account-token")
+            .replace("refresh-token", "new-account-refresh");
+        if scenario != "expired" {
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            match scenario {
+                "switch" | "failed-switch" => fs::write(&auth_path, &replacement).unwrap(),
+                "logout" => fs::remove_file(&auth_path).unwrap(),
+                _ => {}
+            }
+            release_tx.send(()).unwrap();
         }
-    });
-    let directory = tempfile::tempdir().unwrap();
-    let auth_path = directory.path().join("auth.json");
-    let (provider, _) = build_provider(
-        &directory,
-        server.client(),
-        valid_auth(),
-        directory.path().join("missing-log.jsonl"),
-    );
-
-    let snapshot = provider.refresh_inner().unwrap();
-
-    assert_eq!(snapshot.quotas[0].used_percent, 99.0);
-    let requests = server.requests();
-    let credit_auth = requests
-        .iter()
-        .filter(|request| request.starts_with("GET /credits "))
-        .map(|request| header(request, "authorization").unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        credit_auth,
-        ["Bearer old-token".to_owned(), "Bearer new-token".to_owned()]
-    );
-    let refresh_request = requests
-        .iter()
-        .find(|request| request.starts_with("POST /token "))
-        .unwrap();
-    assert!(refresh_request.contains("client_id=client-id"));
-    assert!(refresh_request.contains("refresh_token=refresh-token"));
-    let saved: serde_json::Value = serde_json::from_slice(&fs::read(auth_path).unwrap()).unwrap();
-    let entry = &saved["https://auth.x.ai::client-id"];
-    assert_eq!(entry["key"], "new-token");
-    assert_eq!(entry["refresh_token"], "new-refresh");
-    assert_eq!(entry["id_token"], "new-id");
-    assert_eq!(entry["expires_at"], "2026-06-18T13:00:00.000Z");
-    assert_eq!(entry["custom_field"], "keep");
-    server.finish();
+        let result = scan.join().unwrap();
+        if matches!(scenario, "expired" | "rejected" | "failed-switch") {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ProviderErrorKind::Authentication);
+            assert!(error.to_string().contains("Grok CLI"));
+        } else {
+            assert_eq!(result.unwrap().quotas[0].used_percent, 99.0);
+        }
+        match scenario {
+            "switch" | "failed-switch" => {
+                assert_eq!(fs::read_to_string(&auth_path).unwrap(), replacement);
+            }
+            "logout" => assert!(!auth_path.exists()),
+            _ => assert_eq!(fs::read_to_string(&auth_path).unwrap(), original),
+        }
+        let requests = server.requests();
+        assert_eq!(requests.len(), expected);
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+        server.finish();
+    }
 }
 
 #[test]
@@ -453,7 +475,6 @@ impl TestServer {
         GrokClient::for_test(
             &format!("{}/credits", self.base),
             &format!("{}/settings", self.base),
-            &format!("{}/token", self.base),
             Duration::from_secs(15),
         )
     }

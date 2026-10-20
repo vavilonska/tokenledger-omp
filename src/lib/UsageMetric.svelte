@@ -84,7 +84,7 @@
     const rect = target.getBoundingClientRect();
     const estimatedHeight = cycles.length
       ? Math.min(74 + cycles.length * 102, 430)
-      : Math.min(86 + (period?.modelBreakdown?.models.length ?? 0) * 52, 360);
+      : Math.min(122 + (period?.modelBreakdown?.models.length ?? 0) * 68, 430);
     detailTop = Math.max(8, Math.min(rect.bottom + 7, window.innerHeight - estimatedHeight - 8));
     showTimer = setTimeout(() => {
       open = true;

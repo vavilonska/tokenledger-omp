@@ -1,14 +1,12 @@
 use std::time::Duration;
 
 use reqwest::{blocking::Client, StatusCode};
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::GrokError;
 
 const CREDITS_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const SETTINGS_URL: &str = "https://cli-chat-proxy.grok.com/v1/settings";
-const REFRESH_URL: &str = "https://auth.x.ai/oauth2/token";
 const TOKEN_AUTH_HEADER: &str = "xai-grok-cli";
 
 #[derive(Debug)]
@@ -17,35 +15,20 @@ pub struct GrokResponse {
     pub body: Value,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TokenRefresh {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub id_token: Option<String>,
-    pub expires_in: Option<f64>,
-}
-
 pub struct GrokClient {
     client: Client,
     credits_url: String,
     settings_url: String,
-    refresh_url: String,
 }
 
 impl GrokClient {
     pub fn new() -> Result<Self, GrokError> {
-        Self::with_endpoints(
-            CREDITS_URL,
-            SETTINGS_URL,
-            REFRESH_URL,
-            Duration::from_secs(15),
-        )
+        Self::with_endpoints(CREDITS_URL, SETTINGS_URL, Duration::from_secs(15))
     }
 
     fn with_endpoints(
         credits_url: &str,
         settings_url: &str,
-        refresh_url: &str,
         timeout: Duration,
     ) -> Result<Self, GrokError> {
         let client = Client::builder()
@@ -58,7 +41,6 @@ impl GrokClient {
             client,
             credits_url: credits_url.to_owned(),
             settings_url: settings_url.to_owned(),
-            refresh_url: refresh_url.to_owned(),
         })
     }
 
@@ -103,54 +85,6 @@ impl GrokClient {
         })
     }
 
-    pub fn refresh_token(
-        &self,
-        refresh_token: &str,
-        client_id: &str,
-    ) -> Result<TokenRefresh, GrokError> {
-        let started = std::time::Instant::now();
-        crate::app_info!("auth:grok", "token refresh attempt");
-        let response = self
-            .send_request(|| {
-                self.client.post(&self.refresh_url).form(&[
-                    ("grant_type", "refresh_token"),
-                    ("client_id", client_id),
-                    ("refresh_token", refresh_token),
-                ])
-            })
-            .map_err(|_| {
-                crate::app_warn!("auth:grok", "token refresh failed (transport)");
-                GrokError::ConnectionFailed
-            })?;
-        let status = response.status();
-        crate::app_debug!(
-            "http",
-            "grok token refresh HTTP {} ({}ms)",
-            status.as_u16(),
-            started.elapsed().as_millis()
-        );
-        if !status.is_success() {
-            return Err(
-                if matches!(
-                    status,
-                    StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-                ) {
-                    GrokError::Expired
-                } else {
-                    GrokError::RequestFailed(status.as_u16())
-                },
-            );
-        }
-        let mut refreshed: TokenRefresh =
-            response.json().map_err(|_| GrokError::InvalidResponse)?;
-        refreshed.access_token = refreshed.access_token.trim().to_owned();
-        if refreshed.access_token.is_empty() {
-            return Err(GrokError::Expired);
-        }
-        crate::app_info!("auth:grok", "token refresh succeeded");
-        Ok(refreshed)
-    }
-
     #[cfg(not(test))]
     fn send_request(
         &self,
@@ -183,13 +117,8 @@ impl GrokClient {
     }
 
     #[cfg(test)]
-    pub fn for_test(
-        credits_url: &str,
-        settings_url: &str,
-        refresh_url: &str,
-        timeout: Duration,
-    ) -> Self {
-        Self::with_endpoints(credits_url, settings_url, refresh_url, timeout).unwrap()
+    pub fn for_test(credits_url: &str, settings_url: &str, timeout: Duration) -> Self {
+        Self::with_endpoints(credits_url, settings_url, timeout).unwrap()
     }
 }
 
@@ -255,7 +184,7 @@ mod tests {
     #[test]
     fn authenticated_fetch_uses_cli_headers_without_leaking_the_token() {
         let (url, request, handle) = capture_once(r#"{"config":{}}"#);
-        let client = GrokClient::for_test(&url, &url, &url, Duration::from_secs(1));
+        let client = GrokClient::for_test(&url, &url, Duration::from_secs(1));
 
         let response = client.fetch_credits(" secret-token ").unwrap();
 
@@ -269,49 +198,14 @@ mod tests {
     }
 
     #[test]
-    fn refresh_form_encodes_reserved_characters() {
-        let (url, request, handle) = capture_once(r#"{"access_token":"new","expires_in":3600}"#);
-        let client = GrokClient::for_test(&url, &url, &url, Duration::from_secs(1));
-
-        let refreshed = client
-            .refresh_token("refresh token&=+/?%", "client id&=+/?%")
-            .unwrap();
-
-        assert_eq!(refreshed.access_token, "new");
-        let request = request.recv_timeout(Duration::from_secs(1)).unwrap();
-        let (_, body) = request.split_once("\r\n\r\n").unwrap();
-        assert!(body.contains("grant_type=refresh_token"));
-        assert!(body.contains("client_id=client+id%26%3D%2B%2F%3F%25"));
-        assert!(body.contains("refresh_token=refresh+token%26%3D%2B%2F%3F%25"));
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn refresh_auth_failure_and_transport_timeout_are_typed() {
-        let unauthorized = test_http::serve_once(401, &[], "{}");
-        let client = GrokClient::for_test(
-            &unauthorized,
-            &unauthorized,
-            &unauthorized,
-            Duration::from_secs(1),
-        );
-        assert!(matches!(
-            client.refresh_token("refresh", "client"),
-            Err(GrokError::Expired)
-        ));
-
+    fn transport_timeout_is_typed() {
         let delayed = test_http::serve_once_after(
             test_http::TIMEOUT_TEST_RESPONSE_DELAY,
             200,
             &[],
             r#"{"config":{}}"#,
         );
-        let client = GrokClient::for_test(
-            &delayed,
-            &delayed,
-            &delayed,
-            test_http::TIMEOUT_TEST_CLIENT_LIMIT,
-        );
+        let client = GrokClient::for_test(&delayed, &delayed, test_http::TIMEOUT_TEST_CLIENT_LIMIT);
         assert!(matches!(
             client.fetch_credits("secret"),
             Err(GrokError::ConnectionFailed)

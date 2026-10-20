@@ -59,7 +59,7 @@ impl Storage {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(StorageError::CreateDirectory)?;
         }
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
@@ -125,23 +125,42 @@ impl Storage {
                PRIMARY KEY(provider_id, identity_key, window_id, cycle_key)
              );",
         )?;
-        if !Self::has_column(&connection, "log_file_cache", "modified_nanos")? {
-            // Force fresh metadata checks, but preserve actual parsed usage for recovery
-            // when its source has already been deleted before this upgrade.
-            connection.execute_batch(
-                "ALTER TABLE log_file_cache RENAME TO legacy_log_file_cache;
-                 CREATE TABLE log_file_cache (
-                   provider_id TEXT NOT NULL,
-                   path TEXT NOT NULL,
-                   size INTEGER NOT NULL,
-                   modified_nanos INTEGER NOT NULL,
-                   events_json TEXT NOT NULL,
-                   PRIMARY KEY(provider_id, path)
-                 );
-                 INSERT INTO log_file_cache(provider_id, path, size, modified_nanos, events_json)
-                   SELECT provider_id, path, size, 0, events_json FROM legacy_log_file_cache;
-                 DROP TABLE legacy_log_file_cache;",
+        {
+            let transaction = connection.transaction()?;
+            if !Self::has_column(&transaction, "log_file_cache", "modified_nanos")? {
+                // Rebuild the legacy path-only primary key as (provider_id, path).
+                transaction.execute_batch(
+                    "ALTER TABLE log_file_cache RENAME TO legacy_log_file_cache;
+                     CREATE TABLE log_file_cache (
+                       provider_id TEXT NOT NULL,
+                       path TEXT NOT NULL,
+                       size INTEGER NOT NULL,
+                       modified_nanos INTEGER NOT NULL,
+                       events_json TEXT NOT NULL,
+                       PRIMARY KEY(provider_id, path)
+                     );",
+                )?;
+            }
+            // Older releases could stop after either the rename, create, or copy.
+            // The new column alone therefore does not establish migration completion.
+            let legacy_exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'legacy_log_file_cache')",
+                [],
+                |row| row.get(0),
             )?;
+            if legacy_exists {
+                // Force fresh metadata checks while retaining parsed history whose
+                // source may be gone. Already refreshed target rows take precedence.
+                transaction.execute_batch(
+                    "INSERT INTO log_file_cache(provider_id, path, size, modified_nanos, events_json)
+                       SELECT provider_id, path, size, 0, events_json
+                       FROM legacy_log_file_cache WHERE true
+                       ON CONFLICT(provider_id, path) DO NOTHING;
+                     DROP TABLE legacy_log_file_cache;",
+                )?;
+            }
+            transaction.commit()?;
         }
         if !Self::has_column(&connection, "provider_snapshots", "identity_key")? {
             connection.execute(
@@ -756,6 +775,8 @@ mod tests {
                         models: vec![ModelUsageEntry {
                             model: "gpt-5.4".into(),
                             total_tokens: 42,
+                            cache_read_tokens: None,
+                            prompt_tokens: None,
                             cost_usd: Some(0.12),
                             variants: None,
                         }],
@@ -1159,12 +1180,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legacy_millisecond_log_cache_is_safely_rebuilt() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tokenledger-omp.db");
-        let legacy = Connection::open(&path).unwrap();
-        legacy
+    fn log_cache_migration_fixture(path: &std::path::Path, stage: &str) -> Connection {
+        let connection = Connection::open(path).unwrap();
+        if stage == "fresh" {
+            return connection;
+        }
+        connection
             .execute_batch(
                 "CREATE TABLE log_file_cache (
                    path TEXT PRIMARY KEY,
@@ -1173,20 +1194,211 @@ mod tests {
                    events_json TEXT NOT NULL,
                    provider_id TEXT NOT NULL DEFAULT ''
                  );
-                 INSERT INTO log_file_cache VALUES ('old.jsonl', 10, 20, '[]', 'codex');",
+                 INSERT INTO log_file_cache VALUES
+                   ('old.jsonl', 10, 20, '[]', 'codex'),
+                   ('shared.jsonl', 11, 21, '[1]', 'codex');",
             )
             .unwrap();
-        drop(legacy);
+        if stage == "old" {
+            return connection;
+        }
+        connection
+            .execute_batch("ALTER TABLE log_file_cache RENAME TO legacy_log_file_cache;")
+            .unwrap();
+        if stage == "renamed" {
+            return connection;
+        }
+        connection
+            .execute_batch(
+                "CREATE TABLE log_file_cache (
+                   provider_id TEXT NOT NULL,
+                   path TEXT NOT NULL,
+                   size INTEGER NOT NULL,
+                   modified_nanos INTEGER NOT NULL,
+                   events_json TEXT NOT NULL,
+                   PRIMARY KEY(provider_id, path)
+                 );",
+            )
+            .unwrap();
+        if stage == "partial" {
+            connection
+                .execute_batch(
+                    "INSERT INTO log_file_cache VALUES
+                       ('codex', 'old.jsonl', 10, 0, '[]'),
+                       ('codex', 'shared.jsonl', 99, 123, '[2]'),
+                       ('codex', 'new-only.jsonl', 12, 456, '[3]'),
+                       ('claude', 'shared.jsonl', 21, 321, '[4]');",
+                )
+                .unwrap();
+        } else if stage == "copied" || stage == "complete" {
+            connection
+                .execute_batch(
+                    "INSERT INTO log_file_cache
+                     SELECT provider_id, path, size, 0, events_json FROM legacy_log_file_cache;",
+                )
+                .unwrap();
+            if stage == "complete" {
+                connection
+                    .execute_batch("DROP TABLE legacy_log_file_cache;")
+                    .unwrap();
+            }
+        }
+        connection
+    }
 
+    #[test]
+    fn log_cache_migration_recovers_every_persisted_stage_and_reopens_idempotently() {
+        for stage in [
+            "fresh", "old", "renamed", "created", "partial", "copied", "complete",
+        ] {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join("migration.db");
+            drop(log_cache_migration_fixture(&path, stage));
+            let expected = match stage {
+                "fresh" => vec![],
+                "partial" => vec![
+                    ("claude", "shared.jsonl", 21, 321, "[4]"),
+                    ("codex", "new-only.jsonl", 12, 456, "[3]"),
+                    ("codex", "old.jsonl", 10, 0, "[]"),
+                    ("codex", "shared.jsonl", 99, 123, "[2]"),
+                ],
+                _ => vec![
+                    ("codex", "old.jsonl", 10, 0, "[]"),
+                    ("codex", "shared.jsonl", 11, 0, "[1]"),
+                ],
+            };
+            for _ in 0..2 {
+                let storage = Storage::open(&path).unwrap();
+                let connection = storage.connection().unwrap();
+                let rows = connection
+                    .prepare(
+                        "SELECT provider_id, path, size, modified_nanos, events_json
+                         FROM log_file_cache ORDER BY provider_id, path",
+                    )
+                    .unwrap()
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let expected_rows: Vec<_> = expected
+                    .iter()
+                    .map(|(provider, path, size, modified, events)| {
+                        (
+                            provider.to_string(),
+                            path.to_string(),
+                            *size,
+                            *modified,
+                            events.to_string(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(rows, expected_rows, "{stage}");
+                assert!(
+                    Storage::has_column(&connection, "log_file_cache", "modified_nanos").unwrap()
+                );
+                assert!(
+                    !Storage::has_column(&connection, "log_file_cache", "modified_millis").unwrap()
+                );
+                let legacy_exists: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                         WHERE type = 'table' AND name = 'legacy_log_file_cache')",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(!legacy_exists, "{stage}");
+                let version: i64 = connection
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(version, 0);
+                drop(connection);
+                let recovered: Vec<_> = expected
+                    .iter()
+                    .filter(|(provider, ..)| *provider == "codex")
+                    .map(|(_, path, _, _, events)| (PathBuf::from(*path), events.to_string()))
+                    .collect();
+                assert_eq!(
+                    storage
+                        .recoverable_log_events("codex", "", "codex")
+                        .unwrap(),
+                    recovered
+                );
+                assert_eq!(
+                    storage
+                        .load_log_events("codex", std::path::Path::new("old.jsonl"), 10, 20)
+                        .unwrap(),
+                    None
+                );
+            }
+            // The old path-only primary key and millisecond NOT NULL constraint
+            // must both be gone, including when upgrading an untouched old table.
+            let storage = Storage::open(&path).unwrap();
+            let shared = std::path::Path::new("shared.jsonl");
+            for provider in ["codex", "claude"] {
+                storage
+                    .save_log_events(provider, shared, 30, 40, provider)
+                    .unwrap();
+            }
+            drop(storage);
+            let storage = Storage::open(&path).unwrap();
+            for provider in ["codex", "claude"] {
+                assert_eq!(
+                    storage.load_log_events(provider, shared, 30, 40).unwrap(),
+                    Some(provider.to_owned())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn log_cache_migration_failure_rolls_back_and_can_recover_on_next_open() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("migration.db");
+        let connection = log_cache_migration_fixture(&path, "partial");
+        connection
+            .execute_batch(
+                "DELETE FROM log_file_cache WHERE path = 'old.jsonl';
+                 CREATE TRIGGER interrupt_cache_recovery BEFORE INSERT ON log_file_cache
+                 WHEN NEW.path = 'shared.jsonl'
+                 BEGIN SELECT RAISE(ABORT, 'fixture migration interruption'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        assert!(Storage::open(&path).is_err());
+        let connection = Connection::open(&path).unwrap();
+        let counts: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM legacy_log_file_cache),
+                        (SELECT COUNT(*) FROM log_file_cache),
+                        (SELECT COUNT(*) FROM log_file_cache WHERE path = 'old.jsonl')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (2, 3, 0));
+        connection
+            .execute_batch("DROP TRIGGER interrupt_cache_recovery;")
+            .unwrap();
+        drop(connection);
         let storage = Storage::open(&path).unwrap();
         assert_eq!(
             storage
-                .load_log_events("codex", PathBuf::from("old.jsonl").as_path(), 10, 20)
+                .recoverable_log_events("codex", "", "codex")
                 .unwrap(),
-            None
+            vec![
+                (PathBuf::from("new-only.jsonl"), "[3]".to_owned()),
+                (PathBuf::from("old.jsonl"), "[]".to_owned()),
+                (PathBuf::from("shared.jsonl"), "[2]".to_owned()),
+            ]
         );
-        storage
-            .save_log_events("codex", PathBuf::from("new.jsonl").as_path(), 10, 20, "[]")
-            .unwrap();
     }
 }

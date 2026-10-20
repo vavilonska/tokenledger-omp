@@ -28,15 +28,18 @@ export function selectedPeriod(
   return history.last30Days;
 }
 
+function isKnownCost(value: number | null | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 function valueFor(period: UsagePeriod, metric: AppSettings['totalSpendMetric']): number | null {
   if (metric === 'tokens') return period.tokens > 0 ? period.tokens : null;
-  if (period.estimatedCostUsd === null || period.estimatedCostUsd <= 0) return null;
+  const cost = period.estimatedCostUsd;
+  if (!isKnownCost(cost)) return null;
   if (metric === 'costPerMillion') {
-    return period.estimateComplete && period.tokens > 0
-      ? (period.estimatedCostUsd / period.tokens) * 1_000_000
-      : null;
+    return period.estimateComplete && period.tokens > 0 ? (cost / period.tokens) * 1_000_000 : null;
   }
-  return period.estimatedCostUsd;
+  return cost;
 }
 
 export function projectSpend(
@@ -50,7 +53,7 @@ export function projectSpend(
   const totalTokens = periods.reduce((sum, period) => sum + period.tokens, 0);
   const estimateComplete = periods.every(
     (period) =>
-      period.estimateComplete && (period.tokens === 0 || period.estimatedCostUsd !== null),
+      period.estimateComplete && (period.tokens === 0 || isKnownCost(period.estimatedCostUsd)),
   );
   const slices = providers
     .flatMap((provider) => {

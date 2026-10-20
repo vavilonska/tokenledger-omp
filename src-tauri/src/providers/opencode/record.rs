@@ -24,6 +24,7 @@ pub(crate) struct UsageRecord {
     pub(crate) cost_provenance: CostProvenance,
     pub(crate) incomplete_cost: bool,
     pub(crate) unknown_model: bool,
+    pub(crate) cache_usage: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,6 +87,15 @@ impl ParsedMessage {
             timestamp: self.timestamp,
             model: self.model,
             tokens: tokens.total,
+            cache_usage: tokens.cache_complete.then_some((
+                tokens.breakdown.cache_read,
+                tokens
+                    .breakdown
+                    .input
+                    .saturating_add(tokens.breakdown.cache_read)
+                    .saturating_add(tokens.breakdown.cache_write_5m)
+                    .saturating_add(tokens.breakdown.cache_write_1h),
+            )),
             cost,
             cost_provenance,
             incomplete_cost,
@@ -134,11 +144,15 @@ impl OpenCodeUsageEvent {
 struct ParsedTokens {
     breakdown: TokenBreakdown,
     total: u64,
+    #[serde(default)]
+    cache_complete: bool,
 }
 
 impl ParsedTokens {
     fn saturating_add(self, other: Self) -> Self {
         Self {
+            cache_complete: (self.cache_complete || self.total == 0)
+                && (other.cache_complete || other.total == 0),
             breakdown: TokenBreakdown {
                 input: self.breakdown.input.saturating_add(other.breakdown.input),
                 cache_write_5m: self
@@ -360,6 +374,15 @@ fn parse_tokens(value: &Value) -> Option<ParsedTokens> {
         .saturating_add(cache_write);
     let reported = object.get("total").and_then(nonnegative_integer);
     Some(ParsedTokens {
+        cache_complete: object.get("input").and_then(nonnegative_integer).is_some()
+            && value
+                .pointer("/cache/read")
+                .and_then(nonnegative_integer)
+                .is_some()
+            && value
+                .pointer("/cache/write")
+                .and_then(nonnegative_integer)
+                .is_some(),
         breakdown: TokenBreakdown {
             input,
             cache_write_5m: cache_write,

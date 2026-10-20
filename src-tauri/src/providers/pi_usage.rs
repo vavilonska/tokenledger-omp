@@ -18,7 +18,7 @@ use super::{
     log_usage::{parse_log_timestamp, LogCacheError},
 };
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 2;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct PiUsageEvent {
@@ -31,6 +31,8 @@ struct PiUsageEvent {
     carried_cost: Option<f64>,
     tokens: PiTokenBreakdown,
     reported_total_tokens: u64,
+    #[serde(default)]
+    cache_usage: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,7 +206,12 @@ fn parse_line(line: &str) -> Option<PiUsageEvent> {
         .and_then(Value::as_object)
         .and_then(|cost| finite_number(cost.get("total")));
 
+    let cache_usage = unsigned_number(usage.get("input"))
+        .zip(unsigned_number(usage.get("cacheRead")))
+        .zip(unsigned_number(usage.get("cacheWrite")))
+        .map(|((input, read), write)| (read, input.saturating_add(read).saturating_add(write)));
     Some(PiUsageEvent {
+        cache_usage,
         session_id: None,
         id: object.get("id").and_then(Value::as_str).map(str::to_owned),
         timestamp,
@@ -275,6 +282,7 @@ fn aggregate_into(
                     cost,
                     display_model,
                     "pi",
+                    event.cache_usage,
                 );
             } else if event.reported_total_tokens > 0 {
                 accumulator.add_unpriced_variant(
@@ -282,6 +290,7 @@ fn aggregate_into(
                     event.reported_total_tokens,
                     display_model,
                     "pi",
+                    event.cache_usage,
                 );
                 if !super::codex::local_usage::model_has_rates(&event.timestamp, model, pricing) {
                     accumulator.add_unknown_model(date, display_model);
@@ -289,16 +298,34 @@ fn aggregate_into(
             }
             contributed = true;
         } else if let Some(cost) = event.carried_cost.filter(|cost| *cost > 0.0) {
-            accumulator.add_exact(date, event.reported_total_tokens, cost, display_model);
+            accumulator.add_exact(
+                date,
+                event.reported_total_tokens,
+                cost,
+                display_model,
+                event.cache_usage,
+            );
             contributed = true;
         } else if !model.is_empty() {
             if let Some(cost) =
                 pricing.estimated_cost_dollars(model, event.tokens.pricing_tokens(), true)
             {
-                accumulator.add(date, event.reported_total_tokens, cost, model);
+                accumulator.add(
+                    date,
+                    event.reported_total_tokens,
+                    cost,
+                    model,
+                    event.cache_usage,
+                );
                 contributed = true;
             } else if event.reported_total_tokens > 0 {
-                accumulator.add_unpriced_variant(date, event.reported_total_tokens, model, "pi");
+                accumulator.add_unpriced_variant(
+                    date,
+                    event.reported_total_tokens,
+                    model,
+                    "pi",
+                    event.cache_usage,
+                );
                 if pricing.resolve(model).is_none() {
                     accumulator.add_unknown_model(date, model);
                 }

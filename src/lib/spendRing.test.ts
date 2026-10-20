@@ -35,4 +35,15 @@ describe('Total Spend ring sectors', () => {
       expect(path).not.toContain('NaN');
     }
   });
+
+  it('does not assign a visible minimum share to known zero-cost rows', () => {
+    expect(
+      spendRingArcs([
+        { id: 'paid', value: 10 },
+        { id: 'free', value: 0 },
+      ]),
+    ).toEqual([{ id: 'paid', start: 0, end: 1 }]);
+    expect(spendRingArcs([{ id: 'free', value: 0 }])).toEqual([]);
+    expect(spendRingArcs([])).toEqual([]);
+  });
 });

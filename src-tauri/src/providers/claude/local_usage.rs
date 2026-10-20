@@ -37,9 +37,11 @@ pub struct ClaudeTokenEvent {
     #[serde(default)]
     pub has_speed: bool,
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub cache_usage: Option<(u64, u64)>,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 3;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 4;
 
 impl ClaudeTokenEvent {
     fn total_tokens(&self) -> u64 {
@@ -72,7 +74,7 @@ pub fn scan_local_usage(
         account_identity.unwrap_or_default(),
         provider_id,
         LOG_CACHE_SCHEMA_VERSION,
-        LOG_CACHE_SCHEMA_VERSION,
+        3, // Keep retained history readable; only the source parser schema changes.
         &discover_files(configured_roots, include_standard_roots),
         parse_jsonl,
         |event: &ClaudeTokenEvent| {
@@ -376,7 +378,27 @@ fn usage_event(
                 0,
             )
         });
+    let cache_usage = integer(usage.get("cache_read_input_tokens"))
+        .filter(|_| {
+            usage.get("cache_creation").map_or_else(
+                || integer(usage.get("cache_creation_input_tokens")).is_some(),
+                |cache| {
+                    integer(cache.get("ephemeral_5m_input_tokens")).is_some()
+                        && integer(cache.get("ephemeral_1h_input_tokens")).is_some()
+                },
+            )
+        })
+        .map(|read| {
+            (
+                read,
+                input
+                    .saturating_add(read)
+                    .saturating_add(cache_write_5m)
+                    .saturating_add(cache_write_1h),
+            )
+        });
     Some(ClaudeTokenEvent {
+        cache_usage,
         timestamp,
         model,
         input,
@@ -488,12 +510,18 @@ fn aggregate_into(
         let model = model_name.unwrap_or("Unattributed");
         if let Some(cost) = cost {
             if event.cost_usd.is_some() {
-                accumulator.add_exact(date, tokens.total_tokens(), cost, model);
+                accumulator.add_exact(date, tokens.total_tokens(), cost, model, event.cache_usage);
             } else {
-                accumulator.add(date, tokens.total_tokens(), cost, model);
+                accumulator.add(date, tokens.total_tokens(), cost, model, event.cache_usage);
             }
         } else if tokens.total_tokens() > 0 {
-            accumulator.add_unpriced_variant(date, tokens.total_tokens(), model, model);
+            accumulator.add_unpriced_variant(
+                date,
+                tokens.total_tokens(),
+                model,
+                model,
+                event.cache_usage,
+            );
             if model_name.is_some() && pricing.resolve(model).is_none() {
                 accumulator.add_unknown_model(date, model);
             }
@@ -747,6 +775,7 @@ mod tests {
     fn parent_replacement_removes_the_stale_dedup_key() {
         fn event(request_id: &str, sidechain: bool, cache_read: u64) -> ClaudeTokenEvent {
             ClaudeTokenEvent {
+                cache_usage: None,
                 timestamp: Utc.with_ymd_and_hms(2026, 2, 20, 12, 0, 0).unwrap(),
                 model: Some("claude-opus-4-6".into()),
                 input: 0,

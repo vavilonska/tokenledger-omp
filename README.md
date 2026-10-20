@@ -16,6 +16,10 @@
 
 基于 [OpenQuota](https://github.com/deviffyy/OpenQuota) 的独立桌面用量面板。集中查看 AI 编程工具的额度、重置时间、Token 用量和费用估算。公开版保留 **Oh My Pi 与 Codex 同账号用量合并、Codex 周额度估算和重置周期历史**，不包含私有业务适配器。
 
+**0.5.7 功能说明（待发布）**：今天／昨天／最近 30 天的用量悬浮明细新增 **Cache rate（缓存命中率）**，展示周期汇总、模型及已有来源分行。按 `Σ缓存读取 tokens / Σ全部 prompt tokens` 加权，输出 tokens 不计分母；OMP cacheWrite 已含 1 小时桶，编排用量只计一次。缺桶、历史缺字段或零分母显示“未知”，已知零缓存且有输入显示 `0%`；与价格／速度完整性独立。保留现有 Token 纳入规则、Other 折叠及公开版隐私边界，不采集对话正文。当前版本验证／安装状态仍以发布记录为准。
+
+**Cursor／Grok 凭据续期边界**：仅 Cursor 的本地 SQLite 凭据会自动续期，写回前会核对仍是同一份登录；刷新期间切换账号或退出登录不会被旧结果覆盖。Cursor 系统钥匙串凭据与 Grok CLI JSON 保持只读，由原客户端维护；有效 Token 继续查询，过期或失效时请在原客户端重新登录。
+
 ### 下载与安装
 
 从 [Releases](https://github.com/vavilonska/tokenledger-omp/releases) 下载 Windows x64 安装程序，安装后从托盘打开 **TokenLedger OMP**。本次提供 Windows 安装包；其他平台保留源代码支持，但未发布或验证对应安装包。
@@ -82,6 +86,10 @@ Windows x64 NSIS 包见 [v0.5.6](https://github.com/vavilonska/tokenledger-omp/r
 ## English
 
 An independent desktop usage dashboard based on [OpenQuota](https://github.com/deviffyy/OpenQuota), showing AI coding quotas, resets, tokens and estimated costs. This public edition preserves **same-account Oh My Pi/Codex usage merging, Codex weekly quota estimates and reset-cycle history**, without private business adapters.
+
+**0.5.7 feature notes (unreleased):** Today / Yesterday / Last 30 Days usage popups show **Cache rate** for the period, each model and existing source/variant rows. Rates use `sum(cache-read tokens) / sum(all prompt tokens)`, never an average of percentages or an output-token denominator. OMP cache writes already include the one-hour bucket, and orchestration is counted once. Missing buckets, legacy fields or a zero denominator remain unknown; known zero cached input with positive prompt tokens shows `0%`. Cache completeness is independent of pricing/speed completeness. Existing token inclusion, Other folding and public-edition privacy boundaries remain unchanged; no conversation text is collected. Validation and installation status remain documented in the release record.
+
+**Cursor/Grok credential renewal:** Only local Cursor SQLite credentials are automatically renewed, with a conditional write that preserves account switches and logout during refresh. Cursor system-keychain credentials and Grok CLI JSON remain read-only and are maintained by their original clients. Valid tokens continue to be queried; expired or rejected credentials require signing in again through the original client.
 
 ### Download and install
 

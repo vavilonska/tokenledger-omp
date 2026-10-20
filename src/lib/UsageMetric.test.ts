@@ -8,6 +8,133 @@ describe('UsageMetric model detail', () => {
     vi.useRealTimers();
   });
 
+  it.each(['Today', 'Yesterday', 'Last 30 Days'])(
+    'shows weighted cache rates for %s and its models and variants despite partial pricing',
+    async (label) => {
+      vi.useFakeTimers();
+      render(UsageMetric, {
+        label,
+        period: {
+          tokens: 10_000,
+          estimatedCostUsd: null,
+          costEstimated: true,
+          estimateComplete: false,
+          modelBreakdown: {
+            sourceNote: 'From local logs',
+            models: [
+              {
+                model: 'large',
+                totalTokens: 9_000,
+                costUsd: null,
+                cacheReadTokens: 10,
+                promptTokens: 100,
+              },
+              {
+                model: 'Other',
+                totalTokens: 1_000,
+                costUsd: null,
+                cacheReadTokens: 900,
+                promptTokens: 900,
+                variants: [
+                  {
+                    model: 'small · OMP',
+                    totalTokens: 1_000,
+                    costUsd: null,
+                    cacheReadTokens: 900,
+                    promptTokens: 900,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+      await fireEvent.mouseEnter(screen.getByRole('button'));
+      await vi.advanceTimersByTimeAsync(400);
+      const detail = screen.getByRole('tooltip', { name: `${label} model usage` });
+      expect(detail.querySelector('.model-usage-cache-total')).toHaveTextContent('Cache rate91%');
+      expect(detail.querySelectorAll('.model-usage-row')[0]).toHaveTextContent('Cache rate10%');
+      expect(detail.querySelector('.model-usage-variant-cache')).toHaveTextContent(
+        'Cache rate100%',
+      );
+      expect(detail).toHaveTextContent('90%');
+      expect(detail).toHaveTextContent('Partial estimate');
+    },
+  );
+
+  it.each([
+    { read: 0, prompt: 100, expected: '0%' },
+    { read: 0, prompt: 0, expected: 'Unknown' },
+    { read: null, prompt: 100, expected: 'Unknown' },
+    { read: undefined, prompt: undefined, expected: 'Unknown' },
+  ])(
+    'distinguishes zero and unknown cache evidence: $expected',
+    async ({ read, prompt, expected }) => {
+      vi.useFakeTimers();
+      render(UsageMetric, {
+        label: 'Today',
+        period: {
+          tokens: 500,
+          estimatedCostUsd: 0.03,
+          costEstimated: true,
+          estimateComplete: true,
+          modelBreakdown: {
+            sourceNote: 'Local logs',
+            models: [
+              {
+                model: 'model',
+                totalTokens: 500,
+                costUsd: 0.03,
+                cacheReadTokens: read,
+                promptTokens: prompt,
+              },
+            ],
+          },
+        },
+      });
+      await fireEvent.mouseEnter(screen.getByRole('button'));
+      await vi.advanceTimersByTimeAsync(400);
+      const detail = screen.getByRole('tooltip');
+      expect(detail.querySelector('.model-usage-cache-total')).toHaveTextContent(
+        `Cache rate${expected}`,
+      );
+      expect(detail.querySelector('.model-usage-row .model-usage-cache')).toHaveTextContent(
+        `Cache rate${expected}`,
+      );
+    },
+  );
+
+  it('does not present a known subtotal as the complete period cache rate', async () => {
+    vi.useFakeTimers();
+    render(UsageMetric, {
+      label: 'Today',
+      period: {
+        tokens: 1_000,
+        estimatedCostUsd: 1,
+        costEstimated: true,
+        estimateComplete: true,
+        modelBreakdown: {
+          sourceNote: 'Local logs',
+          models: [
+            {
+              model: 'known',
+              totalTokens: 900,
+              costUsd: 0.9,
+              cacheReadTokens: 90,
+              promptTokens: 100,
+            },
+            { model: 'legacy', totalTokens: 100, costUsd: 0.1 },
+          ],
+        },
+      },
+    });
+    await fireEvent.mouseEnter(screen.getByRole('button'));
+    await vi.advanceTimersByTimeAsync(400);
+    const detail = screen.getByRole('tooltip');
+    expect(detail.querySelector('.model-usage-cache-total')).toHaveTextContent('Unknown');
+    expect(detail.querySelector('.model-usage-row .model-usage-cache')).toHaveTextContent('90%');
+  });
+
   it('reveals the ranked real model names after the reference hover dwell', async () => {
     vi.useFakeTimers();
     render(UsageMetric, {

@@ -67,6 +67,7 @@ fn legacy_values(events: &[SessionUsageEvent]) -> Value {
             "entry_kind",
             "purpose",
             "recorded_cost",
+            "cache_usage",
         ] {
             value.remove(key);
         }
@@ -83,6 +84,114 @@ fn entry_key(value: &Value) -> Result<String, serde_json::Error> {
         event.timestamp,
         &event.model,
     ))
+}
+
+#[test]
+fn real_scanner_cache_buckets_include_orchestration_once_and_survive_retention() {
+    let directory = tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+    let first = json!({"type":"model_usage","id":"cache-a","timestamp":"2026-07-12T14:00:00Z",
+        "provider":"openai-codex","model":"gpt-6.1-sol","purpose":"title",
+        "usage":{"input":100,"cacheRead":40,"cacheWrite":20,"cacheWrite1h":10,"output":900,
+            "orchestration":{"input":10,"cacheRead":5,"output":20}}});
+    let second = json!({"type":"model_usage","id":"cache-b","timestamp":"2026-07-11T14:00:00Z",
+        "provider":"openai-codex","model":"gpt-6.1-sol","purpose":"title",
+        "usage":{"input":900,"cacheRead":0,"cacheWrite":0,"output":1}});
+    write_session(
+        directory.path(),
+        "cache.jsonl",
+        &[first.clone(), first, second],
+    );
+    let pricing = crate::pricing::test_bundled_pricing();
+    for retained in [false, true] {
+        if retained {
+            fs::remove_file(directory.path().join("agent/sessions/cache.jsonl")).unwrap();
+        }
+        let (outcome, histories) =
+            source_scan(&storage, directory.path(), "cache-account", &pricing);
+        assert_eq!(outcome.events.len(), 2);
+        let daily = &histories[0];
+        let today = daily.today.as_ref().unwrap();
+        assert!(
+            !today.estimate_complete,
+            "unknown request speed must not hide cache usage"
+        );
+        let models = &today.model_breakdown.as_ref().unwrap().models;
+        assert_eq!(
+            (models[0].cache_read_tokens, models[0].prompt_tokens),
+            (Some(45), Some(175))
+        );
+        let yesterday = &daily
+            .yesterday
+            .as_ref()
+            .unwrap()
+            .model_breakdown
+            .as_ref()
+            .unwrap()
+            .models;
+        assert_eq!(
+            (yesterday[0].cache_read_tokens, yesterday[0].prompt_tokens),
+            (Some(0), Some(900))
+        );
+        let models = &daily
+            .last_30_days
+            .as_ref()
+            .unwrap()
+            .model_breakdown
+            .as_ref()
+            .unwrap()
+            .models;
+        assert_eq!(
+            (models[0].cache_read_tokens, models[0].prompt_tokens),
+            (Some(45), Some(1_075))
+        );
+    }
+}
+
+#[test]
+fn scanner_does_not_invent_cache_zeros_from_missing_buckets_or_deleted_legacy_sources() {
+    let pricing = crate::pricing::test_bundled_pricing();
+    for missing in ["input", "cacheRead", "cacheWrite"] {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let mut event = auxiliary("cache-missing", 100, 1);
+        event["usage"].as_object_mut().unwrap().remove(missing);
+        write_session(directory.path(), "missing.jsonl", &[event]);
+        let (_, histories) = source_scan(&storage, directory.path(), "cache-account", &pricing);
+        let model = &histories[0]
+            .today
+            .as_ref()
+            .unwrap()
+            .model_breakdown
+            .as_ref()
+            .unwrap()
+            .models[0];
+        assert_eq!(model.cache_read_tokens, None, "{missing}");
+        assert_eq!(model.prompt_tokens, None, "{missing}");
+    }
+    let directory = tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+    let raw = format!(
+        "{{\"type\":\"session\",\"id\":\"legacy-session\"}}\n{}",
+        auxiliary("legacy-cache", 100, 1)
+    );
+    let events = parse_jsonl(&raw);
+    let mut legacy = serde_json::to_value(&events[0]).unwrap();
+    legacy.as_object_mut().unwrap().remove("cache_usage");
+    storage
+        .record_usage_events("omp", "cache-account", 1, &[legacy], entry_key)
+        .unwrap();
+    let (_, histories) = source_scan(&storage, directory.path(), "cache-account", &pricing);
+    let model = &histories[0]
+        .today
+        .as_ref()
+        .unwrap()
+        .model_breakdown
+        .as_ref()
+        .unwrap()
+        .models[0];
+    assert_eq!(model.cache_read_tokens, None);
+    assert_eq!(model.prompt_tokens, None);
 }
 
 #[test]

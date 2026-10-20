@@ -1,5 +1,108 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.7 Cache rate 与用量／凭据修复（本地集成验收完成，待发布）
+
+- 今天／昨天／最近 30 天的用量悬浮明细增加周期汇总、逐模型及已有 variant／来源分行的 Cache rate。
+  使用 `Σ缓存读取 tokens / Σ全部 prompt tokens`，跨日和 Other 先累加桶再计算，不平均百分比，也不纳入输出 Token。
+- Codex 的 input 已含 cached；OMP 分母为 input + cacheRead + cacheWrite，cacheWrite 已含 1 小时桶，
+  input／cacheRead 已含 orchestration，不再额外累加。已有公开 provider 沿各自真实 token 桶贯通；
+  Cursor／Grok 保持原先缺价事件不纳入 Token 总数的规则，缓存也不额外纳入这些事件。
+- 缓存完整性与价格／速度完整性独立。缺桶、旧留存缺证据或零分母显示未知；已知零读取且有输入显示 0%。
+  有源日志通过 parser schema 刷新补充证据；源已删除的旧事件不能从默认零恢复真实缓存率。
+- DTO 增加可空 `cacheReadTokens`／`promptTokens`；不改变金额、Token、请求、账号隔离及私有适配器边界。
+  中英文沿既有本地化机制，浮层保持窄窗限宽、滚动及悬浮交互。
+
+Cursor／Grok 凭据安全优先：仅 Cursor 本地 SQLite 凭据自动续期，条件写回保护刷新期间的账号切换和退出。
+Cursor 系统钥匙串凭据与 Grok CLI JSON 停止主动刷新和写回，由原客户端维护；仍有效的 Token 继续查询，
+过期或被拒绝时提示在原客户端重新登录。系统钥匙串来源测试使用构造输入，不代表真实系统钥匙串验收。
+
+Codex 子会话区分会话创建时间与日志写入时间，修复元数据晚写导致可归属子调用漏计的问题。
+继承父调用的截止边界使用明确的子会话复制结束／下一任务证据，以及可验证的同秒任务身份；
+无法区分的整秒平局不猜测。已有源日志经 parser 刷新重扫，保留去重、周期统计及原账号隔离边界。
+
+旧日志缓存迁移改为事务化恢复：无论旧表仍在、已重命名或已部分复制，重开时补齐未迁移记录，
+保留已刷新的目标行；迁移失败回滚，下次打开仍可恢复。旧缓存的时间指纹置零以触发有源重解析，
+源已删除的解析历史继续留存。此修复不猜测首次采集前的账号归属，也不声称可从空缓存恢复未观察历史。
+
+2026-10-21 已将四处应用版本同步至 0.5.7，并保留依赖 PR #23／#24／#25。
+在隔离用户目录运行 `pnpm install --frozen-lockfile` 后，版本与四项契约检查、
+ESLint／Prettier、Svelte（248 文件，0 错误／警告）、279 项前端测试、前端生产构建、
+Rust fmt、Clippy `--locked --all-targets -D warnings` 与 Rust `--locked --all-targets`
+644 项测试均通过。该轮没有检查失败，但早于随后报告的四项缺陷修复，
+不能据此宣称那些缺陷不存在或后续修改已验收。
+
+四项修复稳定后，Rust fmt 与 Clippy `--locked --all-targets -D warnings` 通过；
+受影响模块定向补验共 123 项：Codex local usage 69（含 10 项子会话边界回归）、
+Cursor 26、Grok 26、旧缓存迁移 2，全部通过。Cursor 使用真实 loopback HTTP 挂起测试
+账号切换／退出等五状态；Grok 共享 JSON 只读覆盖六状态，迁移覆盖七持久阶段及失败回滚。
+本轮首次 Clippy 因新增 fixture 漏传 `now` 和内部枚举重复前缀失败；补齐参数、
+仅重命名私有枚举变体后补验通过，未改变回放逻辑或放宽断言，不宣称首次全绿。
+
+后续已修复长模型明细的可视高度：从实际 top 扣除底部 8px，避免新增缓存行及 Other
+variants 将底部挤出窗口。真实 Chromium 组件烟测覆盖 12 组中英／明暗的三周期加权值、
+24 组已知零／缺桶／旧字段缺失／零 prompt，以及 4 组 320×520 的长 Other 滚动；
+最末 variant 缓存行可见，鼠标移入／移出保持原行为，未改变 Escape 生命周期。
+
+零费用修复后，58 项受影响前端测试、Svelte（249 文件，0 错误／警告）及修改文件
+ESLint 通过。另用真实 TotalSpend 组件和生产 Canvas 分享导出验证 5 组：
+`$10/1M + $0/1M = $5/MTok`，免费服务图例保留但不绘制虚构弧，全零不当缺失，
+partial 零值仍标 partial。首个浏览器 runner 在已完成 28 组边界检查后因本地化分享
+按钮选择器失败；修正 runner 后仅补验分享阶段，不宣称该 runner 首次全绿。
+
+独立生产 `scan_into → parser → SQLite → daily DTO` 烟测随后完成：使用合成匹配账号及本地日志，
+覆盖不同 prompt 权重的两个模型、大量 output、cacheWrite／1 小时桶和 orchestration 只计一次，
+以及零缓存、缺桶与 44 事件 Other 场景；四组均在删源、关闭数据库并重开后保持 DTO 一致。
+真实导出 DTO 再由生产 UsageMetric／ModelUsageDetail 在 Chromium 消费，10 组关键 hover 通过：
+三周期加权值为 79.5%／9%／45.5%，缺桶汇总未知而已知 Other 仍为 47.4%，零缓存为 0%。
+生产价格／速度为 partial 时，已知缓存数据仍展示。初始临时 scanner root 装配遇到 include 宏
+限制及 reader 截断，修正临时装配后执行通过；未修改生产语义或禁用 lint。
+
+上述前端矩阵及 scanner 证明生产模块和组件路径，不代表原生 App 或默认账号发现。
+新依赖已实际安装、编译并经前端／Rust 消费者检查；通知响应分类、updater 禁止重试等测试通过，
+但原生通知送达／点击、全局快捷键、真实二实例唤醒、WebView2 隐藏／恢复、实际系统钥匙串、
+真实签名更新、账号网络／OAuth 及安装均未验收。
+临时 example、页面、runner、driver、隔离 profile／账本和浏览器／服务均已退出并清理；
+去敏 DTO、截图、成功和失败日志留在 `.local/cache-rate-20261021/`，不提交或公开上传。
+安装包构建与静态身份核验见下节；尚未发布或安装。历史 0.5.6 验收记录不作为 0.5.7 证据。
+
+English: Unreleased 0.5.7 adds weighted cache-read/all-prompt rates to the three daily-range popups,
+including model/source rows and Other folding. Unknown evidence stays unknown, known zero stays 0%,
+and pricing/speed completeness is independent. Existing provider token inclusion and public privacy
+boundaries remain unchanged. The isolated pre-fix baseline passed frontend checks/build and 644 Rust tests.
+After the documented integration repairs, all-target Clippy and 123 affected Rust tests passed.
+Production scanner/SQLite retention and ten real-DTO browser cases passed, alongside component interactions
+and zero-cost share Canvas exports. Temporary consumers were cleaned. Native-host, real-account, keychain,
+signed-update and installation paths remain unverified. This is not a release announcement.
+
+### 0.5.7 Windows 安装包（已构建，未发布／未安装）
+
+双方共同门禁通过后，获授权执行 `corepack pnpm build:installer`，`CARGO_BUILD_JOBS=4`。
+命令退出 0；Vite 转换 217 模块，Rust GNU x64 优化构建及 NSIS 成功完成，未重跑已通过测试。
+交付文件为 `release/TokenLedger-OMP_0.5.7_x64-setup.exe` 及相邻 `.sha256`，保留旧版本安装包。
+
+- 大小：**10,450,026 bytes**。
+- SHA-256：`922c1d03dc7e28edb2a1209972c8494d8b744945c8440990602d096a923151a8`。
+- 安装程序、原应用及静态提取 payload 的产品名均为 **TokenLedger OMP**，
+  产品／文件版本均为 **0.5.7**；应用 payload 的 PE machine 为 `0x8664`（x64）。
+  NSIS 启动 stub 为 `0x014c`，不将 stub 架构误作应用 payload 架构。
+- 三者 Authenticode 状态均为 `NotSigned`。没有签名更新或安装验收声明。
+- 静态提取安装包后逐字节核对 payload：只允许 Tauri 既有单个
+  `__TAURI_BUNDLE_TYPE_VAR_UNK` → `__TAURI_BUNDLE_TYPE_VAR_NSS` 替换，位置为 27,105,464。
+  替换后的预期 payload 与提取内容完全一致，SHA-256 均为
+  `f47784ad4b48be8977faeff7576d5d8a0634d9bef1f54207531d60c57eaa4f5b`；
+  未修改安装包或原应用，也未忽略其他字节差异。
+
+构建日志与身份收据留在 `.local/cache-rate-20261021/installer-build.log` 及
+`installer-identity.json`。临时打包／检查 runner、便携解包工具和提取 payload 已清理，
+没有运行安装程序或应用，没有新增安装、push、tag 或 GitHub Release。
+仅此静态核验不证明原生宿主、通知、快捷键、WebView2、真实账号或系统凭据行为。
+
+English: The 0.5.7 Windows x64 NSIS installer was built and statically inspected, not published or
+installed. It is 10,450,026 bytes with the SHA-256 above. Product/file versions are 0.5.7, product name is
+TokenLedger OMP, the application payload is x64, and Authenticode is NotSigned. Extracted payload bytes
+exactly match the built app after only Tauri's established UNK-to-NSS bundle-marker substitution.
+No installer/app execution, installation, remote push/tag/Release or native-host acceptance was performed.
+
 ## 0.5.6 低额度刷新、归零周计价与周期图
 
 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 中应用自身包版本及

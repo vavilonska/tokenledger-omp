@@ -179,7 +179,7 @@ pub(super) fn scan_sessions_into(
         source.cache_key,
         source.identity_key,
         "codex",
-        4,
+        5,
         1,
         &paths,
         parse_jsonl,
@@ -272,7 +272,13 @@ pub(super) fn scan_sessions_into(
             let date = event.timestamp.with_timezone(&Local).date_naive();
             let unknown_model = !model_has_rates(&event.timestamp, &event.model, pricing);
             if event.timestamp >= since {
-                accumulator.add_unpriced_variant(date, event.total, &event.model, source.label);
+                accumulator.add_unpriced_variant(
+                    date,
+                    event.total,
+                    &event.model,
+                    source.label,
+                    event.cache_usage,
+                );
                 if unknown_model {
                     accumulator.add_unknown_model(date, &event.model);
                 }
@@ -283,6 +289,7 @@ pub(super) fn scan_sessions_into(
                     event.total,
                     &event.model,
                     source.label,
+                    event.cache_usage,
                 );
                 if unknown_model {
                     session_accumulator.add_unknown_model(date, &event.model);
@@ -294,6 +301,7 @@ pub(super) fn scan_sessions_into(
                     event.total,
                     &event.model,
                     source.label,
+                    event.cache_usage,
                 );
                 if unknown_model {
                     weekly_accumulator.add_unknown_model(date, &event.model);
@@ -410,7 +418,14 @@ fn add_event(
     cost: f64,
     source: &str,
 ) {
-    accumulator.add_variant(date, event.total, cost, event.model.trim(), source);
+    accumulator.add_variant(
+        date,
+        event.total,
+        cost,
+        event.model.trim(),
+        source,
+        event.cache_usage,
+    );
 }
 
 fn discover_files(directory: &Path) -> Vec<PathBuf> {

@@ -177,6 +177,10 @@ fn default_true() -> bool {
 pub struct ModelUsageEntry {
     pub model: String,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
     pub cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variants: Option<Vec<ModelUsageVariant>>,
@@ -187,6 +191,10 @@ pub struct ModelUsageEntry {
 pub struct ModelUsageVariant {
     pub model: String,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
     pub cost_usd: Option<f64>,
 }
 

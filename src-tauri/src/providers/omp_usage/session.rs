@@ -33,6 +33,8 @@ pub(super) struct SessionUsageEvent {
     pub(super) cache_write: u64,
     pub(super) cache_write_1h: u64,
     pub(super) total: u64,
+    #[serde(default)]
+    pub(super) cache_usage: Option<(u64, u64)>,
     // Legacy is_fast was inferred from the branch, including auxiliary calls. Ignore it.
     #[serde(default)]
     pub(super) speed: Option<RequestSpeed>,
@@ -224,7 +226,21 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
             [input, output, cache_read, cache_write],
             recorded_cost.as_ref().filter(|_| complete_usage),
         );
+        let cache_usage = (complete_usage
+            && ["input", "cacheRead", "cacheWrite"]
+                .iter()
+                .all(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+            && usage.get("orchestration").is_none_or(|value| {
+                ["input", "cacheRead"]
+                    .iter()
+                    .all(|key| value.get(*key).and_then(Value::as_u64).is_some())
+            }))
+        .then_some((
+            cache_read,
+            input.saturating_add(cache_read).saturating_add(cache_write),
+        ));
         events.push(SessionUsageEvent {
+            cache_usage,
             session_id: session_id.clone(),
             anonymous_occurrence: 0,
             id: entry

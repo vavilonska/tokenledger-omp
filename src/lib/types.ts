@@ -73,6 +73,8 @@ export interface CycleModelUsage {
 export interface ModelUsageEntry {
   model: string;
   totalTokens: number;
+  cacheReadTokens?: number | null;
+  promptTokens?: number | null;
   costUsd: number | null;
   variants?: ModelUsageVariant[] | null;
 }
@@ -80,6 +82,8 @@ export interface ModelUsageEntry {
 export interface ModelUsageVariant {
   model: string;
   totalTokens: number;
+  cacheReadTokens?: number | null;
+  promptTokens?: number | null;
   costUsd: number | null;
 }
 

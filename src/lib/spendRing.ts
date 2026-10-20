@@ -19,12 +19,15 @@ export interface SpendRingGeometry {
 export const MINIMUM_SPEND_SLICE_SHARE = 0.025;
 
 export function spendRingArcs(slices: SpendRingSlice[]): SpendRingArc[] {
-  const total = slices.reduce((sum, slice) => sum + slice.value, 0);
+  const positiveSlices = slices.filter((slice) => slice.value > 0);
+  const total = positiveSlices.reduce((sum, slice) => sum + slice.value, 0);
   if (total <= 0) return [];
-  const floored = slices.map((slice) => Math.max(slice.value / total, MINIMUM_SPEND_SLICE_SHARE));
+  const floored = positiveSlices.map((slice) =>
+    Math.max(slice.value / total, MINIMUM_SPEND_SLICE_SHARE),
+  );
   const flooredTotal = floored.reduce((sum, share) => sum + share, 0);
   let cursor = 0;
-  return slices.map((slice, index) => {
+  return positiveSlices.map((slice, index) => {
     const width = floored[index] / flooredTotal;
     const arc = { id: slice.id, start: cursor, end: cursor + width };
     cursor += width;
