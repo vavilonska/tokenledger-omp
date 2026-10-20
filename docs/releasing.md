@@ -1,6 +1,6 @@
 # 发布 / Releasing TokenLedger OMP
 
-## 0.5.8 稀疏 orchestration 缓存桶补丁（待发布）
+## 0.5.8 稀疏 orchestration 缓存桶补丁（已发布）
 
 仅修正 OMP cache rate 对稀疏 `orchestration` object 的处理。缓存完整性直接复用既有
 `OrchestrationUsage` 的 object／桶类型校验及合并结果，不再要求其 input／cacheRead 同时显式存在。
@@ -28,9 +28,9 @@ DTO 导出用的临时测试 stdout／集合已移除，永久回归保留全部
 证据在 `.local/sparse-cache-058/` 的检查日志、`production-dto.json`、
 `ui-evidence.json` 及截图；不提交或公开上传。本段证明生产模块／组件路径，
 不代表公开原生宿主、真实账号网络／OAuth 或安装验收。
-既有 0.5.7 tag／发布资产及本地包保留，不覆盖、不移动；0.5.8 尚未发布或安装。
+既有 0.5.7 tag／发布资产及本地包保留，不覆盖、不移动；0.5.8 已发布，公开版未在本机安装。
 
-### 0.5.8 安装包（已构建，未发布／未安装）
+### 0.5.8 安装包（已发布，未本机安装）
 
 获授权以 `CARGO_BUILD_JOBS=4` 执行 `corepack pnpm build:installer`，退出 0；
 Vite 217 模块、Rust GNU x64 优化构建及 NSIS 成功，未重跑不受影响的全套测试。
@@ -46,9 +46,16 @@ Vite 217 模块、Rust GNU x64 优化构建及 NSIS 成功，未重跑不受影�
   预期及提取 payload SHA-256 均为
   `2b7c2a02ebf7fb05615f6076eb0775aab1059672b266554842a6eb19ccdf27fb`。
 
-没有执行安装程序或应用，没有安装、push、tag 或 Release。
+静态构建与身份核验阶段没有执行安装程序或应用；公开版仍未在本机安装。
 构建与包身份收据为 `.local/sparse-cache-058/installer-build.log`、
 `installer-identity.json`；旧 0.5.7 安装包及远程资产未改动。
+
+2026-10-21，源码提交 `72a21f1604837722f95e064a9baaf77ab1808612` 已推送公开 `main`，
+并发布 [v0.5.8 Release](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.8)；
+tag 精确指向该提交，Release 包含上述安装包与校验文件。
+发布后无认证独立下载两个公开资产，确认安装包大小、SHA-256 及校验文件内容全部一致。
+去敏收据保存在 `.local/publish-public-058/receipt.json`；0.5.7 的 tag／二进制未变，
+旧 Release 说明已指向本补丁。安装包未签名，继续手动下载安装更新。
 
 ## 0.5.7 Cache rate 与用量／凭据修复（已发布）
 
