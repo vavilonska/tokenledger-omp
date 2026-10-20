@@ -1,5 +1,55 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.8 稀疏 orchestration 缓存桶补丁（待发布）
+
+仅修正 OMP cache rate 对稀疏 `orchestration` object 的处理。缓存完整性直接复用既有
+`OrchestrationUsage` 的 object／桶类型校验及合并结果，不再要求其 input／cacheRead 同时显式存在。
+合法缺省桶为 0；非 object、显式非 u64 桶及顶层 input／cacheRead／cacheWrite 缺失仍未知。
+输出仍不进入 prompt 分母，cacheWrite 的 1 小时桶及 orchestration 不重复计数。
+OMP source parser 实际参数从 5 升至 6，durable schema 仍为 1，已有源日志会重新解析。
+不改变主题、其他提供商、自动刷新策略、0.5.7 的四项修复或依赖；四处应用版本同步为 0.5.8。
+
+旧 snapshot 缺新字段时仍可暂显未知，应由既有刷新产生新 DTO；这与本次 parser 合同缺陷分开。
+未扩大到 timeout、性能、主题或刷新策略修改，也未将其他版本的宿主截图视作本补丁的 parser 复现。
+
+在隔离配置与合成账本中，0.5.8 版本／四项契约、Rust fmt、Clippy
+`--locked --all-targets -D warnings` 和受影响 OMP 模块 37 项测试均通过。
+新增十场景实际运行生产 scanner → SQLite：先存 schema 5 的缺缓存证据旧解析结果，
+升级重扫补出合法稀疏桶，保持 durable 1 的去重；删源、重开后 DTO 完全一致。
+覆盖仅 input/output、仅 output、空 object、仅 cacheRead，以及非法 input/read、
+非 object 和顶层三桶缺失。实际序列化 DTO 再由生产 UsageMetric／ModelUsageDetail
+在 320px Chrome 消费，十场景均通过：`40/163=24.5%`、`40/160=25%`、`45/165=27.3%`，
+非法或顶层缺桶保持 Unknown，模型与来源行一致。未重跑无关全套 UI。
+
+DTO 导出用的临时测试 stdout／集合已移除，永久回归保留全部有效断言；
+清理后最终 Rust fmt、all-target Clippy 与该新回归再次通过。
+临时页面、runner、便携工具、隔离 profile／提取 payload 均已退出并清理，仅留去敏证据。
+
+证据在 `.local/sparse-cache-058/` 的检查日志、`production-dto.json`、
+`ui-evidence.json` 及截图；不提交或公开上传。本段证明生产模块／组件路径，
+不代表公开原生宿主、真实账号网络／OAuth 或安装验收。
+既有 0.5.7 tag／发布资产及本地包保留，不覆盖、不移动；0.5.8 尚未发布或安装。
+
+### 0.5.8 安装包（已构建，未发布／未安装）
+
+获授权以 `CARGO_BUILD_JOBS=4` 执行 `corepack pnpm build:installer`，退出 0；
+Vite 217 模块、Rust GNU x64 优化构建及 NSIS 成功，未重跑不受影响的全套测试。
+交付 `release/TokenLedger-OMP_0.5.8_x64-setup.exe` 及 `.sha256`：
+
+- 大小 **10,446,920 bytes**。
+- SHA-256：`7cf53c744660d8d679271badc61f75981ca16b73e5cdbd706eff22b52f35525d`。
+- 安装程序、原应用与静态提取 payload 的产品名均为 **TokenLedger OMP**，
+  产品／文件版本均为 **0.5.8**，AuthentiCode 均为 **NotSigned**。
+- 应用 payload PE machine 为 `0x8664`（x64）；NSIS stub 为 `0x014c`，两者明确区分。
+- 只将原应用位置 27,104,952 的单个 `__TAURI_BUNDLE_TYPE_VAR_UNK` 替换为
+  `__TAURI_BUNDLE_TYPE_VAR_NSS` 后，与静态提取 payload 逐字节完全一致；
+  预期及提取 payload SHA-256 均为
+  `2b7c2a02ebf7fb05615f6076eb0775aab1059672b266554842a6eb19ccdf27fb`。
+
+没有执行安装程序或应用，没有安装、push、tag 或 Release。
+构建与包身份收据为 `.local/sparse-cache-058/installer-build.log`、
+`installer-identity.json`；旧 0.5.7 安装包及远程资产未改动。
+
 ## 0.5.7 Cache rate 与用量／凭据修复（已发布）
 
 - 今天／昨天／最近 30 天的用量悬浮明细增加周期汇总、逐模型及已有 variant／来源分行的 Cache rate。

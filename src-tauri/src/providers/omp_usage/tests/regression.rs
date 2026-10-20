@@ -87,6 +87,109 @@ fn entry_key(value: &Value) -> Result<String, serde_json::Error> {
 }
 
 #[test]
+fn sparse_orchestration_cache_reparses_schema_five_and_survives_sqlite_retention() {
+    let pricing = crate::pricing::test_bundled_pricing();
+    let cases = [
+        (
+            "input-output",
+            json!({"input":3,"output":3}),
+            None,
+            Some((40, 163)),
+        ),
+        ("output-only", json!({"output":3000}), None, Some((40, 160))),
+        ("empty-object", json!({}), None, Some((40, 160))),
+        ("read-only", json!({"cacheRead":5}), None, Some((45, 165))),
+        ("invalid-input", json!({"input":"3"}), None, None),
+        ("invalid-read", json!({"cacheRead":-1}), None, None),
+        ("not-object", Value::Null, None, None),
+        ("missing-input", json!({}), Some("input"), None),
+        ("missing-read", json!({}), Some("cacheRead"), None),
+        ("missing-write", json!({}), Some("cacheWrite"), None),
+    ];
+    for (name, orchestration, missing, expected) in cases {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("sparse.db");
+        let storage = Storage::open(&database).unwrap();
+        let mut entry = json!({"type":"model_usage","id":name,
+            "timestamp":"2026-07-12T14:00:00Z","provider":"openai-codex",
+            "model":"gpt-6.1-sol","purpose":"title",
+            "usage":{"input":100,"cacheRead":40,"cacheWrite":20,"cacheWrite1h":10,
+                "output":9000,"orchestration":orchestration}});
+        if let Some(missing) = missing {
+            entry["usage"].as_object_mut().unwrap().remove(missing);
+        }
+        write_session(directory.path(), "sparse.jsonl", &[entry]);
+        let source = directory.path().join("agent/sessions/sparse.jsonl");
+        let events = parse_jsonl(&fs::read_to_string(&source).unwrap());
+        let mut legacy = serde_json::to_value(&events).unwrap();
+        for event in legacy.as_array_mut().unwrap() {
+            event["cache_usage"] = Value::Null;
+        }
+        storage
+            .record_usage_events(
+                "omp",
+                "sparse-account",
+                1,
+                legacy.as_array().unwrap(),
+                entry_key,
+            )
+            .unwrap();
+        let fingerprint =
+            LogFileFingerprint::from_metadata(&fs::metadata(&source).unwrap()).unwrap();
+        storage
+            .save_log_events(
+                "omp",
+                &source,
+                fingerprint.size,
+                fingerprint.modified_nanos,
+                &json!({"schema_version":5,"events":legacy}).to_string(),
+            )
+            .unwrap();
+        let (outcome, histories) =
+            source_scan(&storage, directory.path(), "sparse-account", &pricing);
+        assert_eq!(
+            outcome.events.len(),
+            1,
+            "{name}: reparse must not duplicate retained calls"
+        );
+        for history in &histories {
+            let period = history.today.as_ref().unwrap();
+            let model = &period.model_breakdown.as_ref().unwrap().models[0];
+            assert_eq!(
+                model.cache_read_tokens.zip(model.prompt_tokens),
+                expected,
+                "{name}"
+            );
+            for variant in model.variants.as_deref().unwrap_or_default() {
+                assert_eq!(
+                    variant.cache_read_tokens.zip(variant.prompt_tokens),
+                    expected,
+                    "{name}"
+                );
+            }
+        }
+        let dto = serde_json::to_value(&histories[0]).unwrap();
+        let decoded: UsageHistory = serde_json::from_value(dto.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), dto);
+        drop(storage);
+        fs::remove_file(&source).unwrap();
+        let reopened = Storage::open(&database).unwrap();
+        let (retained, histories) =
+            source_scan(&reopened, directory.path(), "sparse-account", &pricing);
+        assert_eq!(
+            retained.events.len(),
+            1,
+            "{name}: durable schema remains readable"
+        );
+        assert_eq!(
+            serde_json::to_value(&histories[0]).unwrap(),
+            dto,
+            "{name}: deleted source"
+        );
+    }
+}
+
+#[test]
 fn real_scanner_cache_buckets_include_orchestration_once_and_survive_retention() {
     let directory = tempdir().unwrap();
     let storage = Storage::open(&directory.path().join("cache.db")).unwrap();

@@ -229,12 +229,7 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
         let cache_usage = (complete_usage
             && ["input", "cacheRead", "cacheWrite"]
                 .iter()
-                .all(|key| usage.get(*key).and_then(Value::as_u64).is_some())
-            && usage.get("orchestration").is_none_or(|value| {
-                ["input", "cacheRead"]
-                    .iter()
-                    .all(|key| value.get(*key).and_then(Value::as_u64).is_some())
-            }))
+                .all(|key| usage.get(*key).and_then(Value::as_u64).is_some()))
         .then_some((
             cache_read,
             input.saturating_add(cache_read).saturating_add(cache_write),

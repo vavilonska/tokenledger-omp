@@ -179,7 +179,7 @@ pub(super) fn scan_sessions_into(
         source.cache_key,
         source.identity_key,
         "codex",
-        5,
+        6,
         1,
         &paths,
         parse_jsonl,

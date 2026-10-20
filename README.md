@@ -16,7 +16,9 @@
 
 基于 [OpenQuota](https://github.com/deviffyy/OpenQuota) 的独立桌面用量面板。集中查看 AI 编程工具的额度、重置时间、Token 用量和费用估算。公开版保留 **Oh My Pi 与 Codex 同账号用量合并、Codex 周额度估算和重置周期历史**，不包含私有业务适配器。
 
-**0.5.7 功能说明（待发布）**：今天／昨天／最近 30 天的用量悬浮明细新增 **Cache rate（缓存命中率）**，展示周期汇总、模型及已有来源分行。按 `Σ缓存读取 tokens / Σ全部 prompt tokens` 加权，输出 tokens 不计分母；OMP cacheWrite 已含 1 小时桶，编排用量只计一次。缺桶、历史缺字段或零分母显示“未知”，已知零缓存且有输入显示 `0%`；与价格／速度完整性独立。保留现有 Token 纳入规则、Other 折叠及公开版隐私边界，不采集对话正文。当前版本验证／安装状态仍以发布记录为准。
+**0.5.8 补丁（待发布）**：OMP 的稀疏 `orchestration` object 沿既有桶规则处理：缺省 input／cacheRead 为 0，合法的仅 input/output、仅 output 或空 object 不再让缓存率误变未知；显式非法桶及顶层缺桶仍未知。parser 5→6 使有源日志重扫，持久账本版本不变；输出不计分母，编排用量不重复合计。此修复与旧 snapshot 暂无新字段的显示状态分开，不改变主题、其他提供商或自动刷新策略。
+
+**0.5.7 功能说明（已发布）**：今天／昨天／最近 30 天的用量悬浮明细新增 **Cache rate（缓存命中率）**，展示周期汇总、模型及已有来源分行。按 `Σ缓存读取 tokens / Σ全部 prompt tokens` 加权，输出 tokens 不计分母；OMP cacheWrite 已含 1 小时桶，编排用量只计一次。缺桶、历史缺字段或零分母显示“未知”，已知零缓存且有输入显示 `0%`；与价格／速度完整性独立。保留现有 Token 纳入规则、Other 折叠及公开版隐私边界，不采集对话正文。当前版本验证／安装状态仍以发布记录为准。
 
 **Cursor／Grok 凭据续期边界**：仅 Cursor 的本地 SQLite 凭据会自动续期，写回前会核对仍是同一份登录；刷新期间切换账号或退出登录不会被旧结果覆盖。Cursor 系统钥匙串凭据与 Grok CLI JSON 保持只读，由原客户端维护；有效 Token 继续查询，过期或失效时请在原客户端重新登录。
 
@@ -69,7 +71,7 @@ corepack pnpm build:installer
 
 本版还在现有周期历史浮层加入上下两张共享周期横轴的图：上图显示服务器观察到的额度消耗百分比，下图显示周期完整 Token 用量；支持历史范围导航，保留明细、中文和主题，未知值不补零。复用现有桌面界面，不增加独立 WebUI 服务、服务器或依赖。
 
-Windows x64 NSIS 包见 [v0.5.6](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.6)：`TokenLedger-OMP_0.5.6_x64-setup.exe`，10,338,797 bytes，SHA-256 为 `9fa7a2106d784b4409461a5286cd52355a5836ab4c878005d6e31856a678c598`，附 `.sha256`。本轮生产 scanner／SQLite、320px 真实浏览器组件和安装包构建通过；公开版未安装或验证原生 UI，完整范围与首次失败／定向修复见[发布记录](docs/releasing.md)。
+当前已发布 Windows x64 NSIS 包见 [v0.5.7](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.7)：`TokenLedger-OMP_0.5.7_x64-setup.exe`，10,450,026 bytes，SHA-256 为 `922c1d03dc7e28edb2a1209972c8494d8b744945c8440990602d096a923151a8`，附 `.sha256`。0.5.8 补丁准备不覆盖该版本 tag 或资产。公开版未安装或验证原生 UI，完整范围与首次失败／定向修复见[发布记录](docs/releasing.md)。
 
 **0.5.5** 区分 Standard、Fast、Ultrafast；GPT-6 Astra 与 GPT-6.1 Sol 的 Ultrafast 按 API／购买积分 6× 计价，不采用套餐额度消耗倍率。OMP 辅助调用不再直接继承主会话速度，缺失或冲突证据保持未知。总计、模型、周期和分享明确标记部分估算；Cost/MTok 只纳入完整计价提供商，并说明覆盖范围，无可用费用时仍显示 tokens。
 
@@ -87,7 +89,9 @@ Windows x64 NSIS 包见 [v0.5.6](https://github.com/vavilonska/tokenledger-omp/r
 
 An independent desktop usage dashboard based on [OpenQuota](https://github.com/deviffyy/OpenQuota), showing AI coding quotas, resets, tokens and estimated costs. This public edition preserves **same-account Oh My Pi/Codex usage merging, Codex weekly quota estimates and reset-cycle history**, without private business adapters.
 
-**0.5.7 feature notes (unreleased):** Today / Yesterday / Last 30 Days usage popups show **Cache rate** for the period, each model and existing source/variant rows. Rates use `sum(cache-read tokens) / sum(all prompt tokens)`, never an average of percentages or an output-token denominator. OMP cache writes already include the one-hour bucket, and orchestration is counted once. Missing buckets, legacy fields or a zero denominator remain unknown; known zero cached input with positive prompt tokens shows `0%`. Cache completeness is independent of pricing/speed completeness. Existing token inclusion, Other folding and public-edition privacy boundaries remain unchanged; no conversation text is collected. Validation and installation status remain documented in the release record.
+**0.5.8 patch (unreleased):** Sparse OMP `orchestration` objects now reuse the existing bucket contract: omitted input/cacheRead are zero; input/output-only, output-only and empty objects no longer make cache rates unknown. Explicit invalid buckets and missing top-level buckets remain unknown. Parser 5→6 reparses available sources without changing the durable ledger schema, including output in the denominator, or double-counting orchestration. This is separate from older snapshots lacking new fields; themes, other providers and automatic refresh policies are unchanged.
+
+**0.5.7 feature notes (released):** Today / Yesterday / Last 30 Days usage popups show **Cache rate** for the period, each model and existing source/variant rows. Rates use `sum(cache-read tokens) / sum(all prompt tokens)`, never an average of percentages or an output-token denominator. OMP cache writes already include the one-hour bucket, and orchestration is counted once. Missing buckets, legacy fields or a zero denominator remain unknown; known zero cached input with positive prompt tokens shows `0%`. Cache completeness is independent of pricing/speed completeness. Existing token inclusion, Other folding and public-edition privacy boundaries remain unchanged; no conversation text is collected. Validation and installation status remain documented in the release record.
 
 **Cursor/Grok credential renewal:** Only local Cursor SQLite credentials are automatically renewed, with a conditional write that preserves account switches and logout during refresh. Cursor system-keychain credentials and Grok CLI JSON remain read-only and are maintained by their original clients. Valid tokens continue to be queried; expired or rejected credentials require signing in again through the original client.
 
@@ -126,7 +130,7 @@ Requires Node.js 22+, pnpm 11.11.0, stable Rust and [Tauri 2 prerequisites](http
 
 The existing cycle-history popup also gains two stacked charts sharing the cycle axis: server-observed quota-used percentage above and complete cycle tokens below. Historical range navigation preserves details, Chinese labels and themes; unknown values remain gaps rather than zero. This uses the existing desktop UI, without a separate WebUI service, server or dependency.
 
-The [v0.5.6 Windows x64 NSIS package](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.6), `TokenLedger-OMP_0.5.6_x64-setup.exe`, is 10,338,797 bytes with SHA-256 `9fa7a2106d784b4409461a5286cd52355a5836ab4c878005d6e31856a678c598` and an adjacent `.sha256`. Production scanner/SQLite, 320px browser-component acceptance and installer build passed. This public edition was not installed or exercised in the native host; see the [release record](docs/releasing.md) for scope, original failures and targeted repairs.
+The current published [v0.5.7 Windows x64 NSIS package](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.7), `TokenLedger-OMP_0.5.7_x64-setup.exe`, is 10,450,026 bytes with SHA-256 `922c1d03dc7e28edb2a1209972c8494d8b744945c8440990602d096a923151a8` and an adjacent `.sha256`. Preparing 0.5.8 does not replace that tag or its assets. This public edition was not installed or exercised in the native host; see the [release record](docs/releasing.md) for scope, original failures and targeted repairs.
 
 **0.5.4** refreshes price catalogs and adds GPT-6.1 Sol (USD per million tokens: input $2, cached input $0.10, cache writes $2.50, output $10), including Fast and long-context pricing. Codex credits independently estimate purchased-credit/PAYG rates, not included plan-limit consumption. A compact local ledger retains observed Codex, OMP, Claude, pi, Grok and OpenCode usage.
 
