@@ -1,6 +1,6 @@
 # 发布 / Releasing TokenLedger OMP
 
-## 0.5.7 Cache rate 与用量／凭据修复（本地集成验收完成，待发布）
+## 0.5.7 Cache rate 与用量／凭据修复（已发布）
 
 - 今天／昨天／最近 30 天的用量悬浮明细增加周期汇总、逐模型及已有 variant／来源分行的 Cache rate。
   使用 `Σ缓存读取 tokens / Σ全部 prompt tokens`，跨日和 Other 先累加桶再计算，不平均百分比，也不纳入输出 Token。
@@ -63,18 +63,18 @@ partial 零值仍标 partial。首个浏览器 runner 在已完成 28 组边界�
 真实签名更新、账号网络／OAuth 及安装均未验收。
 临时 example、页面、runner、driver、隔离 profile／账本和浏览器／服务均已退出并清理；
 去敏 DTO、截图、成功和失败日志留在 `.local/cache-rate-20261021/`，不提交或公开上传。
-安装包构建与静态身份核验见下节；尚未发布或安装。历史 0.5.6 验收记录不作为 0.5.7 证据。
+安装包已构建、完成静态身份核验并公开发布；公开版仍未在本机安装。历史 0.5.6 验收记录不作为 0.5.7 证据。
 
-English: Unreleased 0.5.7 adds weighted cache-read/all-prompt rates to the three daily-range popups,
+English: Released 0.5.7 adds weighted cache-read/all-prompt rates to the three daily-range popups,
 including model/source rows and Other folding. Unknown evidence stays unknown, known zero stays 0%,
 and pricing/speed completeness is independent. Existing provider token inclusion and public privacy
 boundaries remain unchanged. The isolated pre-fix baseline passed frontend checks/build and 644 Rust tests.
 After the documented integration repairs, all-target Clippy and 123 affected Rust tests passed.
 Production scanner/SQLite retention and ten real-DTO browser cases passed, alongside component interactions
 and zero-cost share Canvas exports. Temporary consumers were cleaned. Native-host, real-account, keychain,
-signed-update and installation paths remain unverified. This is not a release announcement.
+signed-update and installation paths remain unverified. The Windows x64 release is available below.
 
-### 0.5.7 Windows 安装包（已构建，未发布／未安装）
+### 0.5.7 Windows 安装包（已发布，未本机安装）
 
 双方共同门禁通过后，获授权执行 `corepack pnpm build:installer`，`CARGO_BUILD_JOBS=4`。
 命令退出 0；Vite 转换 217 模块，Rust GNU x64 优化构建及 NSIS 成功完成，未重跑已通过测试。
@@ -94,14 +94,30 @@ signed-update and installation paths remain unverified. This is not a release an
 
 构建日志与身份收据留在 `.local/cache-rate-20261021/installer-build.log` 及
 `installer-identity.json`。临时打包／检查 runner、便携解包工具和提取 payload 已清理，
-没有运行安装程序或应用，没有新增安装、push、tag 或 GitHub Release。
+上述静态核验阶段没有运行安装程序或应用；后续远程发布记录见下节。
 仅此静态核验不证明原生宿主、通知、快捷键、WebView2、真实账号或系统凭据行为。
 
-English: The 0.5.7 Windows x64 NSIS installer was built and statically inspected, not published or
-installed. It is 10,450,026 bytes with the SHA-256 above. Product/file versions are 0.5.7, product name is
+English: The 0.5.7 Windows x64 NSIS installer was built, statically inspected and subsequently published;
+it was not installed locally. It is 10,450,026 bytes with the SHA-256 above. Product/file versions are 0.5.7, product name is
 TokenLedger OMP, the application payload is x64, and Authenticode is NotSigned. Extracted payload bytes
 exactly match the built app after only Tauri's established UNK-to-NSS bundle-marker substitution.
-No installer/app execution, installation, remote push/tag/Release or native-host acceptance was performed.
+No installer/app execution, local installation or native-host acceptance was performed for the public edition.
+
+### 0.5.7 公开交付
+
+2026-10-21，公开 `main` 已推送提交 `2b60c587cb27132f6eebfa3480dc3ba327f4ca09`。
+PR [#23](https://github.com/vavilonska/tokenledger-omp/pull/23)、
+[#24](https://github.com/vavilonska/tokenledger-omp/pull/24)、
+[#25](https://github.com/vavilonska/tokenledger-omp/pull/25) 的原始提交祖先关系保留，
+GitHub API 已确认三项均为 `closed`、`merged: true`。
+
+[v0.5.7 Release](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.7)
+及对应 tag 已发布，tag 精确指向上述源码提交。Release 仅包含本版安装包和 `.sha256`；
+二进制不加入源码历史，未覆盖旧 tag 或历史资产。
+发布后不携带认证独立下载两个公开资产，核对安装包大小 **10,450,026 bytes**、
+SHA-256 `922c1d03dc7e28edb2a1209972c8494d8b744945c8440990602d096a923151a8`
+及校验文件内容均一致。去敏发布收据保存在 `.local/publish-public-057/receipt.json`。
+安装包仍未签名，updater 未配置；继续通过 Release 手动下载安装更新。
 
 ## 0.5.6 低额度刷新、归零周计价与周期图
 
