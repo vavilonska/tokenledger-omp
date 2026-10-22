@@ -22,14 +22,6 @@ describe('interface localization', () => {
     expect(translate('Tokens', 'zh-CN')).toBe('token');
     expect(translate('Cache rate', 'zh-CN')).toBe('缓存命中率');
     expect(translate('Unknown', 'zh-CN')).toBe('未知');
-    expect(
-      translate(
-        'Cache rate is cache-read tokens divided by all prompt tokens; missing buckets or no prompt tokens are unknown.',
-        'zh-CN',
-      ),
-    ).toBe(
-      '缓存命中率为缓存读取 Token / 全部输入 Token；缺少统计字段或没有输入 Token 时显示未知。',
-    );
     expect(translate('1.3B tokens', 'zh-CN')).toBe('1.3B token');
     expect(translate('$3.20 · Estimated locally, so it may be off', 'zh-CN')).toBe(
       '$3.20 · 根据本地数据估算，可能存在偏差',

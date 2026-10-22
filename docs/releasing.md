@@ -1,5 +1,59 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.10 滚动周期图与用量明细（源码验收）
+
+四处应用版本一致为 0.5.10；保留 TokenLedger OMP 独立产品、数据与凭据边界，不引入
+私有 QuantLab 适配器。本次仍为源码交付，不新建 tag／Release、公开安装包或本机安装；
+已有 v0.5.8 下载与历史资产不变。此处不提前声明源码已推送。
+
+- 双图始终只取最近 6 个真实周期，升序、最新在右；不足 6 个不补点。取消分页，
+  但下方完整历史不裁剪。新周期推进时选最新自动跟随，旧选择刷新保留，滑出后回最新。
+- 左右键及 Home／End 只在可见窗口内移动焦点，双图选择联动。保留当前字样、主题选择
+  与可见焦点，移除当前柱白虚线；精确读数及周期模型明细仅保留弱顶分隔。
+- Cache rate 汇总／模型使用 11px／14px 次色，compact 为 10px；已有来源行仍在自己的
+  grid 内跨列、10px。最多一位小数并去 `.0`，统一 title 口径、不常驻计算说明。
+  UsageMetric 复用 `104+n*70` 估高和现有视口上限滚动；未知／零分母／partial 不改语义。
+
+### 实际检查与首次失败
+
+在公开仓以 PowerShell 7 执行：
+
+```powershell
+corepack pnpm exec vitest run src/lib/CycleUsageChart.test.ts src/lib/CycleUsageDetail.test.ts src/lib/CycleUsageDetail.models.test.ts src/lib/UsageMetric.test.ts src/lib/localization.test.ts
+corepack pnpm check
+corepack pnpm exec vitest run src/lib/UsageMetric.test.ts src/lib/localization.test.ts src/lib/pricingCoverage.test.ts
+corepack pnpm exec eslint src/lib/CycleUsageChart.svelte src/lib/CycleUsageChart.test.ts src/lib/CycleUsageDetail.svelte src/lib/ModelUsageDetail.svelte src/lib/UsageMetric.svelte src/lib/UsageMetric.test.ts src/lib/localization.ts src/lib/localization.test.ts
+corepack pnpm exec prettier --check src/lib/CycleUsageChart.svelte src/lib/CycleUsageChart.test.ts src/lib/CycleUsageDetail.svelte src/lib/ModelUsageDetail.svelte src/lib/UsageMetric.svelte src/lib/UsageMetric.test.ts src/lib/localization.ts src/lib/localization.test.ts
+corepack pnpm build
+corepack pnpm verify:versions
+```
+
+最终均退出 0：初次 59 项测试通过，收敛新增措辞断言后的受影响消费者 42 项通过，
+复用未改变的成功路径后为 6 文件 79 个不同的最终用例；Svelte 为 0 错误／警告，
+定向 ESLint／Prettier、前端生产构建（231 模块）及版本一致性通过。
+初次 Prettier 在 `CycleUsageChart.test.ts` 失败，格式修正后通过；删除新增的整句
+title／说明镜像测试，保留真实缓存计算、精度与交互边界回归。最初 pnpm 供应链检查
+有 npm registry 超时警告，最终成功；没有改依赖来绕过检查。未跑无关 Rust 全套。
+
+### 真实组件烟测与证据范围
+
+独立无头 Chrome 挂载生产 CycleUsageDetail／UsageMetric 与生产样式，使用隔离合成
+DTO，不访问 Tauri、真实账号或数据库。两版分别验证 31→32 周期仍为 6 点、7／13
+末窗、最新在右、刷新选择及真实键盘边界；32 条完整历史可滚到 9 月 1 日。
+真实鼠标悬浮今天／昨天／最近 30 天：加权汇总 `1%`，模型及 variant `33.3%`，
+已知零缓存 `0%`；明暗／compact、中文 title、缺失／零分母及 partial 均保留正确语义。
+公开来源行显示 Oh My Pi，不含 QuantLab；私有版保留自己的来源，等价行为不外推身份。
+320×420 CSS 视口下长模型浮层边界为 x32／y8／right312／bottom412，
+无横向溢出，真实滚轮使 scrollTop 达到 500。沿用的浮层背景 alpha=0.97，
+可轻微透出底层文字，本次未扩大修改。
+
+去敏命令收据、行为值及明确 PNG 截图仅在本地 `.local/cycle-window-20261023/`：
+`cycle-behavior.json`、`cache-behavior.json`、`narrow-behavior.json`、
+`cycles-final-light-320.png`、`cycles-final-dark-320.png` 和 `cache-narrow-scroll.png`。
+早期浏览器 helper 主世界／截图调用失败只作为验收工具问题保留说明，不当作产品失败；
+以最终明确 PNG 为视觉证据。最后消费者结束后，临时挂载页／runner、Vite 与自有浏览器
+已清理。不提交本地证据；这些结果不代表原生宿主、真实日志刷新、安装、推送或发布验收。
+
 ## 0.5.9 计价与持久账本修复（源码交付）
 
 四处应用版本更新为 0.5.9；保留独立产品、应用标识、数据库与凭据边界，不引入私有适配器。

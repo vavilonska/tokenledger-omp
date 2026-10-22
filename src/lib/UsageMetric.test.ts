@@ -1,7 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import UsageMetric from './UsageMetric.svelte';
-
 describe('UsageMetric model detail', () => {
   afterEach(() => {
     cleanup();
@@ -64,6 +63,9 @@ describe('UsageMetric model detail', () => {
 
   it.each([
     { read: 0, prompt: 100, expected: '0%' },
+    { read: 1234, prompt: 10_000, expected: '12.3%' },
+    { read: 199, prompt: 200, expected: '99.5%' },
+    { read: 100, prompt: 100, expected: '100%' },
     { read: 0, prompt: 0, expected: 'Unknown' },
     { read: null, prompt: 100, expected: 'Unknown' },
     { read: undefined, prompt: undefined, expected: 'Unknown' },

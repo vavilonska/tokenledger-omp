@@ -22,6 +22,8 @@
     credits = false,
     estimateComplete = true,
   }: Props = $props();
+  const cacheRateTitle =
+    'Cache read tokens / all prompt tokens; output excluded. Unknown if prompt usage is incomplete.';
 
   function cacheRate(read: number | null | undefined, prompt: number | null | undefined) {
     if (read == null || prompt == null || prompt <= 0) return 'Unknown';
@@ -76,7 +78,7 @@
   onmouseleave={onLeave}
 >
   <h3>{title}</h3>
-  <div class="model-usage-cache model-usage-cache-total">
+  <div class="model-usage-cache model-usage-cache-total" title={cacheRateTitle}>
     <span>Cache rate</span><span>{cacheTotal}</span>
   </div>
   <div class="model-usage-list">
@@ -96,7 +98,7 @@
             >{formatMetricValue(model.totalTokens, 'count', 'row', 'tokens')}</span
           >
         </div>
-        <div class="model-usage-cache">
+        <div class="model-usage-cache" title={cacheRateTitle}>
           <span>Cache rate</span><span>{cacheRate(model.cacheReadTokens, model.promptTokens)}</span>
         </div>
         <div class="model-usage-meter" aria-hidden="true">
@@ -116,11 +118,11 @@
                     ? ' partial'
                     : ''}</span
                 >
-              </div>
-              <div class="model-usage-cache model-usage-variant-cache">
-                <span>Cache rate</span><span
-                  >{cacheRate(variant.cacheReadTokens, variant.promptTokens)}</span
-                >
+                <div class="model-usage-variant-cache" title={cacheRateTitle}>
+                  <span>Cache rate</span><span
+                    >{cacheRate(variant.cacheReadTokens, variant.promptTokens)}</span
+                  >
+                </div>
               </div>
             {/each}
           </div>
@@ -133,10 +135,6 @@
       Partial estimate: some usage has unknown model pricing or request speed. Shares use tokens.
     </p>
   {/if}
-  <p>
-    Cache rate is cache-read tokens divided by all prompt tokens; missing buckets or no prompt
-    tokens are unknown.
-  </p>
   <p>{breakdown.sourceNote}</p>
 </div>
 
@@ -208,7 +206,7 @@
       justify-content: space-between;
       gap: 8px;
       color: var(--secondary);
-      font-size: 10px;
+      font-size: 11px;
       line-height: 14px;
       font-variant-numeric: tabular-nums;
     }
@@ -217,10 +215,6 @@
       padding-bottom: 6px;
       border-bottom: 1px solid var(--separator);
       font-size: 11px;
-    }
-
-    .model-usage-variants > .model-usage-variant-cache {
-      display: flex;
     }
 
     .model-usage-meter {
@@ -252,8 +246,19 @@
     .model-usage-variants > div {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto auto;
-      gap: 7px;
+      column-gap: 7px;
+      row-gap: 2px;
       align-items: baseline;
+    }
+
+    .model-usage-variant-cache {
+      grid-column: 1 / -1;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--secondary);
+      font-size: 10px;
+      line-height: 13px;
     }
 
     .model-usage-variants span:first-child {
@@ -291,7 +296,8 @@
     }
 
     :root[data-density='compact'] .model-usage-primary,
-    :root[data-density='compact'] .model-usage-secondary {
+    :root[data-density='compact'] .model-usage-secondary,
+    :root[data-density='compact'] .model-usage-cache {
       font-size: 10px;
     }
 

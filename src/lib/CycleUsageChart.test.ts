@@ -85,38 +85,118 @@ describe('actual reset cycle charts', () => {
     expect(cycles).toEqual([latest, missing, zero]);
   });
 
-  it('keeps every history cycle reachable with bounded pages and keyboard navigation', async () => {
-    const cycles = Array.from({ length: 14 }, (_, index) => cycle(index + 1)).reverse();
-    render(CycleUsageChart, { cycles });
-    expect(screen.getByRole('button', { name: 'Newer cycles' })).toBeDisabled();
-    const reached = new Set<string>();
-    for (let page = 0; page < 3; page += 1) {
-      const buttons = within(quotaChart()).getAllByRole('button');
-      expect(buttons.length).toBeLessThanOrEqual(6);
-      buttons.forEach((button) => reached.add(button.getAttribute('aria-label')!));
-      if (page < 2) await fireEvent.click(screen.getByRole('button', { name: 'Older cycles' }));
-    }
-    expect(reached.size).toBe(14);
-    expect(screen.getByRole('button', { name: 'Older cycles' })).toBeDisabled();
-    let first = within(tokenChart()).getAllByRole('button')[0];
-    first.focus();
-    await fireEvent.keyDown(first, { key: 'End' });
-    await waitFor(() => expect(within(tokenChart()).getAllByRole('button').at(-1)).toHaveFocus());
-    expect(screen.getByRole('status')).toHaveTextContent(
-      String(14 * 1234).replace(/\B(?=(\d{3})+(?!\d))/g, ','),
+  it.each([1, 5, 6, 7, 12, 14])(
+    'shows only the latest six of %s cycles in chronological order without mutating history',
+    (count) => {
+      const history = Array.from({ length: count }, (_, index) => cycle(index + 1)).reverse();
+      const cycles = Object.freeze(history) as unknown as ResetCycleUsage[];
+      render(CycleUsageChart, { cycles });
+      const expected = history.slice(0, 6).reverse();
+      for (const chart of [quotaChart(), tokenChart()]) {
+        const points = within(chart).getAllByRole('button');
+        expect(points).toHaveLength(Math.min(count, 6));
+        points.forEach((point, index) => {
+          expect(point).toHaveAccessibleName(expect.stringContaining(expected[index].startedAt));
+        });
+        expect(points.at(-1)).toHaveAttribute('aria-pressed', 'true');
+      }
+      expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+      expect(cycles).toEqual(history);
+    },
+  );
+
+  it('does not fabricate chart cycles for empty history', () => {
+    render(CycleUsageChart, { cycles: [] });
+    expect(screen.queryByRole('group')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('bounds keyboard selection to the visible window and links both charts', async () => {
+    render(CycleUsageChart, {
+      cycles: Array.from({ length: 14 }, (_, index) => cycle(index + 1)).reverse(),
+    });
+    const tokens = within(tokenChart()).getAllByRole('button');
+    const quotas = within(quotaChart()).getAllByRole('button');
+    tokens[0].focus();
+    await fireEvent.keyDown(tokens[0], { key: 'ArrowLeft' });
+    await waitFor(() => expect(tokens[0]).toHaveFocus());
+    expect(tokens[0]).toHaveAccessibleName(expect.stringContaining(cycle(9).startedAt));
+    expect(quotas[0]).toHaveAttribute('aria-pressed', 'true');
+    await fireEvent.keyDown(tokens[0], { key: 'End' });
+    await waitFor(() => expect(tokens[5]).toHaveFocus());
+    expect(quotas[5]).toHaveAttribute('aria-pressed', 'true');
+    await fireEvent.keyDown(tokens[5], { key: 'ArrowRight' });
+    await waitFor(() => expect(tokens[5]).toHaveFocus());
+    await fireEvent.keyDown(tokens[5], { key: 'Home' });
+    await waitFor(() => expect(tokens[0]).toHaveFocus());
+    await fireEvent.keyDown(tokens[0], { key: 'ArrowRight' });
+    await waitFor(() => expect(tokens[1]).toHaveFocus());
+    expect(quotas[1]).toHaveAttribute('aria-pressed', 'true');
+    await fireEvent.keyDown(tokens[1], { key: 'ArrowLeft' });
+    await waitFor(() => expect(tokens[0]).toHaveFocus());
+    await fireEvent.click(quotas[3]);
+    expect(tokens[3]).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('status')).toHaveTextContent('14,808');
+    expect(within(tokenChart()).getAllByRole('button')).toHaveLength(6);
+  });
+
+  it('follows the latest cycle through refreshes and newly arriving cycles', async () => {
+    const history = Array.from({ length: 7 }, (_, index) => cycle(index + 1));
+    const { rerender } = render(CycleUsageChart, { cycles: history });
+    expect(screen.getByRole('status')).toHaveTextContent('8,638');
+    const refreshed = history.map((entry) =>
+      entry.startedAt === cycle(7).startedAt
+        ? { ...entry, usage: { ...entry.usage, tokens: 70_000 } }
+        : { ...entry },
     );
-    const last = within(tokenChart()).getAllByRole('button').at(-1)!;
-    await fireEvent.keyDown(last, { key: 'Home' });
-    await waitFor(() => expect(within(tokenChart()).getAllByRole('button')[0]).toHaveFocus());
-    first = within(tokenChart()).getAllByRole('button')[0];
-    await fireEvent.keyDown(first, { key: 'ArrowRight' });
-    await waitFor(() => expect(within(tokenChart()).getAllByRole('button')[1]).toHaveFocus());
-    await fireEvent.keyDown(within(tokenChart()).getAllByRole('button')[1], { key: 'ArrowLeft' });
-    await waitFor(() => expect(within(tokenChart()).getAllByRole('button')[0]).toHaveFocus());
-    await fireEvent.click(screen.getByRole('button', { name: 'Newer cycles' }));
-    expect(within(quotaChart()).getAllByRole('button')[0]).toHaveAccessibleName(
-      /2026-09-07T09:59:41Z/,
+    await rerender({ cycles: refreshed });
+    expect(screen.getByRole('status')).toHaveTextContent('70,000');
+    await rerender({ cycles: [...refreshed, cycle(8)] });
+    expect(within(tokenChart()).getAllByRole('button').at(-1)).toHaveAccessibleName(
+      expect.stringContaining(cycle(8).startedAt),
     );
+    expect(screen.getByRole('status')).toHaveTextContent('9,872');
+    await fireEvent.click(within(quotaChart()).getAllByRole('button').at(-1)!);
+    await rerender({ cycles: [...refreshed, cycle(8), cycle(9)] });
+    expect(within(quotaChart()).getAllByRole('button').at(-1)).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('11,106');
+  });
+
+  it('preserves a visible historical selection on refresh and resets only when it rolls out', async () => {
+    const history = Array.from({ length: 7 }, (_, index) => cycle(index + 1));
+    const { rerender } = render(CycleUsageChart, { cycles: history });
+    await fireEvent.click(within(quotaChart()).getAllByRole('button')[1]);
+    expect(screen.getByRole('status')).toHaveTextContent('3,702');
+    const refreshed = history.map((entry) => ({
+      ...entry,
+      usage: { ...entry.usage, tokens: entry.usage.tokens + 1 },
+    }));
+    await rerender({ cycles: refreshed });
+    expect(screen.getByRole('status')).toHaveTextContent('3,703');
+    await rerender({ cycles: [...refreshed, cycle(8)] });
+    expect(within(tokenChart()).getAllByRole('button')[0]).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('status')).toHaveTextContent('3,703');
+    await rerender({ cycles: [...refreshed, cycle(8), cycle(9)] });
+    expect(screen.getByRole('status')).toHaveTextContent('11,106');
+    expect(within(tokenChart()).getAllByRole('button').at(-1)).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('keeps the complete history detail available below the rolling charts', () => {
+    render(CycleUsageDetail, {
+      title: 'Weekly API Value',
+      cycles: Array.from({ length: 14 }, (_, index) => cycle(index + 1)).reverse(),
+      top: 0,
+      onEnter: () => {},
+      onLeave: () => {},
+    });
+    expect(within(quotaChart()).getAllByRole('button')).toHaveLength(6);
+    expect(screen.getAllByRole('button', { name: 'Show cycle model usage' })).toHaveLength(14);
   });
 
   it('keeps observed percentage and token totals unchanged when pricing display switches', async () => {
@@ -170,7 +250,7 @@ describe('actual reset cycle charts', () => {
     const stop = installLocalization();
     try {
       expect(screen.getByRole('group', { name: '重置周期图' })).toBeVisible();
-      expect(screen.getByRole('button', { name: '更早周期' })).toBeVisible();
+      expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
       const point = within(screen.getByRole('group', { name: '观测额度消耗（%）' })).getByRole(
         'button',
       );

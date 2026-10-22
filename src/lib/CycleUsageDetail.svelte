@@ -330,8 +330,7 @@
       margin-top: 5px;
       overflow: auto;
       overscroll-behavior: contain;
-      border: 1px solid var(--separator);
-      border-radius: 6px;
+      border-top: 1px solid var(--separator);
       font-size: 10px;
       line-height: 14px;
     }

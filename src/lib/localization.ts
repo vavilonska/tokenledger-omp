@@ -252,9 +252,6 @@ const zhHans: Record<string, string> = {
   'From your Grok logs (estimated)': '来自 Grok 日志（估算）',
   'Actual reset cycles': '实际重置周期',
   'Reset cycle charts': '重置周期图',
-  'Chart cycle range': '图表周期范围',
-  'Older cycles': '更早周期',
-  'Newer cycles': '更新周期',
   'Selected cycle': '选中周期',
   'Observed quota consumption (%)': '观测额度消耗（%）',
   'Cycle token usage': '周期 Token 用量',
@@ -277,8 +274,8 @@ const zhHans: Record<string, string> = {
   'Cycle cost must be greater than zero.': '周期金额必须大于零。',
   Unknown: '未知',
   'Cache rate': '缓存命中率',
-  'Cache rate is cache-read tokens divided by all prompt tokens; missing buckets or no prompt tokens are unknown.':
-    '缓存命中率为缓存读取 Token / 全部输入 Token；缺少统计字段或没有输入 Token 时显示未知。',
+  'Cache read tokens / all prompt tokens; output excluded. Unknown if prompt usage is incomplete.':
+    '缓存读取 Token / 全部输入 Token，不含输出；输入用量不完整时显示未知。',
   Unattributed: '未归属',
   'Model usage is unknown for this cycle.': '此周期的模型用量未知。',
   'No model usage in this cycle.': '此周期没有模型用量。',

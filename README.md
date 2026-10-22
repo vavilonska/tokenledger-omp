@@ -16,6 +16,8 @@
 
 基于 [OpenQuota](https://github.com/deviffyy/OpenQuota) 的独立桌面用量面板。集中查看 AI 编程工具的额度、重置时间、Token 用量和费用估算。公开版保留 **Oh My Pi 与 Codex 同账号用量合并、Codex 周额度估算和重置周期历史**，不包含私有业务适配器。
 
+**0.5.10 源码更新**：周期双图固定显示最近 6 个真实周期，按时间升序、最新在右；不足 6 个不补点，取消分页，完整旧历史仍可在下方滚动查看。选最新时跟随新周期，选旧周期时刷新保留，滑出窗口后回最新；左右键与 Home／End 仅在可见窗口内联动两图。Cache rate 的汇总／模型／来源明细统一次色、紧凑字号与弱分隔，最多 1 位小数并去掉 `.0`，计算口径放在悬浮 title，不再常驻占行。未知、零分母及 partial 语义不变。2026-10-23 定向检查与真实组件无头浏览器烟测通过，覆盖明暗／compact、三处悬浮和 320px 窄屏滚动，证据范围见[发布记录](docs/releasing.md)。本次仍仅交付源码，不新建 tag／Release、不安装公开版；已发布下载仍为 0.5.8。
+
 **0.5.9 源码更新**：最近 30 天改为包含今天的 30 个本地自然日，独立历史周期不截断；分享卡使用所选周期自己的金额、credits 标签及完整额度估算。修复 Claude 完整快照被旧副本覆盖、主消息与 advisor 身份碰撞；有源日志可重解析恢复，无源缺证据不猜费用。新增明确 OpenAI 30m／12h 写缓存计价，未知或冲突 Codex 速度保持 partial；补齐 GPT-5.4／5.5 及 Pro 长上下文价，修正 Sonnet 5.5 缓存读取和 Cursor Grok 4.5 Fast 输出价。GPT-5.4／5.5 API Fast 超过 272K 无官方报价，保留用量但不猜金额；购买 credits 仍独立计价。本次仅推送源码，不新建 tag／Release 或公开安装包，现有下载仍为 0.5.8。
 
 **0.5.8 补丁（已发布）**：OMP 的稀疏 `orchestration` object 沿既有桶规则处理：缺省 input／cacheRead 为 0，合法的仅 input/output、仅 output 或空 object 不再让缓存率误变未知；显式非法桶及顶层缺桶仍未知。parser 5→6 使有源日志重扫，持久账本版本不变；输出不计分母，编排用量不重复合计。此修复与旧 snapshot 暂无新字段的显示状态分开，不改变主题、其他提供商或自动刷新策略。
@@ -71,7 +73,7 @@ corepack pnpm build:installer
 
 **0.5.6** 在主 Codex 账号周剩余额度大于 0%、不超过 3% 时，将刷新间隔从 300 秒缩短为 15 秒；归零后恢复普通频率，新周重新跟踪。首次观察周额度归零后，同周期后续 Token 消费按额外额度处理，其费用不计入订阅周期消费和额度外推，总消费账本仍保留 Token、请求和费用证据；不新增 UI 标记。既有价格和明确 memory 用途排除规则不变。刷新倒计时按后端精确 deadline 逐秒更新。
 
-本版还在现有周期历史浮层加入上下两张共享周期横轴的图：上图显示服务器观察到的额度消耗百分比，下图显示周期完整 Token 用量；支持历史范围导航，保留明细、中文和主题，未知值不补零。复用现有桌面界面，不增加独立 WebUI 服务、服务器或依赖。
+现有周期历史浮层的上下两图共享周期横轴：上图显示服务器观察到的额度消耗百分比，下图显示周期完整 Token 用量；当前源码只显示最近 6 周期、无分页，完整历史仍在下方保留。保留中文和主题，未知值不补零；不增加独立 WebUI 服务、服务器或依赖。
 
 当前已发布 Windows x64 NSIS 包见 [v0.5.8](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.8)：`TokenLedger-OMP_0.5.8_x64-setup.exe`，10,446,920 bytes，SHA-256 为 `7cf53c744660d8d679271badc61f75981ca16b73e5cdbd706eff22b52f35525d`，附 `.sha256`。旧版本 tag 和资产保留。公开版未安装或验证原生 UI，完整范围与首次失败／定向修复见[发布记录](docs/releasing.md)。
 
@@ -90,6 +92,8 @@ corepack pnpm build:installer
 ## English
 
 An independent desktop usage dashboard based on [OpenQuota](https://github.com/deviffyy/OpenQuota), showing AI coding quotas, resets, tokens and estimated costs. This public edition preserves **same-account Oh My Pi/Codex usage merging, Codex weekly quota estimates and reset-cycle history**, without private business adapters.
+
+**0.5.10 source update:** The linked charts always show the latest six real cycles, oldest to newest, without pagination or fabricated points; the complete older history remains scrollable below. Latest selection follows new cycles, while older selections survive refresh until leaving the visible window. Arrow keys and Home/End stay within that window. Cache-rate summaries, models and source variants share muted typography, compact density and lightweight separators, with at most one decimal and no trailing `.0`; one hover title replaces permanent calculation copy. Unknown, zero-denominator and partial semantics are unchanged. Targeted checks and isolated real-component headless browser acceptance passed on 2026-10-23, including themes, three period hovers and 320px scrolling; see the [release record](docs/releasing.md) for scope. This remains a source-only delivery, without a new tag/Release or public-edition installation; the published download remains 0.5.8.
 
 **0.5.9 source update:** Last 30 Days contains exactly 30 local calendar dates including today, without truncating independent historical cycles. Share cards use the selected cycle's own API/credit values, labels and complete allowance estimate. Claude retention preserves fuller snapshots and separates advisor identities; available logs can repair old collisions, but missing evidence is not invented. Explicit OpenAI 30m/12h cache writes are priced separately from Claude 1h writes; unknown/conflicting Codex speed stays partial. The supplement corrects GPT-5.4/5.5 and Pro long-context prices, Sonnet 5.5 cache reads and Cursor Grok 4.5 Fast output. GPT-5.4/5.5 API Fast above 272K has no published rate and remains unpriced; purchased credits retain their independent rate card. This delivery updates source only, without a new tag, Release or public installer; the existing download remains 0.5.8.
 
@@ -132,7 +136,7 @@ Requires Node.js 22+, pnpm 11.11.0, stable Rust and [Tauri 2 prerequisites](http
 
 **0.5.6** shortens the primary Codex account's refresh interval from 300 to 15 seconds while weekly remaining quota is above 0% and at most 3%. Ordinary frequency resumes at zero; a new week restores quota tracking. After the first observed weekly zero, later consumption in that cycle is treated as extra allowance: its cost is excluded from subscription-cycle spend and allowance extrapolation, while the total ledger retains tokens, requests and cost evidence. No new UI badge is added. Existing pricing and explicit memory-purpose exclusions are unchanged. The countdown updates every second from the backend's precise deadline.
 
-The existing cycle-history popup also gains two stacked charts sharing the cycle axis: server-observed quota-used percentage above and complete cycle tokens below. Historical range navigation preserves details, Chinese labels and themes; unknown values remain gaps rather than zero. This uses the existing desktop UI, without a separate WebUI service, server or dependency.
+The cycle-history popup has two stacked charts sharing the cycle axis: server-observed quota-used percentage above and complete cycle tokens below. Current source shows only the latest six cycles without pagination, while retaining the full history below, Chinese labels and themes. Unknown values remain gaps rather than zero. No separate WebUI service, server or dependency is added.
 
 The current published [v0.5.8 Windows x64 NSIS package](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.8), `TokenLedger-OMP_0.5.8_x64-setup.exe`, is 10,446,920 bytes with SHA-256 `7cf53c744660d8d679271badc61f75981ca16b73e5cdbd706eff22b52f35525d` and an adjacent `.sha256`. Previous tags and assets remain available. This public edition was not installed or exercised in the native host; see the [release record](docs/releasing.md) for scope, original failures and targeted repairs.
 

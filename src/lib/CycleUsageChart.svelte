@@ -5,19 +5,21 @@
   import type { ResetCycleUsage } from './types';
 
   let { cycles }: { cycles: ResetCycleUsage[] } = $props();
-  const pageSize = 6;
   const ordered = $derived(
     [...cycles].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt)),
   );
-  // Offset from the newest page keeps newly received cycles visible by default.
-  let pageOffset = $state(0);
+  // A null selection follows the newest cycle as the rolling window advances.
   let selectedStart = $state<string | null>(null);
-  const pageCount = $derived(Math.max(1, Math.ceil(ordered.length / pageSize)));
-  const page = $derived(pageCount - 1 - Math.min(pageOffset, pageCount - 1));
-  const visible = $derived(ordered.slice(page * pageSize, (page + 1) * pageSize));
+  const visible = $derived(ordered.slice(-6));
   const selected = $derived(
     visible.find((cycle) => cycle.startedAt === selectedStart) ?? visible.at(-1),
   );
+
+  $effect(() => {
+    if (selectedStart !== null && !visible.some((cycle) => cycle.startedAt === selectedStart)) {
+      selectedStart = null;
+    }
+  });
   const quotaMax = $derived(
     Math.max(100, ...visible.map((cycle) => cycle.usage.quotaUsedPercent ?? 0)),
   );
@@ -63,25 +65,23 @@
       : (Math.max(0, amount) / (metric === 'quota' ? quotaMax : tokenMax)) * 100;
   }
 
-  function movePage(direction: number) {
-    pageOffset = Math.max(0, Math.min(pageCount - 1, pageOffset + direction));
-    selectedStart = null;
+  function select(cycle: ResetCycleUsage) {
+    selectedStart = cycle.startedAt === visible.at(-1)?.startedAt ? null : cycle.startedAt;
   }
 
   function navigate(event: KeyboardEvent, cycle: ResetCycleUsage, metric: Metric) {
-    let index = ordered.findIndex((entry) => entry.startedAt === cycle.startedAt);
+    let index = visible.findIndex((entry) => entry.startedAt === cycle.startedAt);
     if (event.key === 'ArrowLeft') index -= 1;
     else if (event.key === 'ArrowRight') index += 1;
     else if (event.key === 'Home') index = 0;
-    else if (event.key === 'End') index = ordered.length - 1;
+    else if (event.key === 'End') index = visible.length - 1;
     else return;
     event.preventDefault();
-    index = Math.max(0, Math.min(ordered.length - 1, index));
-    selectedStart = ordered[index].startedAt;
-    pageOffset = pageCount - 1 - Math.floor(index / pageSize);
+    index = Math.max(0, Math.min(visible.length - 1, index));
+    select(visible[index]);
     // The event target is only available synchronously; retain the chart across the render.
     const group = (event.currentTarget as HTMLElement).closest('.cycle-charts');
-    const start = selectedStart;
+    const start = visible[index].startedAt;
     tick().then(() => {
       group
         ?.querySelector<HTMLButtonElement>(`[data-metric="${metric}"][data-start="${start}"]`)
@@ -92,21 +92,6 @@
 
 {#if ordered.length}
   <div class="cycle-charts" role="group" aria-label="Reset cycle charts">
-    <nav aria-label="Chart cycle range">
-      <button
-        type="button"
-        aria-label="Older cycles"
-        disabled={page === 0}
-        onclick={() => movePage(1)}>‹</button
-      >
-      <span>{page * pageSize + 1}–{page * pageSize + visible.length} / {ordered.length}</span>
-      <button
-        type="button"
-        aria-label="Newer cycles"
-        disabled={page === pageCount - 1}
-        onclick={() => movePage(-1)}>›</button
-      >
-    </nav>
     {#each metrics as metric (metric)}
       <div class="cycle-chart" role="group" aria-label={label(metric)}>
         <strong>{label(metric)}</strong>
@@ -124,16 +109,15 @@
               <button
                 type="button"
                 class:chart-selected={selected?.startedAt === cycle.startedAt}
-                class:chart-current={!cycle.endedAt}
                 class:chart-unknown={unknown}
                 aria-label={`${fullRange(cycle)} · ${label(metric)}: ${value(cycle, metric)}`}
                 aria-pressed={selected?.startedAt === cycle.startedAt}
                 title={`${fullRange(cycle)} · ${label(metric)}: ${value(cycle, metric)}`}
                 data-metric={metric}
                 data-start={cycle.startedAt}
-                onmouseenter={() => (selectedStart = cycle.startedAt)}
-                onfocus={() => (selectedStart = cycle.startedAt)}
-                onclick={() => (selectedStart = cycle.startedAt)}
+                onmouseenter={() => select(cycle)}
+                onfocus={() => select(cycle)}
+                onclick={() => select(cycle)}
                 onkeydown={(event) => navigate(event, cycle, metric)}
                 ><span class="chart-bar" style={`height:${height(cycle, metric)}%`}
                 ></span>{#if unknown}<span class="chart-missing" aria-hidden="true">?</span
@@ -182,28 +166,6 @@
     margin: 8px 0;
     font-size: 10px;
     color: var(--text);
-  }
-  nav {
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 8px;
-    color: var(--secondary);
-    font-variant-numeric: tabular-nums;
-  }
-  nav button {
-    width: 28px;
-    height: 26px;
-    border: 1px solid var(--separator);
-    border-radius: 5px;
-    background: var(--background);
-    color: var(--text);
-    font-size: 18px;
-    cursor: pointer;
-  }
-  nav button:disabled {
-    opacity: 0.35;
-    cursor: default;
   }
   button:focus-visible {
     outline: 2px solid var(--meter-fill);
@@ -267,10 +229,6 @@
   .chart-selected .chart-bar {
     background: var(--meter-fill);
   }
-  .chart-current .chart-bar {
-    outline: 1px dashed var(--text);
-    outline-offset: -1px;
-  }
   .chart-unknown .chart-bar {
     min-height: 0;
     background: transparent;
@@ -303,9 +261,8 @@
     font-weight: 650;
   }
   .chart-reading {
-    padding: 7px;
-    border: 1px solid var(--separator);
-    border-radius: 6px;
+    padding: 7px 0 0;
+    border-top: 1px solid var(--separator);
     font-variant-numeric: tabular-nums;
   }
   .chart-reading > div {
