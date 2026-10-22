@@ -94,7 +94,8 @@ impl ParsedMessage {
                     .input
                     .saturating_add(tokens.breakdown.cache_read)
                     .saturating_add(tokens.breakdown.cache_write_5m)
-                    .saturating_add(tokens.breakdown.cache_write_1h),
+                    .saturating_add(tokens.breakdown.cache_write_1h)
+                    .saturating_add(tokens.breakdown.cache_write_12h),
             )),
             cost,
             cost_provenance,
@@ -163,6 +164,10 @@ impl ParsedTokens {
                     .breakdown
                     .cache_write_1h
                     .saturating_add(other.breakdown.cache_write_1h),
+                cache_write_12h: self
+                    .breakdown
+                    .cache_write_12h
+                    .saturating_add(other.breakdown.cache_write_12h),
                 cache_read: self
                     .breakdown
                     .cache_read
@@ -432,6 +437,44 @@ fn non_empty(value: impl AsRef<str>) -> Option<String> {
 #[cfg(test)]
 mod retained_speed_regressions {
     use super::*;
+
+    #[test]
+    fn retained_twelve_hour_writes_survive_part_merging_and_pricing() {
+        let parsed = |writes| {
+            serde_json::from_value::<ParsedTokens>(serde_json::json!({
+                "breakdown": {"input": 0, "cache_write_5m": 0, "cache_write_1h": 0,
+                    "cache_write_12h": writes, "cache_read": 0, "output": 0},
+                "total": writes, "cache_usage": [0, writes], "cache_complete": true
+            }))
+            .unwrap()
+        };
+        let merged = parsed(400_000).saturating_add(parsed(600_000));
+        let message = ParsedMessage {
+            message_id: "m".into(),
+            session_id: "s".into(),
+            timestamp: "2026-07-10T10:00:00Z".parse().unwrap(),
+            provider_id: "opencode".into(),
+            model: "gpt-6.1-sol".into(),
+            tokens: Some(merged),
+            cost: StoredCost::Missing,
+        };
+        let usage = message.into_usage(&[], &crate::pricing::test_bundled_pricing());
+        assert_eq!(usage.tokens, 1_000_000);
+        assert_eq!(usage.cache_usage, Some((0, 1_000_000)));
+        assert_eq!(usage.cost, Some(10.0));
+    }
+
+    #[test]
+    fn undifferentiated_source_writes_do_not_invent_a_twelve_hour_ttl() {
+        let parsed = parse_tokens(&serde_json::json!({
+            "input": 10, "output": 20, "reasoning": 0,
+            "cache": {"read": 30, "write": 40}
+        }))
+        .unwrap();
+        assert_eq!(parsed.breakdown.cache_write_5m, 40);
+        assert_eq!(parsed.breakdown.cache_write_12h, 0);
+        assert_eq!(parsed.total, 100);
+    }
 
     #[test]
     fn nested_legacy_speed_facts_reprice_but_recorded_cost_remains_authoritative() {

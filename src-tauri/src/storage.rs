@@ -291,6 +291,169 @@ impl Storage {
         Ok(())
     }
 
+    /// Reconcile source-attested legacy keys and their evidence in the same transaction as writes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_usage_events_with_reconciliation<T>(
+        &self,
+        provider_id: &str,
+        identity_key: &str,
+        schema_version: u8,
+        events: &[T],
+        event_key: impl Fn(&T) -> Result<String, serde_json::Error>,
+        ownership_key: impl Fn(&T) -> Result<String, serde_json::Error>,
+        legacy_key: impl Fn(&T) -> Result<Option<String>, serde_json::Error>,
+        reclassify: impl Fn(&T, &T) -> Option<T>,
+        merge: impl Fn(&T, &T) -> T,
+    ) -> Result<(), StorageError>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        {
+            let mut lookup = transaction.prepare(
+                "SELECT identity_key, event_json FROM local_usage_events
+                 WHERE provider_id = ?1 AND event_key = ?2",
+            )?;
+            let mut insert = transaction.prepare(
+                "INSERT INTO local_usage_events
+                   (provider_id, event_key, identity_key, schema_version, event_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(provider_id, event_key) DO UPDATE SET
+                   schema_version = excluded.schema_version, event_json = excluded.event_json
+                 WHERE local_usage_events.identity_key = excluded.identity_key
+                   AND (local_usage_events.schema_version != excluded.schema_version
+                     OR local_usage_events.event_json != excluded.event_json)",
+            )?;
+            // Move children first: an old advisor may occupy the parent's key.
+            // Every read, ownership check, transfer, deletion and parent write rolls back together.
+            let mut reconciled = HashMap::new();
+            let mut source_index: Option<HashMap<String, Vec<&T>>> = None;
+            for event in events {
+                let Some(old_key) = legacy_key(event)? else {
+                    continue;
+                };
+                let key = event_key(event)?;
+                if key == old_key {
+                    continue;
+                }
+                let anchor = ownership_key(event)?;
+                let prior: Option<(String, String)> = lookup
+                    .query_row(params![provider_id, old_key], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .optional()?;
+                if prior
+                    .as_ref()
+                    .is_some_and(|(owner, _)| owner != identity_key)
+                {
+                    continue;
+                }
+                let anchor_owner: Option<String> = transaction.query_row(
+                    "SELECT identity_key FROM local_usage_events WHERE provider_id=?1 AND event_key=?2",
+                    params![provider_id, anchor], |row| row.get(0),
+                ).optional()?;
+                if anchor_owner
+                    .as_deref()
+                    .is_some_and(|owner| owner != identity_key)
+                {
+                    continue;
+                }
+                let moved = if let Some((_, json)) = prior {
+                    reclassify(&serde_json::from_str(&json)?, event)
+                } else {
+                    // A crash after parser-cache save can leave recoverable facts outside the journal.
+                    // Index that same visible batch once, and apply the identical proof/ownership gate.
+                    if source_index.is_none() {
+                        let mut index = HashMap::<String, Vec<&T>>::new();
+                        for source in events {
+                            index.entry(event_key(source)?).or_default().push(source);
+                        }
+                        source_index = Some(index);
+                    }
+                    source_index
+                        .as_ref()
+                        .and_then(|index| index.get(&old_key))
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|source| reclassify(source, event))
+                        .reduce(|left, right| merge(&left, &right))
+                };
+                let Some(moved) = moved else { continue };
+                let target: Option<(String, String)> = lookup
+                    .query_row(params![provider_id, key], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .optional()?;
+                let moved = if let Some((owner, json)) = target {
+                    if owner != identity_key {
+                        continue;
+                    }
+                    merge(&serde_json::from_str(&json)?, &moved)
+                } else {
+                    moved
+                };
+                insert.execute(params![
+                    provider_id,
+                    key,
+                    identity_key,
+                    schema_version,
+                    serde_json::to_string(&moved)?
+                ])?;
+                transaction.execute(
+                    "DELETE FROM local_usage_events WHERE provider_id=?1 AND event_key=?2 AND identity_key=?3",
+                    params![provider_id, old_key, identity_key],
+                )?;
+                reconciled.insert(old_key, event);
+            }
+            for event in events {
+                let key = event_key(event)?;
+                if reconciled
+                    .get(&key)
+                    .is_some_and(|source| reclassify(event, source).is_some())
+                {
+                    continue; // A recovered legacy cache cannot resurrect a consumed advisor key.
+                }
+                let anchor = ownership_key(event)?;
+                if anchor != key {
+                    let owner: Option<String> = transaction
+                        .query_row(
+                            "SELECT identity_key FROM local_usage_events
+                             WHERE provider_id = ?1 AND event_key = ?2",
+                            params![provider_id, anchor],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if owner.as_deref().is_some_and(|owner| owner != identity_key) {
+                        continue;
+                    }
+                }
+                let prior: Option<(String, String)> = lookup
+                    .query_row(params![provider_id, key], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .optional()?;
+                let merged = if let Some((owner, json)) = prior {
+                    if owner != identity_key {
+                        continue;
+                    }
+                    Some(merge(&serde_json::from_str(&json)?, event))
+                } else {
+                    None
+                };
+                insert.execute(params![
+                    provider_id,
+                    key,
+                    identity_key,
+                    schema_version,
+                    serde_json::to_string(merged.as_ref().unwrap_or(event))?
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn load_usage_events<T: serde::de::DeserializeOwned>(
         &self,
         provider_id: &str,
@@ -751,6 +914,103 @@ mod tests {
         QuotaFormat, QuotaWindow, ResetCycleUsage, UsageHistory, UsagePeriod,
     };
     use crate::providers::CacheIdentity;
+
+    #[test]
+    fn reconciliation_rolls_back_rekey_if_a_later_write_fails() {
+        use serde_json::{json, Value};
+        let dir = tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("usage.db")).unwrap();
+        let old = json!({"id":"parent","tokens":12});
+        let key = |event: &Value| Ok(event["id"].as_str().unwrap().to_owned());
+        storage
+            .record_usage_events("claude", "a", 1, std::slice::from_ref(&old), key)
+            .unwrap();
+        let child = json!({"id":"child","old":"parent","tokens":12});
+        let invalid = json!({"id":"bad"});
+        let result = storage.record_usage_events_with_reconciliation(
+            "claude",
+            "a",
+            1,
+            &[child, invalid],
+            |event| {
+                if event["id"] == "bad" {
+                    serde_json::from_str::<String>("{")
+                } else {
+                    key(event)
+                }
+            },
+            key,
+            |event| Ok(event["old"].as_str().map(str::to_owned)),
+            |old, new| (old["tokens"] == new["tokens"]).then(|| new.clone()),
+            |_, new| new.clone(),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            storage
+                .load_usage_events::<Value>("claude", "a", 1)
+                .unwrap(),
+            vec![old]
+        );
+    }
+
+    #[test]
+    fn completeness_merge_is_opt_in_and_child_ownership_cannot_cross_accounts() {
+        let directory = tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+        let key = |event: &serde_json::Value| Ok(event["id"].as_str().unwrap().to_owned());
+        let anchor = |event: &serde_json::Value| Ok(event["parent"].as_str().unwrap().to_owned());
+        let merge = |old: &serde_json::Value, new: &serde_json::Value| {
+            if old["tokens"].as_u64() >= new["tokens"].as_u64() {
+                old.clone()
+            } else {
+                new.clone()
+            }
+        };
+        let full = serde_json::json!({"id":"p","parent":"p","tokens":200,"cost":2.0});
+        let stale = serde_json::json!({"id":"p","parent":"p","tokens":110,"cost":0.1});
+        let child = serde_json::json!({"id":"c","parent":"p","tokens":12,"cost":0.000012});
+        storage
+            .record_usage_events("claude", "a", 1, std::slice::from_ref(&full), key)
+            .unwrap();
+        storage
+            .record_usage_events_with_reconciliation(
+                "claude",
+                "a",
+                1,
+                &[stale],
+                key,
+                anchor,
+                |_| Ok(None),
+                |_, _| None,
+                merge,
+            )
+            .unwrap();
+        storage
+            .record_usage_events_with_reconciliation(
+                "claude",
+                "b",
+                1,
+                &[child],
+                key,
+                anchor,
+                |_| Ok(None),
+                |_, _| None,
+                merge,
+            )
+            .unwrap();
+        let retained: Vec<serde_json::Value> = storage.load_usage_events("claude", "a", 1).unwrap();
+        assert_eq!(retained, vec![full]);
+        assert!(storage
+            .load_usage_events::<serde_json::Value>("claude", "b", 1)
+            .unwrap()
+            .is_empty());
+        let corrected = serde_json::json!({"id":"p","parent":"p","tokens":200,"cost":0.5});
+        storage
+            .record_usage_events("claude", "a", 1, std::slice::from_ref(&corrected), key)
+            .unwrap();
+        let repriced: Vec<serde_json::Value> = storage.load_usage_events("claude", "a", 1).unwrap();
+        assert_eq!(repriced, vec![corrected]);
+    }
 
     #[test]
     fn snapshot_round_trip_contains_no_credentials() {

@@ -1,5 +1,60 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.9 计价与持久账本修复（源码交付）
+
+四处应用版本更新为 0.5.9；保留独立产品、应用标识、数据库与凭据边界，不引入私有适配器。
+本次推送公开 main 源码，不新建 tag／Release 或公开安装包，也不在本机安装公开版；
+现有 v0.5.8 及其发布资产保持不变。
+
+- 最近 30 天为包含今天的 30 个本地自然日；会话及历史周周期按独立区间完整汇总。
+- 分享卡与普通界面共用周期选择和 credits 标签，缺周期不借月金额；
+  完整额度沿用既有 quota 显示，partial 不外推总额度。
+- Claude 在持久化前保留完整快照。速度证据保留原始完整度，较小快照的精确费用
+  不用于较大的 token 总量；同等级矛盾保留 partial，缓存证据与自己的 token 桶绑定。
+- message-ID、仅 requestId、全匿名的 advisor 均使用独立稳定身份。
+  已有源证据支持的旧键在同事务中迁移，包括仅存在于可恢复解析缓存中的旧事实，
+  不重复入账、不改变首次账号归属。删源且缺角色证据时保留已有事实，不补造父调用。
+  其他 provider 的普通覆盖与重新计价不受 Claude 专用合并策略影响。
+- 明确的 OpenAI 30m／12h 写缓存与普通输入、缓存读取互斥计数；
+  12h 按输入价 2.5 倍，Claude 1h 仍为 2 倍。购买 Codex credits 的写桶按普通输入价，
+  不叠加 API 写入附加价或长上下文价。
+- Codex 显式未知／冲突速度保留 tokens 并标记未计价。解析缓存版本为 Codex 9、
+  OMP 7、Claude 6，有源日志重解析；持久事实 schema 保持 1。
+- 2026-10-22 补充表补齐 GPT-5.4／5.5 及 Pro 标准长上下文价，
+  Sonnet 5.5 缓存读取为 $0.10/MTok，Cursor Grok 4.5 Fast 输出为 $18/MTok。
+  GPT-5.4／5.5 API Fast 超过 272K 无官方报价，旧目录 Fast 别名也不能绕过未计价边界；
+  购买 credits 仍按独立价卡估算。
+
+官方依据：[OpenAI API](https://developers.openai.com/api/docs/pricing)、
+[缓存 TTL](https://developers.openai.com/api/docs/guides/prompt-caching)、
+[Codex credits](https://learn.chatgpt.com/docs/pricing)、
+[Claude](https://platform.claude.com/docs/en/about-claude/pricing)、
+[Cursor](https://cursor.com/docs/models-and-pricing)。
+Grok CLI 的 completion／reasoning 日志映射缺少已安装生产者及对应版本合同，
+未用 API 文档或相互矛盾的第三方说明猜测性改动。
+
+前端使用实际 MetricRenderer 与分享 Canvas 的独立无头浏览器验收，共 14 个 API／credits
+场景，覆盖完整、null、缺失、未知、partial，以及有完整额度和 partial 携带 limit 的周期。
+定向 share／cost 回归、Svelte 检查、相关 ESLint／Prettier 与最终 Vite 构建通过。
+两版的共同显示证据共享适用，两库回归与构建分别执行；不将这些证据外推为公开原生安装验收。
+去敏证据保留于本地 `.local/frontend-acceptance-20261022/`，临时页面与进程已清理。
+
+后端使用 Windows GNU target、四个 Cargo jobs，最终 locked all-target Clippy
+（warnings denied）通过；公开版完整 Rust 套件 689 项通过、0 失败。独立只读审查的
+账本迁移与合并发现已闭合，运行证据另由回归及生产入口烟测取得。
+
+两版分别运行非测试 CLI，直接调用实际生产模块，使用隔离合成日志与 SQLite：
+Codex 和 OMP 的 12,000-token 混合 TTL 输入分别得到 API $0.0299、credits 等值 $0.0164；
+本地 30 天起点前一秒排除，未知速度保留 tokens 且金额 null／partial；
+Claude 200／110-token 副本保留 200／$0.0002，
+request-only 和匿名 advisor 旧身份迁移保留 162／$1.000012、两个事实及旧 Fast 证据。
+重扫、删源重启结果不变，两条 CLI 命令均退出 0。
+临时 example／runner 已删除，去敏 DTO 与命令收据仅留本地
+`.local/backend-acceptance-20261022/`，不提交或公开上传。
+此证据覆盖生产解析／账本模块，不代表公开版原生宿主、真实账号网络或安装验收。
+
+两版版本检查及四项前后端契约检查通过；未为验收修改依赖、全局环境、登录或真实账号数据库。
+
 ## 0.5.8 稀疏 orchestration 缓存桶补丁（已发布）
 
 仅修正 OMP cache rate 对稀疏 `orchestration` object 的处理。缓存完整性直接复用既有

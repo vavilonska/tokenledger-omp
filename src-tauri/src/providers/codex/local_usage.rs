@@ -33,6 +33,14 @@ pub struct TokenEvent {
     pub reasoning: u64,
     pub total: u64,
     #[serde(default)]
+    pub cache_write_30m: u64,
+    #[serde(default)]
+    pub cache_write_12h: u64,
+    #[serde(default = "usage_is_complete")]
+    pub usage_complete: bool,
+    #[serde(default = "usage_is_complete")]
+    pub speed_known: bool,
+    #[serde(default)]
     pub cache_usage: Option<(u64, u64)>,
     #[serde(
         default,
@@ -42,6 +50,10 @@ pub struct TokenEvent {
     pub speed: RequestSpeed,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
+}
+
+fn usage_is_complete() -> bool {
+    true
 }
 
 // Codex's legacy boolean was derived directly from its persisted request tier.
@@ -61,8 +73,12 @@ fn deserialize_codex_speed<'de, D: serde::Deserializer<'de>>(
     })
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 8;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 9;
 const CYCLE_CLUSTER_SECONDS: i64 = 5 * 60;
+
+#[cfg(test)]
+#[path = "cache_write_regressions.rs"]
+mod cache_write_regressions;
 
 struct CycleBucket {
     started_at: DateTime<Utc>,
@@ -634,11 +650,11 @@ fn quota_used_percent(quotas: &[QuotaWindow], id: &str) -> Option<f64> {
 
 fn cycle_period(
     accumulator: DailyUsageAccumulator,
-    now: DateTime<Utc>,
+    _now: DateTime<Utc>,
     source_note: &str,
     used_percent: Option<f64>,
 ) -> Option<UsagePeriod> {
-    let mut period = accumulator.build(now, source_note).last_30_days?;
+    let mut period = accumulator.period(source_note)?;
     if let Some(used_percent) = used_percent.filter(|percent| *percent > 0.0) {
         period.quota_used_percent = Some(used_percent);
         period.estimated_limit_usd = period
@@ -757,7 +773,7 @@ fn discover_session_files(homes: &[PathBuf]) -> Vec<PathBuf> {
 
 pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
     let mut current_model: Option<String> = None;
-    let mut current_speed = RequestSpeed::Standard;
+    let mut current_speed = Some(RequestSpeed::Standard);
     let mut previous_totals: Option<RawUsage> = None;
     let mut saw_session_meta = false;
     let mut session_id: Option<String> = None;
@@ -785,7 +801,7 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
 
         if object_type == Some("turn_context") {
             if let Some(tier) = payload.and_then(service_tier) {
-                current_speed = request_speed(tier);
+                current_speed = tier;
             }
             if let Some(model) = model_name(object.get("payload")) {
                 current_model = Some(model);
@@ -843,7 +859,7 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
                 replay_gate = Some(ChildReplayGate::NextTaskStarted);
             }
             if let Some(tier) = service_tier(payload) {
-                current_speed = request_speed(tier);
+                current_speed = tier;
             }
             continue;
         }
@@ -924,33 +940,40 @@ pub fn parse_jsonl(content: &str) -> Vec<TokenEvent> {
             })
         };
         events.push(TokenEvent {
-            cache_usage: usage.cache_complete.then_some((usage.cached, usage.input)),
+            cache_usage: usage.cache_usage.filter(|_| usage.complete),
             source_id,
             timestamp,
             model,
             input: usage.input,
             cached: usage.cached.min(usage.input),
+            cache_write_30m: usage.cache_write_30m,
+            cache_write_12h: usage.cache_write_12h,
+            usage_complete: usage.complete,
+            speed_known: service_tier(payload).unwrap_or(current_speed).is_some(),
             output: usage.output,
             reasoning: usage.reasoning,
             total: usage.total,
             speed: service_tier(payload)
-                .map(request_speed)
-                .unwrap_or(current_speed),
+                .unwrap_or(current_speed)
+                .unwrap_or_default(),
         });
     }
     events
 }
 
-fn request_speed(tier: &str) -> RequestSpeed {
-    match tier {
-        "ultrafast" => RequestSpeed::Ultrafast,
-        "fast" | "priority" => RequestSpeed::Fast,
-        _ => RequestSpeed::Standard,
+fn request_speed(tier: &str) -> Option<RequestSpeed> {
+    match tier.trim() {
+        "ultrafast" => Some(RequestSpeed::Ultrafast),
+        "fast" | "priority" => Some(RequestSpeed::Fast),
+        "default" | "standard" | "auto" => Some(RequestSpeed::Standard),
+        _ => None,
     }
 }
 
-fn service_tier(payload: &Value) -> Option<&str> {
-    [
+// Outer None means absent (legacy compatibility), inner None is explicit unknown/conflict.
+fn service_tier(payload: &Value) -> Option<Option<RequestSpeed>> {
+    let mut result = None;
+    for value in [
         payload
             .get("thread_settings")
             .and_then(|settings| settings.get("service_tier")),
@@ -958,12 +981,14 @@ fn service_tier(payload: &Value) -> Option<&str> {
     ]
     .into_iter()
     .flatten()
-    .find_map(|value| {
-        value
-            .as_str()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    })
+    {
+        let speed = value.as_str().and_then(request_speed);
+        if result.is_some_and(|previous| previous != speed) {
+            return Some(None);
+        }
+        result = Some(speed);
+    }
+    result
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1050,39 +1075,71 @@ fn has_non_null_value(value: Option<&Value>) -> bool {
 struct RawUsage {
     input: u64,
     cached: u64,
+    cache_write_30m: u64,
+    cache_write_12h: u64,
+    complete: bool,
     output: u64,
     reasoning: u64,
     total: u64,
-    cache_complete: bool,
+    cache_usage: Option<(u64, u64)>,
 }
 
 impl RawUsage {
     fn from_value(value: &Value) -> Self {
-        let input = integer(value, &["input_tokens", "prompt_tokens", "input"]);
-        let cached = integer(
-            value,
-            &[
-                "cached_input_tokens",
-                "cache_read_input_tokens",
-                "cached_tokens",
-            ],
-        );
+        let input_evidence = ["input_tokens", "prompt_tokens", "input"]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_u64));
+        let input = input_evidence.unwrap_or(0);
+        let details = value.get("input_tokens_details");
+        let read_values = [
+            value.get("cached_input_tokens"),
+            value.get("cache_read_input_tokens"),
+            value.get("cached_tokens"),
+            details.and_then(|details| details.get("cached_tokens")),
+        ];
+        let mut complete = details.is_none_or(Value::is_object);
+        let mut cached = None;
+        for read in read_values.into_iter().flatten() {
+            match read.as_u64() {
+                Some(read) if cached.is_none_or(|old| old == read) => cached = Some(read),
+                _ => complete = false,
+            }
+        }
+        let cached_evidence = cached;
+        let cached = cached.unwrap_or(0);
+        let writes = details.and_then(|details| details.get("cache_write_tokens"));
+        let ttl = details.and_then(|details| details.get("cache_write_tokens_details"));
+        let short = ttl.and_then(|ttl| ttl.get("ttl_30m_tokens"));
+        let long = ttl.and_then(|ttl| ttl.get("ttl_12h_tokens"));
+        let cache_write_30m = short.and_then(Value::as_u64).unwrap_or(0);
+        let cache_write_12h = long.and_then(Value::as_u64).unwrap_or(0);
+        let write_sum = cache_write_30m.checked_add(cache_write_12h);
+        if writes.is_some() || ttl.is_some() {
+            complete &= cached_evidence.is_some()
+                && ["input_tokens", "prompt_tokens", "input"]
+                    .iter()
+                    .any(|key| value.get(*key).and_then(Value::as_u64).is_some());
+            let known_zero = writes.and_then(Value::as_u64) == Some(0) && ttl.is_none();
+            complete &= known_zero
+                || (write_sum.is_some()
+                    && writes.and_then(Value::as_u64) == write_sum
+                    && short.and_then(Value::as_u64).is_some()
+                    && long.and_then(Value::as_u64).is_some());
+        }
+        complete &= write_sum
+            .and_then(|writes| cached.checked_add(writes))
+            .is_some_and(|cached| cached <= input);
         let output = integer(value, &["output_tokens", "completion_tokens", "output"]);
         let reasoning = integer(value, &["reasoning_output_tokens", "reasoning_tokens"]);
         let reported = integer(value, &["total_tokens"]);
-        let recomputed = input + output + reasoning;
+        let recomputed = input.saturating_add(output).saturating_add(reasoning);
         Self {
-            cache_complete: ["input_tokens", "prompt_tokens", "input"]
-                .iter()
-                .any(|key| value.get(*key).and_then(Value::as_u64).is_some())
-                && [
-                    "cached_input_tokens",
-                    "cache_read_input_tokens",
-                    "cached_tokens",
-                ]
-                .iter()
-                .any(|key| value.get(*key).and_then(Value::as_u64).is_some())
-                && cached <= input,
+            cache_usage: complete
+                .then_some(())
+                .and_then(|_| cached_evidence.zip(input_evidence)),
+            cache_write_30m,
+            cache_write_12h,
+            complete,
             input,
             cached,
             output,
@@ -1099,13 +1156,46 @@ impl RawUsage {
         let previous = previous.unwrap_or(Self {
             input: 0,
             cached: 0,
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            complete: true,
             output: 0,
             reasoning: 0,
             total: 0,
-            cache_complete: true,
+            cache_usage: Some((0, 0)),
         });
         Self {
-            cache_complete: self.cache_complete && previous.cache_complete,
+            cache_write_30m: self
+                .cache_write_30m
+                .saturating_sub(previous.cache_write_30m),
+            cache_write_12h: self
+                .cache_write_12h
+                .saturating_sub(previous.cache_write_12h),
+            complete: self.complete
+                && previous.complete
+                && self.input >= previous.input
+                && self.cached >= previous.cached
+                && self.cache_write_30m >= previous.cache_write_30m
+                && self.cache_write_12h >= previous.cache_write_12h
+                && self.input.saturating_sub(previous.input)
+                    >= self
+                        .cached
+                        .saturating_sub(previous.cached)
+                        .saturating_add(
+                            self.cache_write_30m
+                                .saturating_sub(previous.cache_write_30m),
+                        )
+                        .saturating_add(
+                            self.cache_write_12h
+                                .saturating_sub(previous.cache_write_12h),
+                        ),
+            cache_usage: self.cache_usage.zip(previous.cache_usage).and_then(
+                |((read, prompt), (old_read, old_prompt))| {
+                    let read = read.checked_sub(old_read)?;
+                    let prompt = prompt.checked_sub(old_prompt)?;
+                    (read <= prompt).then_some((read, prompt))
+                },
+            ),
             input: self.input.saturating_sub(previous.input),
             cached: self.cached.saturating_sub(previous.cached),
             output: self.output.saturating_sub(previous.output),
@@ -1203,7 +1293,7 @@ fn aggregate_into(
     cycle_buckets: &mut [CycleBucket],
 ) {
     let today = now.with_timezone(&Local).date_naive();
-    let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
+    let since = today.checked_sub_days(Days::new(29)).unwrap_or(today);
     let mut seen = HashSet::new();
 
     for event in events.iter().filter(|event| event.timestamp <= now) {
@@ -1239,18 +1329,17 @@ fn aggregate_into(
         );
         let date = event.timestamp.with_timezone(&Local).date_naive();
         if let Some(cost) = cost {
-            if date < since {
-                continue;
+            if date >= since {
+                add_priced_event(
+                    accumulator,
+                    date,
+                    &event.model,
+                    event.total,
+                    cost,
+                    "Codex",
+                    event.cache_usage,
+                );
             }
-            add_priced_event(
-                accumulator,
-                date,
-                &event.model,
-                event.total,
-                cost,
-                "Codex",
-                event.cache_usage,
-            );
             if session_start.is_some_and(|start| event.timestamp >= start) {
                 add_priced_event(
                     session_accumulator,
@@ -1327,12 +1416,21 @@ fn add_priced_event(
 }
 
 fn estimate_cost(event: &TokenEvent, pricing: &ModelPricing) -> Option<f64> {
+    if !event.speed_known || !event.usage_complete {
+        return None;
+    }
     estimate_token_cost(
         &event.timestamp,
         &event.model,
         TokenBreakdown {
-            input: event.input.saturating_sub(event.cached),
+            input: event
+                .input
+                .checked_sub(event.cached)?
+                .checked_sub(event.cache_write_30m)?
+                .checked_sub(event.cache_write_12h)?,
             cache_read: event.cached,
+            cache_write_5m: event.cache_write_30m,
+            cache_write_12h: event.cache_write_12h,
             output: event.output,
             speed: event.speed,
             ..TokenBreakdown::default()
@@ -1446,10 +1544,6 @@ fn codex_model_has_no_cache_discount(model: &str) -> bool {
 
 fn codex_long_context_rates(model: &str) -> Option<(f64, f64, f64)> {
     match dated_base_model(model) {
-        "gpt-5.4" => Some((5.0, 22.5, 0.5)),
-        "gpt-5.4-pro" => Some((60.0, 270.0, 60.0)),
-        "gpt-5.5" => Some((10.0, 45.0, 1.0)),
-        "gpt-5.5-pro" => Some((60.0, 270.0, 60.0)),
         "gpt-6-astra" => Some((20.0, 75.0, 2.0)),
         "gpt-5.6-sol" => Some((8.0, 30.0, 0.8)),
         "gpt-5.6-terra" => Some((4.0, 18.0, 0.4)),
@@ -2163,6 +2257,10 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
@@ -2200,6 +2298,10 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
@@ -2228,6 +2330,10 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
@@ -2245,15 +2351,12 @@ mod tests {
 
     #[test]
     fn codex_long_context_rates_start_above_272k_prompt_tokens() {
-        let pricing = ModelPricing::new(
-            PricingSupplement::default(),
-            PricingCatalog {
-                entries: HashMap::from([("gpt-5.4".into(), ModelRates::new(2.5, 15.0))]),
-                retrieved_at: None,
-            },
-            PricingCatalog::default(),
-        );
+        let pricing = test_bundled_pricing();
         let event = |input| TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
@@ -2273,20 +2376,13 @@ mod tests {
     #[test]
     fn codex_long_context_rate_matrix_matches_supported_model_families() {
         for (model, expected) in [
-            ("gpt-5.4", (5.0, 22.5, 0.5)),
-            ("gpt-5.4-pro", (60.0, 270.0, 60.0)),
-            ("gpt-5.5", (10.0, 45.0, 1.0)),
-            ("gpt-5.5-pro", (60.0, 270.0, 60.0)),
             ("gpt-5.6-sol", (8.0, 30.0, 0.8)),
             ("gpt-5.6-terra", (4.0, 18.0, 0.4)),
             ("gpt-5.6-luna", (0.4, 1.8, 0.04)),
         ] {
             assert_eq!(codex_long_context_rates(model), Some(expected), "{model}");
         }
-        assert_eq!(
-            codex_long_context_rates("gpt-5.5-2026-04-23"),
-            Some((10.0, 45.0, 1.0))
-        );
+        assert_eq!(codex_long_context_rates("gpt-5.5-2026-04-23"), None);
         assert_eq!(codex_long_context_rates("gpt-5.3-codex"), None);
     }
 
@@ -2336,6 +2432,10 @@ mod tests {
             PricingCatalog::default(),
         );
         let event = TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
@@ -2362,6 +2462,10 @@ mod tests {
             },
         );
         let event = TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             source_id: None,
             timestamp: Utc::now(),
@@ -2443,6 +2547,10 @@ mod speed_and_cycle_regressions {
         let now = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let start = now - chrono::Duration::hours(5);
         let unknown = TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             timestamp: now - chrono::Duration::hours(1),
             model: "gpt-5.5".into(),
@@ -2724,6 +2832,10 @@ mod model_classification_regressions {
                 assert_eq!(model_has_rates(&now, model, &pricing), known);
                 let history = aggregate(
                     vec![TokenEvent {
+                        cache_write_30m: 0,
+                        cache_write_12h: 0,
+                        usage_complete: true,
+                        speed_known: true,
                         cache_usage: None,
                         timestamp: now,
                         model: model.into(),
@@ -3076,6 +3188,10 @@ mod persistent_cycle_recovery_regressions {
                 restore_cycle_buckets(Vec::new(), &[snapshot(baseline, None)], day(3));
             aggregate_into(
                 &[TokenEvent {
+                    cache_write_30m: 0,
+                    cache_write_12h: 0,
+                    usage_complete: true,
+                    speed_known: true,
                     cache_usage: None,
                     timestamp: day(2),
                     model: "missing-model".into(),
@@ -3164,6 +3280,10 @@ mod cycle_model_usage_regressions {
     #[test]
     fn codex_cycle_models_are_complete_deduplicated_and_price_independent() {
         let event = |timestamp, model: &str, total, source: &str| TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             timestamp,
             model: model.into(),
@@ -3494,6 +3614,10 @@ mod weekly_exhaustion_regressions {
 
     fn event(timestamp: DateTime<Utc>, model: &str) -> TokenEvent {
         TokenEvent {
+            cache_write_30m: 0,
+            cache_write_12h: 0,
+            usage_complete: true,
+            speed_known: true,
             cache_usage: None,
             timestamp,
             model: model.into(),

@@ -498,6 +498,9 @@ pub fn usage_history(
 ) -> UsageHistory {
     let mut accumulator = DailyUsageAccumulator::default();
     for row in rows {
+        if row.date > now {
+            continue;
+        }
         let date = row.date.with_timezone(&chrono::Local).date_naive();
         let tokens = row.tokens.total_tokens();
         match row.estimated_cost_usd {
@@ -681,6 +684,32 @@ mod tests {
     use crate::pricing::{PricingCatalog, PricingSupplement, TokenBreakdown};
 
     use super::*;
+
+    #[test]
+    fn csv_history_uses_calendar_days_and_rejects_future_instants() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        let first = now.with_timezone(&chrono::Local).date_naive()
+            .checked_sub_days(chrono::Days::new(29)).unwrap();
+        let midnight = chrono::Local
+            .from_local_datetime(&first.and_hms_opt(0, 0, 0).unwrap())
+            .single().unwrap().to_utc();
+        let mut csv = "Date,Model,Input (w/o Cache Write),Input (w/ Cache Write),Cache Read,Output Tokens\n".to_owned();
+        for timestamp in [
+            midnight - chrono::Duration::seconds(1),
+            midnight,
+            now,
+            now + chrono::Duration::seconds(1),
+        ] {
+            csv.push_str(&format!("{},gpt-6.1-sol,100,0,0,10\n", timestamp.to_rfc3339()));
+        }
+        let pricing = crate::pricing::test_bundled_pricing();
+        let rows = crate::providers::cursor::csv::parse_usage_csv(&csv, &pricing);
+        let history = usage_history(&rows, now, &pricing);
+        assert_eq!(history.today.unwrap().tokens, 110);
+        assert_eq!(history.last_30_days.unwrap().tokens, 220);
+        assert_eq!(history.daily.len(), 2);
+        assert_eq!(history.daily.last().unwrap().date, first.to_string());
+    }
 
     #[test]
     fn live_mapper_preserves_positive_spend_and_combines_credits() {

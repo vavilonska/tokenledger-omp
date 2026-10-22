@@ -208,6 +208,62 @@ where
     Ok(storage.load_usage_events(provider_id, identity_key, 1)?)
 }
 
+/// Opt-in merge before any durable key can overwrite a fuller log copy.
+/// Other providers keep replacement semantics, including corrected prices.
+#[allow(clippy::too_many_arguments)]
+pub fn retain_log_usage_with_merge<T>(
+    storage: &Storage,
+    provider_id: &str,
+    identity_key: &str,
+    identity_provider: &str,
+    schema_version: u8,
+    oldest_cache_schema: u8,
+    paths: &[std::path::PathBuf],
+    parse: impl Fn(&str) -> Vec<T>,
+    event_key: impl Fn(&T) -> Result<String, serde_json::Error>,
+    ownership_key: impl Fn(&T) -> Result<String, serde_json::Error>,
+    legacy_key: impl Fn(&T) -> Result<Option<String>, serde_json::Error>,
+    reclassify: impl Fn(&T, &T, &[T]) -> Option<T>,
+    merge: impl Fn(&T, &T) -> T,
+) -> Result<Vec<T>, LogCacheError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let mut events = Vec::new();
+    for (path, json) in
+        storage.recoverable_log_events(provider_id, identity_key, identity_provider)?
+    {
+        if path.exists() {
+            continue;
+        }
+        let Ok(cached) = serde_json::from_str::<CachedLogEvents<T>>(&json) else {
+            continue;
+        };
+        if (oldest_cache_schema..=schema_version).contains(&cached.schema_version) {
+            events.extend(cached.events);
+        }
+    }
+    for path in paths {
+        if let Some(parsed) = load_or_parse_log(storage, provider_id, path, schema_version, &parse)?
+        {
+            events.extend(parsed);
+        }
+    }
+    storage.record_usage_events_with_reconciliation(
+        provider_id,
+        identity_key,
+        1,
+        &events,
+        event_key,
+        ownership_key,
+        legacy_key,
+        |existing, incoming| reclassify(existing, incoming, &events),
+        merge,
+    )?;
+    storage.prune_log_events(provider_id, &paths.iter().cloned().collect())?;
+    Ok(storage.load_usage_events(provider_id, identity_key, 1)?)
+}
+
 /// Keeps provider quotas usable when supplementary local history cannot be refreshed. A prior
 /// persisted history is reused when available; otherwise the provider still returns its live data
 /// with an explicit warning instead of failing the entire refresh.

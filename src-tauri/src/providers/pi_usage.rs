@@ -50,6 +50,7 @@ impl PiTokenBreakdown {
             input: self.input,
             cache_write_5m: self.cache_write_5m,
             cache_write_1h: self.cache_write_1h,
+            cache_write_12h: 0,
             cache_read: self.cache_read,
             output: self.output,
             speed: crate::pricing::RequestSpeed::Standard,
@@ -118,7 +119,7 @@ fn scan_directory_into(
     let since = now
         .with_timezone(&Local)
         .date_naive()
-        .checked_sub_days(Days::new(30))
+        .checked_sub_days(Days::new(29))
         .unwrap_or(NaiveDate::MIN);
     Ok(aggregate_into(
         events,
@@ -457,6 +458,7 @@ mod tests {
         assert_eq!(event.carried_cost, Some(0.5));
         assert_eq!(event.tokens.cache_write_5m, 18);
         assert_eq!(event.tokens.cache_write_1h, 12);
+        assert_eq!(event.tokens.pricing_tokens().cache_write_12h, 0);
         assert_eq!(event.reported_total_tokens, 202);
         assert_eq!(
             event.tokens.pricing_tokens().speed,
@@ -512,6 +514,53 @@ mod tests {
             &mut accumulator,
         ));
         assert!(accumulator.build(now(), "From pi").today.is_none());
+    }
+
+    #[test]
+    fn source_scan_keeps_first_calendar_midnight_but_not_the_previous_day() {
+        let today = now().with_timezone(&chrono::Local).date_naive();
+        let first = today.checked_sub_days(chrono::Days::new(29)).unwrap();
+        let midnight = chrono::Local
+            .from_local_datetime(&first.and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .to_utc();
+        let content = [midnight - chrono::Duration::seconds(1), midnight, now()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, timestamp)| {
+                let mut value: serde_json::Value = serde_json::from_str(&line(
+                    &index.to_string(),
+                    "anthropic",
+                    "priced-model",
+                    "0.5",
+                ))
+                .unwrap();
+                value["timestamp"] = serde_json::json!(timestamp.to_rfc3339());
+                value.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("session.jsonl"), content).unwrap();
+        let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+        let mut accumulator = DailyUsageAccumulator::default();
+        assert!(scan_directory_into(
+            &storage,
+            directory.path(),
+            now(),
+            &pricing(),
+            "claude",
+            None,
+            &mut accumulator
+        )
+        .unwrap());
+        let history = accumulator.build(now(), "pi");
+        assert_eq!(history.today.unwrap().tokens, 202);
+        let period = history.last_30_days.unwrap();
+        assert_eq!(period.tokens, 404);
+        assert_eq!(period.estimated_cost_usd, Some(1.0));
+        assert_eq!(history.daily.last().unwrap().date, first.to_string());
     }
 
     #[test]

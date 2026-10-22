@@ -34,6 +34,8 @@ impl PricingSupplement {
                 rates.cache_read_is_explicit = entry.cache_read_per_million.is_some();
                 rates.long_context_threshold_tokens =
                     entry.long_context_threshold_tokens.unwrap_or(200_000);
+                rates.max_priced_prompt_tokens = entry.max_priced_prompt_tokens;
+                rates.fast_max_priced_prompt_tokens = entry.fast_max_priced_prompt_tokens;
                 rates.input_above_200k_per_million = entry.input_above_200k_per_million;
                 rates.output_above_200k_per_million = entry.output_above_200k_per_million;
                 rates.cache_read_above_200k_per_million = entry.cache_read_above_200k_per_million;
@@ -128,6 +130,10 @@ struct SupplementEntry {
     cache_read_per_million: Option<f64>,
     #[serde(default)]
     long_context_threshold_tokens: Option<u64>,
+    #[serde(default)]
+    max_priced_prompt_tokens: Option<u64>,
+    #[serde(default)]
+    fast_max_priced_prompt_tokens: Option<u64>,
     #[serde(default)]
     input_above_200k_per_million: Option<f64>,
     #[serde(default)]

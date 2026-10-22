@@ -163,6 +163,37 @@ mod tests {
     }
 
     #[test]
+    fn explicit_long_context_model_tier_is_not_inferred_from_prompt_size() {
+        let csv =
+            "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens\n\
+2026-08-12T00:00:00Z,claude-4-sonnet,0,300000,0,0\n\
+2026-08-12T00:01:00Z,claude-4-sonnet-1m,0,300000,0,0\n\
+2026-08-12T00:02:00Z,claude-4-sonnet-1m-thinking,0,100000,0,0";
+        let rows = parse_usage_csv(csv, &test_bundled_pricing());
+        for (row, expected) in rows.iter().zip([0.9, 1.8, 0.6]) {
+            assert!(
+                (row.estimated_cost_usd.unwrap() - expected).abs() < 1e-12,
+                "{}",
+                row.model
+            );
+        }
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn csv_cache_write_column_without_ttl_keeps_the_short_bucket() {
+        let csv =
+            "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens\n\
+2026-08-12T00:00:00Z,gpt-6.1-sol,1000000,0,0,0";
+        let row = parse_usage_csv(csv, &test_bundled_pricing()).pop().unwrap();
+        assert_eq!(row.tokens.cache_write_5m, 1_000_000);
+        assert_eq!(row.tokens.cache_write_1h, 0);
+        assert_eq!(row.tokens.cache_write_12h, 0);
+        assert_eq!(row.cache_usage, Some((0, 1_000_000)));
+        assert_eq!(row.estimated_cost_usd, Some(2.5));
+    }
+
+    #[test]
     fn router_model_labels_use_the_routed_models_rates() {
         let csv =
             "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens\n\

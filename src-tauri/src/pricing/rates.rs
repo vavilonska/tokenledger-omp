@@ -10,6 +10,8 @@ pub struct ModelRates {
     pub cache_read_above_200k_per_million: Option<f64>,
     pub cache_read_is_explicit: bool,
     pub long_context_threshold_tokens: u64,
+    pub max_priced_prompt_tokens: Option<u64>,
+    pub fast_max_priced_prompt_tokens: Option<u64>,
     pub fast_multiplier: f64,
     pub ultrafast_multiplier: Option<f64>,
 }
@@ -27,6 +29,8 @@ impl ModelRates {
             cache_read_above_200k_per_million: None,
             cache_read_is_explicit: true,
             long_context_threshold_tokens: 200_000,
+            max_priced_prompt_tokens: None,
+            fast_max_priced_prompt_tokens: None,
             fast_multiplier: 1.0,
             ultrafast_multiplier: None,
         }
@@ -52,6 +56,8 @@ impl ModelRates {
                 .map(|rate| rate * factor),
             cache_read_is_explicit: self.cache_read_is_explicit,
             long_context_threshold_tokens: self.long_context_threshold_tokens,
+            max_priced_prompt_tokens: self.max_priced_prompt_tokens,
+            fast_max_priced_prompt_tokens: self.fast_max_priced_prompt_tokens,
             fast_multiplier: 1.0,
             ultrafast_multiplier: self
                 .ultrafast_multiplier
@@ -64,8 +70,19 @@ impl ModelRates {
         tokens: TokenBreakdown,
         apply_long_context_rates: bool,
     ) -> Option<f64> {
+        let prompt_tokens = tokens.prompt_tokens();
+        if self
+            .max_priced_prompt_tokens
+            .is_some_and(|limit| prompt_tokens > limit)
+            || (tokens.speed == RequestSpeed::Fast
+                && self
+                    .fast_max_priced_prompt_tokens
+                    .is_some_and(|limit| prompt_tokens > limit))
+        {
+            return None;
+        }
         let use_long_context =
-            apply_long_context_rates && tokens.prompt_tokens() > self.long_context_threshold_tokens;
+            apply_long_context_rates && prompt_tokens > self.long_context_threshold_tokens;
         let select = |base: f64, long_context: Option<f64>| {
             if use_long_context {
                 long_context.unwrap_or(base)
@@ -84,10 +101,12 @@ impl ModelRates {
             self.cache_read_above_200k_per_million,
         );
         let cache_write_1h_rate = input_rate * 2.0;
+        let cache_write_12h_rate = input_rate * 2.5;
         let cost = tokens.input as f64 * input_rate
             + tokens.output as f64 * output_rate
             + tokens.cache_write_5m as f64 * cache_write_rate
             + tokens.cache_write_1h as f64 * cache_write_1h_rate
+            + tokens.cache_write_12h as f64 * cache_write_12h_rate
             + tokens.cache_read as f64 * cache_read_rate;
         let multiplier = match tokens.speed {
             RequestSpeed::Standard => 1.0,
@@ -113,6 +132,7 @@ pub struct TokenBreakdown {
     pub input: u64,
     pub cache_write_5m: u64,
     pub cache_write_1h: u64,
+    pub cache_write_12h: u64,
     pub cache_read: u64,
     pub output: u64,
     pub speed: RequestSpeed,
@@ -125,6 +145,8 @@ struct StoredTokenBreakdown {
     input: u64,
     cache_write_5m: u64,
     cache_write_1h: u64,
+    #[serde(default)]
+    cache_write_12h: u64,
     cache_read: u64,
     output: u64,
     #[serde(default)]
@@ -139,6 +161,7 @@ impl From<StoredTokenBreakdown> for TokenBreakdown {
             input: stored.input,
             cache_write_5m: stored.cache_write_5m,
             cache_write_1h: stored.cache_write_1h,
+            cache_write_12h: stored.cache_write_12h,
             cache_read: stored.cache_read,
             output: stored.output,
             speed: stored.speed.unwrap_or(if stored.is_fast {
@@ -155,6 +178,7 @@ impl TokenBreakdown {
         self.input
             .saturating_add(self.cache_write_5m)
             .saturating_add(self.cache_write_1h)
+            .saturating_add(self.cache_write_12h)
             .saturating_add(self.cache_read)
     }
 
@@ -176,11 +200,12 @@ mod tests {
             input: 1_000_000,
             cache_write_5m: 1_000_000,
             cache_write_1h: 1_000_000,
+            cache_write_12h: 1_000_000,
             cache_read: 1_000_000,
             output: 1_000_000,
             speed: RequestSpeed::Standard,
         };
-        assert!((rates.cost_dollars(tokens, true).unwrap() - 28.05).abs() < 0.000_001);
+        assert!((rates.cost_dollars(tokens, true).unwrap() - 35.55).abs() < 0.000_001);
     }
 
     #[test]
@@ -258,6 +283,7 @@ mod tests {
             });
             let fact: Fact = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(fact.tokens.speed, speed);
+            assert_eq!(fact.tokens.cache_write_12h, 0);
             assert_eq!(fact.tokens.total_tokens(), 28);
             for explicit in [
                 RequestSpeed::Standard,
@@ -274,6 +300,50 @@ mod tests {
                     fact.tokens
                 );
             }
+        }
+    }
+
+    #[test]
+    fn twelve_hour_cache_is_distinct_and_selects_long_context_at_every_speed() {
+        let mut rates = ModelRates::new(2.0, 10.0);
+        rates.cache_write_per_million = 2.5;
+        rates.cache_read_per_million = 0.1;
+        rates.long_context_threshold_tokens = 272_000;
+        rates.input_above_200k_per_million = Some(4.0);
+        rates.output_above_200k_per_million = Some(15.0);
+        rates.cache_write_above_200k_per_million = Some(5.0);
+        rates.cache_read_above_200k_per_million = Some(0.2);
+        rates.fast_multiplier = 2.0;
+        rates.ultrafast_multiplier = Some(6.0);
+        for (speed, multiplier) in [
+            (RequestSpeed::Standard, 1.0),
+            (RequestSpeed::Fast, 2.0),
+            (RequestSpeed::Ultrafast, 6.0),
+        ] {
+            let tokens = TokenBreakdown {
+                input: 100_000,
+                cache_write_5m: 50_000,
+                cache_write_1h: 20_000,
+                cache_write_12h: 100_000,
+                cache_read: 2_000,
+                output: 10_000,
+                speed,
+            };
+            assert_eq!(tokens.prompt_tokens(), 272_000);
+            assert_eq!(tokens.total_tokens(), 282_000);
+            assert!((rates.cost_dollars(tokens, true).unwrap() - 1.0052 * multiplier).abs() < 1e-9);
+            let long = TokenBreakdown {
+                cache_write_12h: 100_001,
+                ..tokens
+            };
+            assert_eq!(long.prompt_tokens(), 272_001);
+            assert!((rates.cost_dollars(long, true).unwrap() - 1.96041 * multiplier).abs() < 1e-9);
+            assert!(
+                (rates.cost_dollars(long, false).unwrap() - 1.005205 * multiplier).abs() < 1e-9
+            );
+            let round_trip: TokenBreakdown =
+                serde_json::from_value(serde_json::to_value(long).unwrap()).unwrap();
+            assert_eq!(round_trip, long);
         }
     }
 }

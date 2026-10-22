@@ -114,7 +114,7 @@ mod bundled_resource_tests {
         );
         assert_rates("claude-sonnet-5", [2.0, 2.5, 0.2, 10.0]);
         assert_rates("kimi-k3-code-max", [3.0, 3.0, 0.3, 15.0]);
-        assert_rates("cursor-grok-4.5-high-fast", [4.0, 4.0, 1.0, 12.0]);
+        assert_rates("cursor-grok-4.5-high-fast", [4.0, 4.0, 1.0, 18.0]);
         assert_rates("cursor-grok-4.6-medium", [2.0, 2.0, 0.5, 6.0]);
         assert_rates("grok-4.6-fast-high", [4.0, 4.0, 1.0, 12.0]);
         assert_eq!(
@@ -181,6 +181,141 @@ mod bundled_resource_tests {
                 .unwrap();
             assert!((long - (0.272_001 * input_rate * 2.0 + output_rate * 1.5)).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn gpt_5_4_and_5_5_price_standard_long_context_but_not_unquoted_fast_long_context() {
+        use super::RequestSpeed;
+        let pricing = test_bundled_pricing();
+        for (model, input_rate, output_rate, fast_multiplier) in
+            [("gpt-5.4", 2.5, 15.0, 2.0), ("gpt-5.5", 5.0, 30.0, 2.5)]
+        {
+            for cache_read in [72_000, 72_001] {
+                let tokens = TokenBreakdown {
+                    input: 100_000,
+                    cache_write_5m: 100_000,
+                    cache_read,
+                    output: 1_000,
+                    ..Default::default()
+                };
+                let long = cache_read > 72_000;
+                let input_cost = (200_000.0 + cache_read as f64 * 0.1) * input_rate;
+                let expected = (input_cost * if long { 2.0 } else { 1.0 }
+                    + 1_000.0 * output_rate * if long { 1.5 } else { 1.0 })
+                    / 1_000_000.0;
+                for prefix in ["", "openai/", "openai-codex/"] {
+                    let alias = format!("{prefix}{model}-20260423-high");
+                    let cost = pricing
+                        .estimated_cost_dollars(&alias, tokens, true)
+                        .unwrap();
+                    assert!((cost - expected).abs() < 1e-9, "{alias}/{cache_read}");
+                    for slug in [alias.clone(), format!("{alias}-fast")] {
+                        let fast_tokens = TokenBreakdown {
+                            speed: RequestSpeed::Fast,
+                            ..tokens
+                        };
+                        for apply_long_context in [false, true] {
+                            let fast = pricing.estimated_cost_dollars(
+                                &slug,
+                                fast_tokens,
+                                apply_long_context,
+                            );
+                            if long {
+                                assert_eq!(fast, None, "{slug}");
+                            } else {
+                                assert!(
+                                    (fast.unwrap() - expected * fast_multiplier).abs() < 1e-9,
+                                    "{slug}"
+                                );
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        pricing
+                            .estimated_cost_dollars(&format!("{alias}-fast"), tokens, true)
+                            .is_none(),
+                        long
+                    );
+                }
+            }
+            let tokens = TokenBreakdown {
+                input: 300_000,
+                output: 1_000,
+                ..Default::default()
+            };
+            let cost = pricing.estimated_cost_dollars(model, tokens, true).unwrap();
+            let expected = if model == "gpt-5.4" { 1.5225 } else { 3.045 };
+            assert!((cost - expected).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn gpt_pro_standard_long_context_uses_shared_published_rates() {
+        let pricing = test_bundled_pricing();
+        for model in ["gpt-5.4-pro", "gpt-5.5-pro"] {
+            for prefix in ["", "openai/", "openai-codex/"] {
+                for suffix in ["", "-20260423", "-20260423-high"] {
+                    let alias = format!("{prefix}{model}{suffix}");
+                    let rates = pricing.resolve(&alias).unwrap();
+                    assert_eq!(rates.input_per_million, 30.0);
+                    assert_eq!(rates.output_per_million, 180.0);
+                    assert_eq!(rates.input_above_200k_per_million, Some(60.0));
+                    assert_eq!(rates.output_above_200k_per_million, Some(270.0));
+                    assert!(!rates.cache_read_is_explicit);
+                    for (input, expected) in
+                        [(272_000, 8.34), (272_001, 16.59006), (300_000, 18.27)]
+                    {
+                        let tokens = TokenBreakdown {
+                            input,
+                            output: 1_000,
+                            ..Default::default()
+                        };
+                        let cost = pricing
+                            .estimated_cost_dollars(&alias, tokens, true)
+                            .unwrap();
+                        assert!((cost - expected).abs() < 1e-9, "{alias}/{input}: {cost}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn corrected_claude_and_cursor_prices_do_not_change_adjacent_models() {
+        let pricing = test_bundled_pricing();
+        let reads = TokenBreakdown {
+            cache_read: 100_000,
+            ..Default::default()
+        };
+        for model in ["claude-sonnet-5-5", "anthropic/claude-sonnet-5.5-high"] {
+            assert_eq!(
+                pricing.estimated_cost_dollars(model, reads, true),
+                Some(0.01)
+            );
+        }
+        for (model, expected) in [
+            ("claude-sonnet-5", 0.02),
+            ("claude-opus-5-5", 0.02),
+            ("claude-fable-5-1", 0.025),
+            ("claude-mythos-5-1", 0.025),
+        ] {
+            assert!(
+                (pricing.estimated_cost_dollars(model, reads, true).unwrap() - expected).abs()
+                    < 1e-9
+            );
+        }
+        let output = TokenBreakdown {
+            output: 100_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            pricing.estimated_cost_dollars("grok-4.5-fast", output, true),
+            Some(1.8)
+        );
+        assert_eq!(
+            pricing.estimated_cost_dollars("cursor-grok-4.6-fast", output, true),
+            Some(1.2)
+        );
     }
 
     #[test]
@@ -293,7 +428,7 @@ mod bundled_resource_tests {
     }
 
     #[test]
-    fn ultrafast_preserves_api_long_context_and_credit_cache_write_rules() {
+    fn three_speeds_preserve_api_long_context_and_credit_cache_write_rules() {
         use super::RequestSpeed;
         for model in ["gpt-6-astra", "gpt-6.1-sol"] {
             let mut pricing = test_bundled_pricing();
@@ -301,7 +436,7 @@ mod bundled_resource_tests {
                 let tokens = TokenBreakdown {
                     input: 100_000,
                     cache_write_5m: 100_000,
-                    cache_write_1h: 20_000,
+                    cache_write_12h: 20_000,
                     cache_read: prompt_read,
                     output: 10_000,
                     ..Default::default()
@@ -309,25 +444,25 @@ mod bundled_resource_tests {
                 for credit_mode in [false, true] {
                     pricing.codex_credit_mode = credit_mode;
                     let base = pricing.estimated_cost_dollars(model, tokens, true).unwrap();
-                    let ultra = pricing
-                        .estimated_cost_dollars(
-                            model,
-                            TokenBreakdown {
-                                speed: RequestSpeed::Ultrafast,
-                                ..tokens
-                            },
-                            true,
-                        )
-                        .unwrap();
-                    assert!((ultra - base * 6.0).abs() < 1e-9);
+                    for (speed, multiplier) in [
+                        (RequestSpeed::Standard, 1.0),
+                        (RequestSpeed::Fast, 2.0),
+                        (RequestSpeed::Ultrafast, 6.0),
+                    ] {
+                        let cost = pricing
+                            .estimated_cost_dollars(model, TokenBreakdown { speed, ..tokens }, true)
+                            .unwrap();
+                        assert!((cost - base * multiplier).abs() < 1e-9);
+                    }
                     if credit_mode {
-                        let no_writes = TokenBreakdown {
+                        let ordinary_input = TokenBreakdown {
+                            input: 220_000,
                             cache_write_5m: 0,
-                            cache_write_1h: 0,
+                            cache_write_12h: 0,
                             ..tokens
                         };
                         assert_eq!(
-                            pricing.estimated_cost_dollars(model, no_writes, false),
+                            pricing.estimated_cost_dollars(model, ordinary_input, false),
                             Some(base)
                         );
                     }

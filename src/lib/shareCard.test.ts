@@ -1,6 +1,8 @@
+import { cleanup, render } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { codexState, providerCatalogIndex, settingsState } from '../test/appFixtures';
 import { ProviderCatalogIndex } from './metrics';
+import MetricRenderer from './MetricRenderer.svelte';
 import {
   buildProviderShareRows as buildProviderShareRowsWithCatalog,
   providerIconPlacement,
@@ -12,8 +14,15 @@ import {
   TOTAL_SPEND_OUTER_PADDING,
   TOTAL_SPEND_PERIOD_LABELS,
   totalSpendShareCardHeight,
+  type ShareRow,
 } from './shareCard';
-import type { AppSettings, ProviderLayout, ProviderSnapshot } from './types';
+import type {
+  AppSettings,
+  MetricDefinition,
+  ProviderLayout,
+  ProviderSnapshot,
+  UsagePeriod,
+} from './types';
 
 function buildProviderShareRows(
   _providerId: string,
@@ -31,7 +40,190 @@ function renderTotalSpendShareCard(
   return renderTotalSpendShareCardWithCatalog(providerCatalogIndex, options);
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+interface CycleUsageFixture {
+  catalog: ProviderCatalogIndex;
+  snapshot: ProviderSnapshot;
+  layout: ProviderLayout;
+  settings: AppSettings;
+  rows: () => ShareRow[];
+}
+
+function cycleUsageFixture(): CycleUsageFixture {
+  const periods = [
+    ['last30Days', '30 Days'],
+    ['sessionCycle', '5h Usage'],
+    ['weeklyCycle', 'Weekly Usage'],
+  ] as const;
+  const metrics: MetricDefinition[] = periods.map(([period, label]) => ({
+    id: `codex.${period}`,
+    label,
+    source: { kind: 'usage', period },
+    pinnable: true,
+    defaultEnabled: true,
+    defaultSection: 'alwaysVisible',
+    defaultPinned: false,
+    tray: null,
+  }));
+  const catalog = new ProviderCatalogIndex({
+    providers: [{ ...providerCatalogIndex.provider('codex')!, metrics }],
+  });
+  const usage = (tokens: number, estimatedCostUsd: number): UsagePeriod => ({
+    tokens,
+    estimatedCostUsd,
+    costEstimated: true,
+    estimateComplete: true,
+  });
+  const snapshot = structuredClone(codexState.snapshot!);
+  snapshot.notices = [];
+  snapshot.usage = {
+    today: null,
+    yesterday: null,
+    last30Days: usage(3000, 3),
+    sessionCycle: usage(100, 0.1),
+    weeklyCycle: usage(1000, 1),
+    daily: [],
+    unknownModels: [],
+    creditUsage: {
+      today: null,
+      yesterday: null,
+      last30Days: usage(4000, 4),
+      sessionCycle: usage(200, 0.2),
+      weeklyCycle: usage(800, 0.8),
+      daily: [],
+      unknownModels: [],
+    },
+  };
+  const layout: ProviderLayout = {
+    ...settingsState.settings.providers[0],
+    metrics: metrics.map(({ id }) => ({
+      id,
+      enabled: true,
+      section: 'alwaysVisible',
+      pinned: false,
+    })),
+  };
+  const settings: AppSettings = { ...settingsState.settings, costDisplay: 'apiUsd' };
+  const rows = () => buildProviderShareRowsWithCatalog(catalog, snapshot, layout, settings, 0);
+  return { catalog, snapshot, layout, settings, rows };
+}
+
+function expectDashboardReadings(fixture: CycleUsageFixture) {
+  fixture.rows().forEach((row, index) => {
+    if (row.kind !== 'text') throw new Error('Expected a usage text row');
+    const view = render(MetricRenderer, {
+      catalog: fixture.catalog,
+      snapshot: fixture.snapshot,
+      settings: fixture.settings,
+      layout: fixture.layout.metrics[index],
+      now: 0,
+      onSettingsChange: vi.fn(),
+    });
+    expect(view.getByText(row.label)).toBeVisible();
+    expect(view.getByRole('button', { name: row.value })).toBeVisible();
+    view.unmount();
+  });
+}
+
+describe('share card usage periods', () => {
+  it('exports the monthly, session and weekly API readings shown on the dashboard', () => {
+    const fixture = cycleUsageFixture();
+    expect(fixture.rows()).toEqual([
+      { kind: 'text', label: '30 Days', value: '$3.00 · 3K tokens', condensed: false },
+      { kind: 'text', label: '5h Usage', value: '$0.10 · 100 tokens', condensed: true },
+      { kind: 'text', label: 'Weekly Usage', value: '$1.00 · 1K tokens', condensed: true },
+    ]);
+    expectDashboardReadings(fixture);
+  });
+
+  it('uses independent credit periods and the dashboard credit labels', () => {
+    const fixture = cycleUsageFixture();
+    fixture.settings.costDisplay = 'codexCredits';
+    expect(fixture.rows()).toEqual([
+      { kind: 'text', label: '30 Days', value: '100 cr · 4K tokens', condensed: false },
+      { kind: 'text', label: '5h Credits', value: '5 cr · 200 tokens', condensed: true },
+      { kind: 'text', label: 'Weekly Credits', value: '20 cr · 800 tokens', condensed: true },
+    ]);
+    expectDashboardReadings(fixture);
+  });
+
+  it.each([null, undefined])('does not borrow monthly usage for missing cycles (%s)', (missing) => {
+    const fixture = cycleUsageFixture();
+    for (const display of ['apiUsd', 'codexCredits'] as const) {
+      fixture.settings.costDisplay = display;
+      const history =
+        display === 'codexCredits' ? fixture.snapshot.usage.creditUsage! : fixture.snapshot.usage;
+      history.sessionCycle = missing;
+      history.weeklyCycle = missing;
+      const value = display === 'codexCredits' ? 'Credit estimate unavailable' : 'No data';
+      expect(fixture.rows().slice(1)).toMatchObject([{ value }, { value }]);
+      expectDashboardReadings(fixture);
+    }
+  });
+
+  it.each(['apiUsd', 'codexCredits'] as const)(
+    'does not treat an unknown runtime period as monthly usage in %s',
+    (display) => {
+      const fixture = cycleUsageFixture();
+      fixture.settings.costDisplay = display;
+      fixture.catalog.metric('codex.sessionCycle')!.source = {
+        kind: 'usage',
+        period: 'futureCycle' as 'sessionCycle',
+      };
+      expect(fixture.rows()[1]).toMatchObject({
+        label: '5h Usage',
+        value: display === 'codexCredits' ? 'Credit estimate unavailable' : 'No data',
+      });
+      expectDashboardReadings(fixture);
+    },
+  );
+
+  it.each(['apiUsd', 'codexCredits'] as const)(
+    'matches inferred cycle quotas on the dashboard in %s',
+    (display) => {
+      const fixture = cycleUsageFixture();
+      fixture.settings.costDisplay = display;
+      const history =
+        display === 'codexCredits' ? fixture.snapshot.usage.creditUsage! : fixture.snapshot.usage;
+      history.sessionCycle!.estimatedLimitUsd = display === 'codexCredits' ? 3 : 2;
+      history.weeklyCycle!.estimatedLimitUsd = display === 'codexCredits' ? 12 : 10;
+      expect(fixture.rows().slice(1)).toMatchObject([
+        { value: display === 'codexCredits' ? '~75 cr quota · 5 cr' : '~$2.00 quota · $0.10' },
+        { value: display === 'codexCredits' ? '~300 cr quota · 20 cr' : '~$10.00 quota · $1.00' },
+      ]);
+      expectDashboardReadings(fixture);
+    },
+  );
+
+  it.each(['apiUsd', 'codexCredits'] as const)(
+    'retains partial estimates in %s cycles',
+    (display) => {
+      const fixture = cycleUsageFixture();
+      fixture.settings.costDisplay = display;
+      const history =
+        display === 'codexCredits' ? fixture.snapshot.usage.creditUsage! : fixture.snapshot.usage;
+      history.sessionCycle!.estimateComplete = false;
+      history.weeklyCycle!.estimateComplete = false;
+      history.sessionCycle!.estimatedLimitUsd = 3;
+      history.weeklyCycle!.estimatedLimitUsd = 12;
+      expect(fixture.rows().slice(1)).toMatchObject([
+        {
+          value:
+            display === 'codexCredits' ? '5 cr partial · 200 tokens' : '$0.10 partial · 100 tokens',
+        },
+        {
+          value:
+            display === 'codexCredits' ? '20 cr partial · 800 tokens' : '$1.00 partial · 1K tokens',
+        },
+      ]);
+      expectDashboardReadings(fixture);
+    },
+  );
+});
 
 describe('share card layout', () => {
   it('uses the authored width and 4x export scale', () => {

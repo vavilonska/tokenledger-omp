@@ -112,6 +112,18 @@ impl ModelPricing {
         if let Some(rates) = self.supplement.pricing.get(name) {
             return Some(*rates);
         }
+        // A supplement's explicit Fast price coverage limit must not be bypassed
+        // by an exact Fast entry from an older disk catalog.
+        if name.strip_suffix("-fast").is_some_and(|base| {
+            self.supplement
+                .pricing
+                .get(base)
+                .is_some_and(|rates| rates.fast_max_priced_prompt_tokens.is_some())
+        }) {
+            if let Some(rates) = self.fast_variant(name) {
+                return Some(rates);
+            }
+        }
         if let Some((_, rates)) = self.primary.find_exact(name) {
             return Some(rates);
         }
@@ -140,7 +152,15 @@ impl ModelPricing {
                 .fast_multiplier(key)
                 .or_else(|| self.supplement.fast_multiplier(base))?
         };
-        Some(rates.scaled(multiplier))
+        let mut fast = rates.scaled(multiplier);
+        fast.max_priced_prompt_tokens = match (
+            rates.max_priced_prompt_tokens,
+            rates.fast_max_priced_prompt_tokens,
+        ) {
+            (Some(base), Some(speed)) => Some(base.min(speed)),
+            (base, speed) => base.or(speed),
+        };
+        Some(fast)
     }
 
     fn base_entry<'a>(&'a self, base: &'a str) -> Option<(&'a str, ModelRates)> {
@@ -262,6 +282,29 @@ mod tests {
     }
 
     #[test]
+    fn fast_price_limits_override_stale_exact_entries_without_changing_other_precedence() {
+        for (coverage, expected) in [
+            ("", 99.0),
+            (",\"fast_max_priced_prompt_tokens\":272000", 4.0),
+        ] {
+            let supplement = format!(
+                "{{\"pricing\":{{\"gpt-9\":{{\"input_per_million\":2,\"output_per_million\":10{coverage}}}}},\"fast_multipliers\":{{\"gpt-9\":2}}}}"
+            );
+            let pricing = pricing(Some(&supplement), &[("gpt-9-fast", rates(99.0, 99.0))], &[]);
+            assert_eq!(
+                pricing.resolve("gpt-9-fast").unwrap().input_per_million,
+                expected
+            );
+            let tokens = TokenBreakdown {
+                input: 272_001,
+                ..Default::default()
+            };
+            let cost = pricing.estimated_cost_dollars("gpt-9-fast", tokens, false);
+            assert_eq!(cost.is_none(), !coverage.is_empty());
+        }
+    }
+
+    #[test]
     fn unknown_model_cost_is_none() {
         let model_pricing = pricing(None, &[], &[]);
         assert!(model_pricing
@@ -304,6 +347,7 @@ mod tests {
                     input: 1_000_000,
                     cache_write_5m: 1_000_000,
                     cache_write_1h: 1_000_000,
+                    cache_write_12h: 0,
                     cache_read: 1_000_000,
                     output: 1_000_000,
                     speed: RequestSpeed::Fast,
@@ -395,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn sol_6_1_credit_mode_has_no_api_long_context_or_cache_write_charge() {
+    fn sol_6_1_credit_mode_prices_writes_as_input_without_api_premiums() {
         let mut pricing = crate::pricing::test_bundled_pricing();
         pricing.codex_credit_mode = true;
         let tokens = TokenBreakdown {
@@ -403,12 +447,13 @@ mod tests {
             cache_read: 1_000_000,
             cache_write_5m: 1_000_000,
             cache_write_1h: 1_000_000,
+            cache_write_12h: 1_000_000,
             output: 1_000_000,
             ..Default::default()
         };
         assert_eq!(
             pricing.estimated_cost_dollars("openai-codex/gpt-6.1-sol-high", tokens, true),
-            Some(12.1)
+            Some(18.1)
         );
         assert_eq!(
             pricing.estimated_cost_dollars(
@@ -419,12 +464,12 @@ mod tests {
                 },
                 true
             ),
-            Some(24.2)
+            Some(36.2)
         );
-        assert_eq!(
-            pricing.estimated_cost_dollars("gpt-6.1-sol-ultrafast", tokens, true),
-            Some(72.6)
-        );
+        let ultrafast = pricing
+            .estimated_cost_dollars("gpt-6.1-sol-ultrafast", tokens, true)
+            .unwrap();
+        assert!((ultrafast - 108.6).abs() < 1e-9);
         assert!(pricing
             .estimated_cost_dollars("gpt-6.1-sol-none", tokens, true)
             .is_none());

@@ -16,6 +16,8 @@
 
 基于 [OpenQuota](https://github.com/deviffyy/OpenQuota) 的独立桌面用量面板。集中查看 AI 编程工具的额度、重置时间、Token 用量和费用估算。公开版保留 **Oh My Pi 与 Codex 同账号用量合并、Codex 周额度估算和重置周期历史**，不包含私有业务适配器。
 
+**0.5.9 源码更新**：最近 30 天改为包含今天的 30 个本地自然日，独立历史周期不截断；分享卡使用所选周期自己的金额、credits 标签及完整额度估算。修复 Claude 完整快照被旧副本覆盖、主消息与 advisor 身份碰撞；有源日志可重解析恢复，无源缺证据不猜费用。新增明确 OpenAI 30m／12h 写缓存计价，未知或冲突 Codex 速度保持 partial；补齐 GPT-5.4／5.5 及 Pro 长上下文价，修正 Sonnet 5.5 缓存读取和 Cursor Grok 4.5 Fast 输出价。GPT-5.4／5.5 API Fast 超过 272K 无官方报价，保留用量但不猜金额；购买 credits 仍独立计价。本次仅推送源码，不新建 tag／Release 或公开安装包，现有下载仍为 0.5.8。
+
 **0.5.8 补丁（已发布）**：OMP 的稀疏 `orchestration` object 沿既有桶规则处理：缺省 input／cacheRead 为 0，合法的仅 input/output、仅 output 或空 object 不再让缓存率误变未知；显式非法桶及顶层缺桶仍未知。parser 5→6 使有源日志重扫，持久账本版本不变；输出不计分母，编排用量不重复合计。此修复与旧 snapshot 暂无新字段的显示状态分开，不改变主题、其他提供商或自动刷新策略。
 
 **0.5.7 功能说明（已发布）**：今天／昨天／最近 30 天的用量悬浮明细新增 **Cache rate（缓存命中率）**，展示周期汇总、模型及已有来源分行。按 `Σ缓存读取 tokens / Σ全部 prompt tokens` 加权，输出 tokens 不计分母；OMP cacheWrite 已含 1 小时桶，编排用量只计一次。缺桶、历史缺字段或零分母显示“未知”，已知零缓存且有输入显示 `0%`；与价格／速度完整性独立。保留现有 Token 纳入规则、Other 折叠及公开版隐私边界，不采集对话正文。当前版本验证／安装状态仍以发布记录为准。
@@ -37,7 +39,7 @@
 
 - 读取 OMP 会话 JSONL，通过同一 Codex OAuth 账号校验后合并用量；账号不匹配时跳过。明细保留 **Oh My Pi** 来源。
 - 保留 5 小时／周周期用量、服务端观察到的重置时间、历史周周期，以及折叠模型的来源明细。
-- 在独立 SQLite 的 `local_usage_events` 薄账本中留存已采集用量；归档、移动、截断或删除对话后不再丢失，重复扫描不重复计数。不保存对话正文或凭据，展示时间窗口保持不变。
+- 在独立 SQLite 的 `local_usage_events` 薄账本中留存已采集用量；归档、移动、截断或删除对话后不再丢失，重复扫描不重复计数。不保存对话正文或凭据；最近 30 天按包含今天的 30 个本地自然日展示，历史周期保留各自边界。
 - **API USD** 与 **Codex credits** 使用独立估算和缓存，不能视为同一账单。
 - 周额度金额仅在计价完整时根据本地用量和服务端额度占比估算。除下述 memory 排除项外，未知模型或请求速度会保留 tokens、将已知金额标为 **partial**，不据此推算完整额度；估算不是官方余额或实际扣费。
 - 仅明确 `model_usage` 且 `purpose: "memory"` 的调用排除估算费用贡献，API USD／Codex credits 及日、会话、周和历史周期统一适用；保留 tokens、请求数和原始成本／速度证据。显示为零贡献不代表上游免费。同模型普通请求、title／cache-warm 等其他用途仍按原规则计价，缺失用途不猜为 memory。
@@ -89,6 +91,8 @@ corepack pnpm build:installer
 
 An independent desktop usage dashboard based on [OpenQuota](https://github.com/deviffyy/OpenQuota), showing AI coding quotas, resets, tokens and estimated costs. This public edition preserves **same-account Oh My Pi/Codex usage merging, Codex weekly quota estimates and reset-cycle history**, without private business adapters.
 
+**0.5.9 source update:** Last 30 Days contains exactly 30 local calendar dates including today, without truncating independent historical cycles. Share cards use the selected cycle's own API/credit values, labels and complete allowance estimate. Claude retention preserves fuller snapshots and separates advisor identities; available logs can repair old collisions, but missing evidence is not invented. Explicit OpenAI 30m/12h cache writes are priced separately from Claude 1h writes; unknown/conflicting Codex speed stays partial. The supplement corrects GPT-5.4/5.5 and Pro long-context prices, Sonnet 5.5 cache reads and Cursor Grok 4.5 Fast output. GPT-5.4/5.5 API Fast above 272K has no published rate and remains unpriced; purchased credits retain their independent rate card. This delivery updates source only, without a new tag, Release or public installer; the existing download remains 0.5.8.
+
 **0.5.8 patch (released):** Sparse OMP `orchestration` objects now reuse the existing bucket contract: omitted input/cacheRead are zero; input/output-only, output-only and empty objects no longer make cache rates unknown. Explicit invalid buckets and missing top-level buckets remain unknown. Parser 5→6 reparses available sources without changing the durable ledger schema. Output stays outside the denominator, and orchestration is counted once. This is separate from older snapshots lacking new fields; themes, other providers and automatic refresh policies are unchanged.
 
 **0.5.7 feature notes (released):** Today / Yesterday / Last 30 Days usage popups show **Cache rate** for the period, each model and existing source/variant rows. Rates use `sum(cache-read tokens) / sum(all prompt tokens)`, never an average of percentages or an output-token denominator. OMP cache writes already include the one-hour bucket, and orchestration is counted once. Missing buckets, legacy fields or a zero denominator remain unknown; known zero cached input with positive prompt tokens shows `0%`. Cache completeness is independent of pricing/speed completeness. Existing token inclusion, Other folding and public-edition privacy boundaries remain unchanged; no conversation text is collected. Validation and installation status remain documented in the release record.
@@ -110,7 +114,7 @@ It does not migrate or share other TokenLedger/OpenQuota installations' data, ca
 
 - Reads OMP session JSONL and merges usage only after matching the Codex OAuth account. Mismatched accounts are skipped; breakdowns retain **Oh My Pi** source labels.
 - Preserves five-hour/weekly usage, server-observed reset times, historical weekly cycles and source labels inside folded model groups.
-- Retains observed usage in the independent SQLite `local_usage_events` ledger. Archiving, moving, truncating or deleting conversations does not erase collected usage, and repeat scans do not double-count it. Conversation text and credentials are not stored; rolling display windows are unchanged.
+- Retains observed usage in the independent SQLite `local_usage_events` ledger. Archiving, moving, truncating or deleting conversations does not erase collected usage, and repeat scans do not double-count it. Conversation text and credentials are not stored. Last 30 Days uses 30 local dates including today; historical cycles retain their own boundaries.
 - **API USD** and **Codex credits** have separate estimates and caches; they are not interchangeable bills.
 - Weekly monetary capacity is estimated only from complete local estimates and the server quota percentage. Except for the explicit memory exclusion below, unknown models or request speeds retain tokens and mark known-cost subtotals **partial**, without inferring a full allowance. Estimates are not official balances or actual charges.
 - Only explicit `model_usage` calls with `purpose: "memory"` are excluded from estimated cost contributions, in API USD and Codex credits across daily, session, weekly and historical cycles. Tokens, requests and original cost/speed evidence are retained; a zero contribution does not mean the upstream call was free. Ordinary requests on the same model and other purposes such as title/cache-warm keep their normal pricing rules; missing purposes are never guessed to be memory.

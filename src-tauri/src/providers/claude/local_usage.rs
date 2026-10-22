@@ -39,9 +39,21 @@ pub struct ClaudeTokenEvent {
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub cache_usage: Option<(u64, u64)>,
+    #[serde(default)]
+    pub advisor_index: Option<usize>,
+    #[serde(default)]
+    pub parent_event_key: Option<String>,
+    #[serde(default)]
+    pub speed_evidence_rank: Option<(bool, u64)>,
+    #[serde(default)]
+    pub speed_conflict: bool,
+    #[serde(default)]
+    pub pricing_conflict: bool,
+    #[serde(default)]
+    pub cache_conflict: bool,
 }
 
-const LOG_CACHE_SCHEMA_VERSION: u8 = 4;
+const LOG_CACHE_SCHEMA_VERSION: u8 = 6;
 
 impl ClaudeTokenEvent {
     fn total_tokens(&self) -> u64 {
@@ -68,7 +80,7 @@ pub fn scan_local_usage(
         include_standard_roots,
         include_pi,
     } = sources;
-    let events = super::super::log_usage::retain_log_usage(
+    let events = super::super::log_usage::retain_log_usage_with_merge(
         storage,
         provider_id,
         account_identity.unwrap_or_default(),
@@ -77,18 +89,14 @@ pub fn scan_local_usage(
         3, // Keep retained history readable; only the source parser schema changes.
         &discover_files(configured_roots, include_standard_roots),
         parse_jsonl,
-        |event: &ClaudeTokenEvent| {
-            if event.message_id.is_some() || event.request_id.is_some() {
-                super::super::log_usage::usage_event_key(&(
-                    &event.message_id,
-                    &event.request_id,
-                    event.sidechain,
-                ))
-            } else {
-                super::super::log_usage::usage_event_key(&(event.timestamp, &event.model))
-            }
+        event_key,
+        |event| match &event.parent_event_key {
+            Some(key) => Ok(key.clone()),
+            None => event_key(event),
         },
-        |_| true,
+        legacy_advisor_key,
+        reclassify_legacy_advisor,
+        merge_complete,
     )
     .map_err(|_| ClaudeError::LocalUsage)?;
     let mut accumulator = DailyUsageAccumulator::default();
@@ -120,6 +128,153 @@ pub fn scan_local_usage(
         "From your Claude usage history (estimated)"
     };
     Ok(accumulator.build(now, source_note))
+}
+
+fn event_key(event: &ClaudeTokenEvent) -> Result<String, serde_json::Error> {
+    if let Some(parent) = &event.parent_event_key {
+        if let Some(index) = event.advisor_index {
+            if event.message_id.is_none() {
+                return super::super::log_usage::usage_event_key(&(parent, "advisor", index));
+            }
+        } else {
+            return Ok(parent.clone());
+        }
+    }
+    if event.message_id.is_some() || event.request_id.is_some() {
+        super::super::log_usage::usage_event_key(&(
+            &event.message_id,
+            &event.request_id,
+            event.sidechain,
+        ))
+    } else {
+        super::super::log_usage::usage_event_key(&(event.timestamp, &event.model))
+    }
+}
+
+fn legacy_advisor_key(event: &ClaudeTokenEvent) -> Result<Option<String>, serde_json::Error> {
+    if event.advisor_index.is_none() || event.message_id.is_some() {
+        return Ok(None);
+    }
+    let mut legacy = event.clone();
+    legacy.advisor_index = None;
+    legacy.parent_event_key = None;
+    event_key(&legacy).map(Some)
+}
+
+fn reclassify_legacy_advisor(
+    old: &ClaudeTokenEvent,
+    incoming: &ClaudeTokenEvent,
+    sources: &[ClaudeTokenEvent],
+) -> Option<ClaudeTokenEvent> {
+    if old.parent_event_key.is_some()
+        || old.advisor_index.is_some()
+        || incoming.advisor_index.is_none()
+        || legacy_advisor_fingerprint(old) != legacy_advisor_fingerprint(incoming)
+        || sources.iter().any(|source| {
+            source.parent_event_key.is_some()
+                && source.advisor_index.is_none()
+                && legacy_advisor_fingerprint(source) == legacy_advisor_fingerprint(old)
+        })
+    {
+        return None;
+    }
+    let mut moved = old.clone();
+    for source in sources.iter().filter(|source| {
+        source.parent_event_key.is_none()
+            && legacy_advisor_fingerprint(source) == legacy_advisor_fingerprint(old)
+    }) {
+        moved = merge_complete(&moved, source);
+    }
+    moved.parent_event_key = incoming.parent_event_key.clone();
+    moved.advisor_index = incoming.advisor_index;
+    Some(moved)
+}
+
+fn legacy_advisor_fingerprint(event: &ClaudeTokenEvent) -> Option<String> {
+    super::super::log_usage::usage_event_key(&(
+        event.timestamp,
+        &event.model,
+        event.input,
+        event.output,
+        event.cache_write_5m,
+        event.cache_write_1h,
+        event.cache_read,
+        &event.message_id,
+        &event.request_id,
+        event.sidechain,
+        event.cost_usd,
+    ))
+    .ok()
+}
+
+fn merge_complete(existing: &ClaudeTokenEvent, incoming: &ClaudeTokenEvent) -> ClaudeTokenEvent {
+    // The count snapshot rank never includes evidence borrowed from another snapshot.
+    let rank = |event: &ClaudeTokenEvent| (!event.sidechain, event.total_tokens());
+    let buckets = |event: &ClaudeTokenEvent| {
+        (
+            event.input,
+            event.output,
+            event.cache_read,
+            event.cache_write_5m,
+            event.cache_write_1h,
+        )
+    };
+    let order = rank(existing).cmp(&rank(incoming));
+    let (preferred, other) =
+        if order.is_lt() || (order.is_eq() && buckets(existing) < buckets(incoming)) {
+            (incoming, existing)
+        } else {
+            (existing, incoming)
+        };
+    let mut merged = preferred.clone();
+    if order.is_eq() {
+        merged.pricing_conflict |= other.pricing_conflict
+            || buckets(existing) != buckets(incoming)
+            || (existing.cost_usd.is_some()
+                && incoming.cost_usd.is_some()
+                && existing.cost_usd != incoming.cost_usd);
+        // Exact costs attest to these buckets only, never to a larger token snapshot.
+        merged.cost_usd = match (existing.cost_usd, incoming.cost_usd) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        };
+        merged.cache_conflict |= other.cache_conflict
+            || buckets(existing) != buckets(incoming)
+            || (existing.cache_usage.is_some()
+                && incoming.cache_usage.is_some()
+                && existing.cache_usage != incoming.cache_usage);
+        merged.cache_usage = if merged.cache_conflict {
+            None
+        } else {
+            existing.cache_usage.or(incoming.cache_usage)
+        };
+    }
+    let speed_rank = |event: &ClaudeTokenEvent| {
+        event
+            .speed_evidence_rank
+            .or_else(|| event.has_speed.then(|| rank(event)))
+    };
+    let speed_order = speed_rank(existing).cmp(&speed_rank(incoming));
+    let speed = if speed_order.is_lt() {
+        incoming
+    } else {
+        existing
+    };
+    merged.speed_evidence_rank = speed_rank(speed);
+    merged.has_speed = merged.speed_evidence_rank.is_some();
+    merged.is_fast = speed.is_fast;
+    merged.speed_conflict = speed.speed_conflict;
+    if speed_order.is_eq() && merged.has_speed {
+        merged.is_fast = existing.is_fast || incoming.is_fast;
+        merged.speed_conflict |= existing.speed_conflict
+            || incoming.speed_conflict
+            || existing.is_fast != incoming.is_fast;
+    }
+    if merged.parent_event_key.is_none() {
+        merged.parent_event_key = other.parent_event_key.clone();
+        merged.advisor_index = other.advisor_index;
+    }
+    merged
 }
 
 fn discover_files(configured_roots: &[PathBuf], include_standard_roots: bool) -> Vec<PathBuf> {
@@ -297,7 +452,7 @@ fn parse_entries(line: &str) -> Option<Vec<ClaudeTokenEvent>> {
         .get("isSidechain")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let parent = usage_event(
+    let mut parent = usage_event(
         timestamp,
         message
             .get("model")
@@ -311,6 +466,8 @@ fn parse_entries(line: &str) -> Option<Vec<ClaudeTokenEvent>> {
         sidechain,
         object.get("costUSD").and_then(number),
     )?;
+    let parent_event_key = event_key(&parent).ok()?;
+    parent.parent_event_key = Some(parent_event_key.clone());
     let mut events = vec![parent];
     let mut advisor_index = 0;
     for iteration in usage
@@ -322,6 +479,7 @@ fn parse_entries(line: &str) -> Option<Vec<ClaudeTokenEvent>> {
         if iteration.get("type").and_then(Value::as_str) != Some("advisor_message") {
             continue;
         }
+        let index = advisor_index;
         let Some(model) = iteration
             .get("model")
             .and_then(Value::as_str)
@@ -331,8 +489,8 @@ fn parse_entries(line: &str) -> Option<Vec<ClaudeTokenEvent>> {
         };
         let advisor_message_id = message_id
             .as_ref()
-            .map(|message_id| format!("{message_id}:advisor:{advisor_index}"));
-        let Some(advisor) = usage_event(
+            .map(|message_id| format!("{message_id}:advisor:{index}"));
+        let Some(mut advisor) = usage_event(
             timestamp,
             Some(model.to_owned()),
             iteration,
@@ -343,6 +501,8 @@ fn parse_entries(line: &str) -> Option<Vec<ClaudeTokenEvent>> {
         ) else {
             continue;
         };
+        advisor.advisor_index = Some(index);
+        advisor.parent_event_key = Some(parent_event_key.clone());
         events.push(advisor);
         advisor_index += 1;
     }
@@ -398,6 +558,10 @@ fn usage_event(
             )
         });
     Some(ClaudeTokenEvent {
+        speed_evidence_rank: None,
+        speed_conflict: false,
+        pricing_conflict: false,
+        cache_conflict: false,
         cache_usage,
         timestamp,
         model,
@@ -412,6 +576,8 @@ fn usage_event(
         is_fast: speed == Some("fast"),
         has_speed: speed.is_some(),
         cost_usd,
+        advisor_index: None,
+        parent_event_key: None,
     })
 }
 
@@ -480,7 +646,7 @@ fn aggregate_into(
     let since = now
         .with_timezone(&Local)
         .date_naive()
-        .checked_sub_days(Days::new(30))
+        .checked_sub_days(Days::new(29))
         .unwrap_or(NaiveDate::MIN);
     for event in events {
         let date = event.timestamp.with_timezone(&Local).date_naive();
@@ -491,6 +657,7 @@ fn aggregate_into(
             input: event.input,
             cache_write_5m: event.cache_write_5m,
             cache_write_1h: event.cache_write_1h,
+            cache_write_12h: 0,
             cache_read: event.cache_read,
             output: event.output,
             speed: if event.is_fast {
@@ -504,9 +671,13 @@ fn aggregate_into(
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty());
-        let cost = event
-            .cost_usd
-            .or_else(|| pricing.estimated_cost_dollars(model_name?, tokens, true));
+        let cost = if event.pricing_conflict || event.speed_conflict {
+            None
+        } else {
+            event
+                .cost_usd
+                .or_else(|| pricing.estimated_cost_dollars(model_name?, tokens, true))
+        };
         let model = model_name.unwrap_or("Unattributed");
         if let Some(cost) = cost {
             if event.cost_usd.is_some() {
@@ -775,6 +946,10 @@ mod tests {
     fn parent_replacement_removes_the_stale_dedup_key() {
         fn event(request_id: &str, sidechain: bool, cache_read: u64) -> ClaudeTokenEvent {
             ClaudeTokenEvent {
+                speed_evidence_rank: None,
+                speed_conflict: false,
+                pricing_conflict: false,
+                cache_conflict: false,
                 cache_usage: None,
                 timestamp: Utc.with_ymd_and_hms(2026, 2, 20, 12, 0, 0).unwrap(),
                 model: Some("claude-opus-4-6".into()),
@@ -789,6 +964,8 @@ mod tests {
                 is_fast: false,
                 has_speed: false,
                 cost_usd: None,
+                advisor_index: None,
+                parent_event_key: None,
             }
         }
         let events = deduplicate(vec![
@@ -916,3 +1093,7 @@ mod tests {
         assert!(event.has_speed);
     }
 }
+
+#[cfg(test)]
+#[path = "ledger_regressions.rs"]
+mod ledger_regressions;

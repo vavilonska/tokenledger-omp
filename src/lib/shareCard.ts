@@ -1,4 +1,4 @@
-import { costReading, creditHistory } from './costDisplay';
+import { costReading, creditHistory, usagePeriod, usagePeriodLabel } from './costDisplay';
 import type { ProviderCatalogIndex } from './metrics';
 import { formatMetricValue, formatSpendValue, totalSpendRingCenter } from './metricFormat';
 import { formatLimit, formatReset, projectPace } from './pacing';
@@ -190,10 +190,10 @@ export function buildProviderShareRows(
     }
 
     if (source.kind !== 'usage') continue;
-    const period = usagePeriod(snapshot, source.period);
+    const period = usagePeriod(snapshot.usage, source.period);
     rows.push({
       kind: 'text',
-      label: definition.label,
+      label: usagePeriodLabel(definition.label, source.period, credits),
       value: usageReading(period, credits),
       condensed: previousTextSection === metric.section,
     });
@@ -367,16 +367,15 @@ function quotaShareRow(quota: QuotaWindow, settings: AppSettings, now: number): 
   };
 }
 
-function usagePeriod(snapshot: ProviderSnapshot, sourceId: string) {
-  if (sourceId === 'today') return snapshot.usage.today;
-  if (sourceId === 'yesterday') return snapshot.usage.yesterday;
-  return snapshot.usage.last30Days;
-}
-
 function usageReading(period: UsagePeriod | null, credits = false) {
-  if (!period) return 'No data';
+  if (!period) return credits ? 'Credit estimate unavailable' : 'No data';
   const tokens = formatMetricValue(period.tokens, 'count', 'row', 'tokens');
   if (period.estimatedCostUsd === null) return tokens;
+  if (period.estimateComplete && period.estimatedLimitUsd != null) {
+    const limit = costReading(period.estimatedLimitUsd, credits);
+    const used = costReading(period.estimatedCostUsd, credits);
+    return `~${limit} quota · ${used}`;
+  }
   return `${costReading(period.estimatedCostUsd, credits)}${period.estimateComplete ? '' : ' partial'} · ${tokens}`;
 }
 

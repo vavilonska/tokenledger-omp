@@ -166,20 +166,15 @@ pub(super) fn scan_sessions_into(
     let since_date = now
         .with_timezone(&Local)
         .date_naive()
-        .checked_sub_days(Days::new(30))
+        .checked_sub_days(Days::new(29))
         .unwrap_or(NaiveDate::MIN);
-    let since = since_date
-        .and_hms_opt(0, 0, 0)
-        .and_then(|value| value.and_local_timezone(Local).earliest())
-        .map(|value| value.to_utc())
-        .unwrap_or_else(|| now - chrono::Duration::days(31));
     let paths = discover_files(source.directory);
     let mut events = super::log_usage::retain_log_usage_with_normalization(
         storage,
         source.cache_key,
         source.identity_key,
         "codex",
-        6,
+        7,
         1,
         &paths,
         parse_jsonl,
@@ -227,6 +222,7 @@ pub(super) fn scan_sessions_into(
             && event.cache_read == 0
             && event.cache_write == 0
             && event.cache_write_1h == 0
+            && event.cache_write_12h == 0
         {
             continue;
         }
@@ -260,8 +256,12 @@ pub(super) fn scan_sessions_into(
                             input: event.input,
                             output: event.output,
                             cache_read: event.cache_read,
-                            cache_write_5m: event.cache_write.saturating_sub(event.cache_write_1h),
+                            cache_write_5m: event
+                                .cache_write
+                                .saturating_sub(event.cache_write_1h)
+                                .saturating_sub(event.cache_write_12h),
                             cache_write_1h: event.cache_write_1h,
+                            cache_write_12h: event.cache_write_12h,
                             speed,
                         },
                         pricing,
@@ -271,7 +271,7 @@ pub(super) fn scan_sessions_into(
         let Some(cost) = cost else {
             let date = event.timestamp.with_timezone(&Local).date_naive();
             let unknown_model = !model_has_rates(&event.timestamp, &event.model, pricing);
-            if event.timestamp >= since {
+            if date >= since_date {
                 accumulator.add_unpriced_variant(
                     date,
                     event.total,
@@ -317,7 +317,7 @@ pub(super) fn scan_sessions_into(
             continue;
         };
         let date = event.timestamp.with_timezone(&Local).date_naive();
-        if event.timestamp >= since {
+        if date >= since_date {
             add_event(accumulator, date, event, cost, source.label);
         }
         if session_start.is_some_and(|start| event.timestamp >= start) {

@@ -64,10 +64,14 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
             _ => return None,
         },
     };
-    // The credit card publishes input/read/output rates; cache writes are not charged.
+    // Cache-write tokens are ordinary input on this card, without a separate write premium.
     // Do not silently apply API-only long-context or discount rules to this card.
     Some(
-        (tokens.input as f64 * input
+        ((tokens.input as f64
+            + tokens.cache_write_5m as f64
+            + tokens.cache_write_1h as f64
+            + tokens.cache_write_12h as f64)
+            * input
             + tokens.cache_read as f64 * cached
             + tokens.output as f64 * output)
             / 1_000_000.0
@@ -105,7 +109,7 @@ mod tests {
         }
         assert_eq!(
             pricing.estimated_cost_dollars("gpt-5.5", tokens, false),
-            Some(12.5)
+            None
         );
     }
 
@@ -137,20 +141,46 @@ mod tests {
     }
 
     #[test]
-    fn card_does_not_inherit_api_discounts_cache_writes_or_long_context() {
+    fn card_prices_all_writes_as_input_without_api_premiums_or_long_context() {
         let pricing = test_bundled_pricing();
         let tokens = TokenBreakdown {
             input: 300_000,
             cache_read: 100_000,
             cache_write_5m: 100_000,
+            cache_write_1h: 100_000,
+            cache_write_12h: 100_000,
             output: 20_000,
             ..Default::default()
         };
-        assert_eq!(equivalent_usd(&pricing, "gpt-6-astra", tokens), Some(4.1));
+        assert_eq!(equivalent_usd(&pricing, "gpt-6-astra", tokens), Some(7.1));
         assert_eq!(
             equivalent_usd(&pricing, "gpt-6-astra-ultra-fast", tokens),
-            Some(8.2)
+            Some(14.2)
         );
+        let input_only = TokenBreakdown {
+            input: 600_000,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write_12h: 0,
+            ..tokens
+        };
+        for speed in [
+            RequestSpeed::Standard,
+            RequestSpeed::Fast,
+            RequestSpeed::Ultrafast,
+        ] {
+            assert_eq!(
+                equivalent_usd(&pricing, "gpt-6-astra", TokenBreakdown { speed, ..tokens }),
+                equivalent_usd(
+                    &pricing,
+                    "gpt-6-astra",
+                    TokenBreakdown {
+                        speed,
+                        ..input_only
+                    }
+                ),
+            );
+        }
         assert!(equivalent_usd(&pricing, "gpt-5.3-codex-spark", tokens).is_none());
         assert!(equivalent_usd(&pricing, "gpt-6-astra-unknown", tokens).is_none());
     }

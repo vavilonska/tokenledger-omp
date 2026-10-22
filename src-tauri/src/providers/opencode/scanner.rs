@@ -191,7 +191,7 @@ fn aggregate_history(
     now: DateTime<Utc>,
 ) -> UsageHistory {
     let today = now.with_timezone(&Local).date_naive();
-    let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
+    let since = today.checked_sub_days(Days::new(29)).unwrap_or(today);
     let mut accumulator = DailyUsageAccumulator::default();
     for record in records {
         if record.timestamp > now {
@@ -296,6 +296,33 @@ mod unit_tests {
         assert_eq!(records[0].tokens, 200);
         assert_eq!(records[0].cost, Some(2.0));
         assert_eq!(records[0].cost_provenance, CostProvenance::Exact);
+    }
+
+    #[test]
+    fn calendar_window_keeps_first_midnight_and_rejects_future_instants() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        let first = now.with_timezone(&chrono::Local).date_naive()
+            .checked_sub_days(chrono::Days::new(29)).unwrap();
+        let midnight = chrono::Local
+            .from_local_datetime(&first.and_hms_opt(0, 0, 0).unwrap())
+            .single().unwrap().to_utc();
+        let rows = [
+            midnight - chrono::Duration::seconds(1),
+            midnight,
+            now,
+            now + chrono::Duration::seconds(1),
+        ].into_iter().map(|timestamp| {
+            let mut row = record(100, Some(1.0), true);
+            row.timestamp = timestamp;
+            row
+        });
+        let history = aggregate_history(rows, now);
+        assert_eq!(history.today.unwrap().tokens, 100);
+        let period = history.last_30_days.unwrap();
+        assert_eq!(period.tokens, 200);
+        assert_eq!(period.estimated_cost_usd, Some(2.0));
+        assert_eq!(history.daily.len(), 2);
+        assert_eq!(history.daily.last().unwrap().date, first.to_string());
     }
 
     #[test]

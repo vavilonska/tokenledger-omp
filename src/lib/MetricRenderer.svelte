@@ -1,6 +1,6 @@
 <script lang="ts">
   import { usageSourceNote, type ProviderCatalogIndex } from './metrics';
-  import { creditHistory } from './costDisplay';
+  import { creditHistory, usagePeriod, usagePeriodLabel } from './costDisplay';
   import QuotaMetric from './QuotaMetric.svelte';
   import StatusMetric from './StatusMetric.svelte';
   import UsageMetric from './UsageMetric.svelte';
@@ -33,19 +33,11 @@
   );
   const period = $derived.by(() => {
     if (definition?.source.kind !== 'usage') return null;
-    if (definition.source.period === 'today') return usage.today;
-    if (definition.source.period === 'yesterday') return usage.yesterday;
-    if (definition.source.period === 'sessionCycle') return usage.sessionCycle ?? null;
-    if (definition.source.period === 'weeklyCycle') return usage.weeklyCycle ?? null;
-    return usage.last30Days;
+    return usagePeriod(usage, definition.source.period);
   });
   const usageLabel = $derived(
-    credits && definition?.source.kind === 'usage'
-      ? definition.source.period === 'sessionCycle'
-        ? '5h Credits'
-        : definition.source.period === 'weeklyCycle'
-          ? 'Weekly Credits'
-          : definition.label
+    definition?.source.kind === 'usage'
+      ? usagePeriodLabel(definition.label, definition.source.period, credits)
       : (definition?.label ?? ''),
   );
   const cycles = $derived(

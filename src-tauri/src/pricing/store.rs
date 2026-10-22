@@ -674,16 +674,16 @@ mod tests {
     }
 
     #[test]
-    fn sol_6_1_survives_stale_and_equal_revision_dynamic_feeds() {
-        for updated_at in ["2026-09-23", "2026-09-30T00:00:00Z", "2026-10-15T00:00:00Z"] {
+    fn authoritative_rates_survive_stale_and_equal_revision_dynamic_feeds() {
+        for updated_at in ["2026-09-23", "2026-10-15T00:00:00Z", "2026-10-22T00:00:00Z"] {
             let directory = tempdir().unwrap();
             let http = Arc::new(StubHttp::default());
-            http.push(response(br#"{"gpt-6.1-sol":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-6.1-sol-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198}}"#));
+            http.push(response(br#"{"gpt-6.1-sol":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-6.1-sol-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198},"gpt-5.4":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-5.4-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198},"gpt-5.5":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"claude-sonnet-5-5":{"input_cost_per_token":0.000002,"output_cost_per_token":0.000010,"cache_read_input_token_cost":0.0000002}}"#));
             http.push(response(
                 br#"{"openai":{"models":{"gpt-6.1-sol":{"cost":{"input":88,"output":88}}}}}"#,
             ));
             http.push(response(&supplement(Some(updated_at), 9.0)));
-            let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
+            let now = Utc.with_ymd_and_hms(2026, 10, 22, 12, 0, 0).unwrap();
             let store = PricingStore::with_dependencies(
                 directory.path().to_path_buf(),
                 BundledSources::default(),
@@ -721,6 +721,50 @@ mod tests {
                 )
                 .unwrap();
             assert!((ultrafast - 0.6).abs() < 1e-9, "revision {updated_at}");
+            let long_tokens = super::super::TokenBreakdown {
+                input: 300_000,
+                output: 1_000,
+                ..Default::default()
+            };
+            for snapshot in [store.snapshot(), Arc::new(reloaded)] {
+                for (model, expected) in [("gpt-5.4", 1.5225), ("gpt-5.5", 3.045)] {
+                    let cost = snapshot
+                        .estimated_cost_dollars(model, long_tokens, true)
+                        .unwrap();
+                    assert!(
+                        (cost - expected).abs() < 1e-9,
+                        "{model}/{updated_at}: {cost}"
+                    );
+                    let fast = super::super::TokenBreakdown {
+                        speed: super::super::RequestSpeed::Fast,
+                        ..long_tokens
+                    };
+                    for apply_long_context in [false, true] {
+                        assert_eq!(
+                            snapshot.estimated_cost_dollars(model, fast, apply_long_context),
+                            None
+                        );
+                        assert_eq!(
+                            snapshot.estimated_cost_dollars(
+                                &format!("{model}-fast"),
+                                long_tokens,
+                                apply_long_context
+                            ),
+                            None
+                        );
+                    }
+                }
+                for model in ["gpt-5.4-pro", "gpt-5.5-pro"] {
+                    let cost = snapshot
+                        .estimated_cost_dollars(model, long_tokens, true)
+                        .unwrap();
+                    assert!((cost - 18.27).abs() < 1e-9, "{model}/{updated_at}: {cost}");
+                }
+                assert_eq!(
+                    snapshot.estimated_cost_dollars("claude-sonnet-5-5", tokens, true),
+                    Some(0.1)
+                );
+            }
         }
     }
 

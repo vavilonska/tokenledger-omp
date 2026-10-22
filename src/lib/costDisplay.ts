@@ -1,5 +1,5 @@
 import { formatMetricNumber } from './metricFormat';
-import type { UsageHistory } from './types';
+import type { UsageHistory, UsagePeriod } from './types';
 
 export const CREDITS_PER_USD = 25;
 export const CREDIT_ANCHOR = '2,500 credits = $100';
@@ -32,4 +32,27 @@ export function creditHistory(history: UsageHistory): UsageHistory {
       unknownModels: [],
     }
   );
+}
+
+export function usagePeriod(history: UsageHistory, periodId: string): UsagePeriod | null {
+  switch (periodId) {
+    case 'today':
+      return history.today;
+    case 'yesterday':
+      return history.yesterday;
+    case 'last30Days':
+      return history.last30Days;
+    case 'sessionCycle':
+      return history.sessionCycle ?? null;
+    case 'weeklyCycle':
+      return history.weeklyCycle ?? null;
+    default:
+      return null;
+  }
+}
+
+export function usagePeriodLabel(label: string, periodId: string, credits = false) {
+  if (credits && periodId === 'sessionCycle') return '5h Credits';
+  if (credits && periodId === 'weeklyCycle') return 'Weekly Credits';
+  return label;
 }

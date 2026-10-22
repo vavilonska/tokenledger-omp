@@ -1,6 +1,6 @@
 {
   "$comment": "OpenQuota pricing supplement. Prices models that no public catalog carries, supplies fast-variant multipliers the catalogs omit, and maps provider log model slugs to canonical pricing keys (LiteLLM keys, models.dev ids, or entries in this file). The raw main-branch file is refreshed by installed apps, so merged corrections arrive without an app release. Rates are USD per million tokens.",
-  "updated_at": "2026-10-15T00:00:00Z",
+  "updated_at": "2026-10-22T00:00:00Z",
   "pricing": {
     "auto": {
       "input_per_million": 1.25,
@@ -58,10 +58,11 @@
       "output_per_million": 6.0
     },
     "grok-4.5-fast": {
+      "$comment": "Cursor-specific list price verified 2026-10-22: https://cursor.com/docs/models-and-pricing. Output is $18/M, not a uniform 2x multiplier on Grok 4.5.",
       "input_per_million": 4.0,
       "cache_write_per_million": 4.0,
       "cache_read_per_million": 1.0,
-      "output_per_million": 12.0
+      "output_per_million": 18.0
     },
     "grok-4.6": {
       "$comment": "Cursor's published Grok 4.6 list price. Temporary launch discounts are intentionally excluded.",
@@ -132,12 +133,65 @@
       "cache_read_per_million": 0.2,
       "output_per_million": 10.0
     },
+    "claude-sonnet-5-5": {
+      "$comment": "Anthropic standard price verified 2026-10-22: https://platform.claude.com/docs/en/about-claude/pricing. Sonnet 5.5 reads are 0.05x input; older catalog entries still use Sonnet 5's 0.1x.",
+      "input_per_million": 2.0,
+      "cache_write_per_million": 2.5,
+      "cache_read_per_million": 0.1,
+      "output_per_million": 10.0
+    },
     "claude-4-sonnet-1m": {
       "$comment": "Cursor's long-context Sonnet 4 tier: the whole request bills at the >200k rate.",
       "input_per_million": 6.0,
       "cache_write_per_million": 7.5,
       "cache_read_per_million": 0.6,
       "output_per_million": 22.5
+    },
+    "gpt-5.4": {
+      "$comment": "API price verified 2026-10-22: https://developers.openai.com/api/docs/pricing. Standard prompt >272K doubles input/cache and multiplies output by 1.5. Fast above 272K is not quoted and remains unpriced. Earlier GPT models have no separate cache-write charge. Overrides stale disk catalogs.",
+      "input_per_million": 2.5,
+      "cache_write_per_million": 2.5,
+      "cache_read_per_million": 0.25,
+      "output_per_million": 15.0,
+      "long_context_threshold_tokens": 272000,
+      "fast_max_priced_prompt_tokens": 272000,
+      "input_above_200k_per_million": 5.0,
+      "cache_read_above_200k_per_million": 0.5,
+      "cache_write_above_200k_per_million": 5.0,
+      "output_above_200k_per_million": 22.5
+    },
+    "gpt-5.5": {
+      "$comment": "API price verified 2026-10-22: https://developers.openai.com/api/docs/pricing. Standard prompt >272K doubles input/cache and multiplies output by 1.5. Fast above 272K is not quoted and remains unpriced. Cache writes use ordinary input, not GPT-5.6+'s explicit-write premium.",
+      "input_per_million": 5.0,
+      "cache_write_per_million": 5.0,
+      "cache_read_per_million": 0.5,
+      "output_per_million": 30.0,
+      "long_context_threshold_tokens": 272000,
+      "fast_max_priced_prompt_tokens": 272000,
+      "input_above_200k_per_million": 10.0,
+      "cache_read_above_200k_per_million": 1.0,
+      "cache_write_above_200k_per_million": 10.0,
+      "output_above_200k_per_million": 45.0
+    },
+    "gpt-5.4-pro": {
+      "$comment": "Standard API price verified 2026-10-22: https://developers.openai.com/api/docs/pricing. Prompt >272K changes the whole request from $30/$180 input/output to $60/$270. No cached-input price is published; do not assert an explicit cache-read rate.",
+      "input_per_million": 30.0,
+      "cache_write_per_million": 30.0,
+      "output_per_million": 180.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 60.0,
+      "cache_write_above_200k_per_million": 60.0,
+      "output_above_200k_per_million": 270.0
+    },
+    "gpt-5.5-pro": {
+      "$comment": "Standard API price verified 2026-10-22: https://developers.openai.com/api/docs/pricing. Prompt >272K changes the whole request from $30/$180 input/output to $60/$270. No cached-input price is published; do not assert an explicit cache-read rate.",
+      "input_per_million": 30.0,
+      "cache_write_per_million": 30.0,
+      "output_per_million": 180.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 60.0,
+      "cache_write_above_200k_per_million": 60.0,
+      "output_above_200k_per_million": 270.0
     },
     "gpt-6-astra": {
       "$comment": "Standard API pricing verified 2026-09-30: https://developers.openai.com/api/docs/pricing. API Fast is 2x; Ultrafast is 6x. Codex purchased credits independently use Fast 2x/Ultrafast 6x, not included subscription usage (2.5x/8x). Batch/Flex excluded.",
@@ -321,6 +375,7 @@
     { "pattern": "^claude-opus-5(?:\\[1m\\])?(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-opus-5" },
     { "pattern": "^claude-fable-5(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-fable-5" },
     { "pattern": "^claude-sonnet-5(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-sonnet-5" },
+    { "pattern": "^(?:anthropic/)?claude-sonnet-5(?:-|\\.)5(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-sonnet-5-5" },
     { "pattern": "^gemini-2\\.5-flash$", "canonical": "gemini-2.5-flash" },
     { "pattern": "^gemini-3-flash(?:-preview)?$", "canonical": "gemini-3-flash-preview" },
     { "pattern": "^gemini-3\\.5-flash(?:-preview)?$", "canonical": "gemini-3.5-flash" },
@@ -353,10 +408,14 @@
     { "pattern": "^gpt-5\\.3-codex(?:-(?:low|high|xhigh))?$", "canonical": "gpt-5.3-codex" },
     { "pattern": "^gpt-5\\.4-mini(?:-(?:none|low|medium|high|xhigh))?$", "canonical": "gpt-5.4-mini" },
     { "pattern": "^gpt-5\\.4-nano(?:-(?:none|low|medium|high|xhigh))?$", "canonical": "gpt-5.4-nano" },
-    { "pattern": "^gpt-5\\.4-(?:low|medium|high|xhigh)-fast$", "canonical": "gpt-5.4-fast" },
-    { "pattern": "^gpt-5\\.4-(?:low|medium|high|xhigh)$", "canonical": "gpt-5.4" },
-    { "pattern": "^gpt-5\\.5(?:-(?:low|medium|high|xhigh|extra-high))?-fast$", "canonical": "gpt-5.5-fast" },
-    { "pattern": "^gpt-5\\.5(?:-(?:low|medium|high|xhigh|extra-high))?$", "canonical": "gpt-5.5" },
+    { "pattern": "^(?:(?:openai|openai-codex)/)?gpt-5\\.4-pro(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-5.4-pro" },
+    { "pattern": "^(?:(?:openai|openai-codex)/)?gpt-5\\.5-pro(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-5.5-pro" },
+    { "pattern": "^(?:(?:openai|openai-codex)/)?gpt-5\\.4(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-5.4-fast" },
+    { "pattern": "^(?:(?:openai|openai-codex)/)?gpt-5\\.4(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-5.4-fast" },
+    { "pattern": "^(?:(?:openai|openai-codex)/)?gpt-5\\.4(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-5.4" },
+    { "pattern": "^(?:(?:openai|openai-codex)/)?gpt-5\\.5(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|extra-high|max|ultra))?-fast$", "canonical": "gpt-5.5-fast" },
+    { "pattern": "^(?:(?:openai|openai-codex)/)?gpt-5\\.5(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:none|low|medium|high|xhigh|extra-high|max|ultra))?$", "canonical": "gpt-5.5-fast" },
+    { "pattern": "^(?:(?:openai|openai-codex)/)?gpt-5\\.5(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|extra-high|max|ultra))?$", "canonical": "gpt-5.5" },
     { "pattern": "^(?:gpt-)?daybreak-blue-latest$", "canonical": "gpt-5.6-sol" },
     { "pattern": "^(?:gpt-)?daybreak-red-latest$", "canonical": "gpt-5.6-cyber" },
     { "pattern": "^gpt-5\\.6(?:-(?:none|low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-5.6-sol-fast" },

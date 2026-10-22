@@ -262,10 +262,28 @@ impl DailyUsageAccumulator {
         }
     }
 
+    /// Summarizes the caller-selected range without imposing a calendar-history window.
+    pub fn period(&self, source_note: &str) -> Option<UsagePeriod> {
+        self.period_for_days(
+            self.days.keys().chain(
+                self.unknown_models_by_day
+                    .keys()
+                    .filter(|date| !self.days.contains_key(*date)),
+            ),
+            source_note,
+        )
+    }
+
     /// Builds spend periods for observed usage, including unpriced tokens with a null cost.
     /// Idle periods stay absent; calendar gaps are filled by the UI layer.
-    pub fn build(self, now: DateTime<Utc>, source_note: &str) -> UsageHistory {
+    pub fn build(mut self, now: DateTime<Utc>, source_note: &str) -> UsageHistory {
         let today = now.with_timezone(&Local).date_naive();
+        let since = today
+            .checked_sub_days(Days::new(29))
+            .unwrap_or(NaiveDate::MIN);
+        self.days.retain(|date, _| *date >= since && *date <= today);
+        self.unknown_models_by_day
+            .retain(|date, _| *date >= since && *date <= today);
         let yesterday = today.checked_sub_days(Days::new(1));
         let daily = self
             .days
@@ -322,7 +340,11 @@ impl DailyUsageAccumulator {
         }
     }
 
-    fn period_for_days(&self, dates: &[NaiveDate], source_note: &str) -> Option<UsagePeriod> {
+    fn period_for_days<'a>(
+        &self,
+        dates: impl IntoIterator<Item = &'a NaiveDate>,
+        source_note: &str,
+    ) -> Option<UsagePeriod> {
         let mut total = DayAccumulator::default();
         let mut unknown_models = HashSet::new();
         for date in dates {
@@ -572,6 +594,52 @@ mod tests {
 
     fn day(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
         chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    #[test]
+    fn calendar_window_keeps_exactly_thirty_days_and_scopes_unknowns() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 26, 12, 0, 0).unwrap();
+        let today = now.with_timezone(&chrono::Local).date_naive();
+        let first = today.checked_sub_days(chrono::Days::new(29)).unwrap();
+        let excluded = first.pred_opt().unwrap();
+        let future = today.succ_opt().unwrap();
+        let mut accumulator = DailyUsageAccumulator::default();
+        accumulator.add(first, 100, 1.0, "first", Some((10, 90)));
+        accumulator.add(today.pred_opt().unwrap(), 200, 2.0, "yesterday", None);
+        accumulator.add(today, 300, 3.0, "today", None);
+        accumulator.add(excluded, 900, 9.0, "expired", None);
+        accumulator.add(future, 900, 9.0, "future", None);
+        accumulator.add_unknown_model(excluded, "expired-unknown");
+        accumulator.add_unknown_model(future, "future-unknown");
+        let history = accumulator.build(now, "test");
+        assert_eq!(history.today.unwrap().tokens, 300);
+        assert_eq!(history.yesterday.unwrap().tokens, 200);
+        let period = history.last_30_days.unwrap();
+        assert_eq!(period.tokens, 600);
+        assert_eq!(period.estimated_cost_usd, Some(6.0));
+        assert!(period.estimate_complete);
+        assert!(history.unknown_models.is_empty());
+        assert_eq!(history.daily.len(), 3);
+        assert_eq!(history.daily.last().unwrap().date, first.to_string());
+    }
+
+    #[test]
+    fn explicit_period_preserves_old_usage_and_unknown_only_dates() {
+        let now = Utc.with_ymd_and_hms(2026, 6, 26, 12, 0, 0).unwrap();
+        let today = now.with_timezone(&chrono::Local).date_naive();
+        let old = today.checked_sub_days(chrono::Days::new(60)).unwrap();
+        let mut accumulator = DailyUsageAccumulator::default();
+        accumulator.add(old, 100, 1.0, "old", None);
+        accumulator.add(today, 200, 2.0, "recent", None);
+        accumulator.add_unknown_model(old.pred_opt().unwrap(), "old-unknown");
+        let period = accumulator.period("cycle").unwrap();
+        assert_eq!(period.tokens, 300);
+        assert_eq!(period.estimated_cost_usd, Some(3.0));
+        assert_eq!(period.unknown_models, ["old-unknown"]);
+        assert!(!period.estimate_complete);
+        let history = accumulator.build(now, "history");
+        assert_eq!(history.last_30_days.unwrap().tokens, 200);
+        assert!(history.unknown_models.is_empty());
     }
 
     #[test]

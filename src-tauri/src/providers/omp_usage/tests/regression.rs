@@ -1,3 +1,4 @@
+use chrono::{Days, Local};
 use serde_json::{json, Value};
 
 use super::*;
@@ -732,4 +733,110 @@ fn only_explicit_memory_excludes_cost_without_losing_usage_in_both_price_bases()
             assert!(!period.estimate_complete);
         }
     }
+}
+
+#[test]
+fn explicit_cache_write_ttls_survive_schema_refresh_retention_and_memory_exclusion() {
+    let directory = tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+    let mut call = auxiliary("writes", 1_000, 0);
+    call["serviceTier"] = json!("default");
+    call["usage"]["cacheRead"] = json!(4_000);
+    call["usage"]["cacheWrite"] = json!(7_000);
+    call["usage"]["cacheWrite12h"] = json!(4_000);
+    write_session(directory.path(), "writes.jsonl", &[call.clone()]);
+    let path = directory.path().join("agent/sessions/writes.jsonl");
+    let fingerprint = LogFileFingerprint::from_metadata(&fs::metadata(&path).unwrap()).unwrap();
+    let mut old = serde_json::to_value(parse_jsonl(&fs::read_to_string(&path).unwrap())).unwrap();
+    old[0].as_object_mut().unwrap().remove("cache_write_12h");
+    storage
+        .save_log_events(
+            "omp",
+            &path,
+            fingerprint.size,
+            fingerprint.modified_nanos,
+            &json!({"schema_version":6,"events":old}).to_string(),
+        )
+        .unwrap();
+    let mut pricing = crate::pricing::test_bundled_pricing();
+    let (_, histories) = source_scan(&storage, directory.path(), "account-a", &pricing);
+    for history in histories {
+        let period = history.last_30_days.unwrap();
+        assert_eq!(period.tokens, 12_000);
+        assert!((period.estimated_cost_usd.unwrap() - 0.0299).abs() < 1e-12);
+    }
+    fs::remove_file(&path).unwrap();
+    let retained: Vec<SessionUsageEvent> =
+        storage.load_usage_events("omp", "account-a", 1).unwrap();
+    assert_eq!(retained[0].cache_write_12h, 4_000);
+    assert_eq!(retained[0].cache_usage, Some((4_000, 12_000)));
+    pricing.codex_credit_mode = true;
+    let (_, histories) = source_scan(&storage, directory.path(), "account-a", &pricing);
+    for history in histories {
+        assert!((history.last_30_days.unwrap().estimated_cost_usd.unwrap() - 0.0164).abs() < 1e-12);
+    }
+    call["id"] = json!("memory-writes");
+    call["purpose"] = json!("memory");
+    write_session(directory.path(), "memory.jsonl", &[call.clone()]);
+    call["id"] = json!("invalid-writes");
+    call["purpose"] = json!("title");
+    call["usage"]["cacheWrite1h"] = json!(3_001);
+    write_session(directory.path(), "invalid.jsonl", &[call]);
+    let (outcome, histories) = source_scan(&storage, directory.path(), "account-a", &pricing);
+    assert_eq!(
+        outcome
+            .events
+            .iter()
+            .filter(|event| event.cost == Some(0.0))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcome
+            .events
+            .iter()
+            .filter(|event| event.cost.is_none())
+            .count(),
+        1
+    );
+    for history in histories {
+        let period = history.last_30_days.unwrap();
+        assert_eq!(period.tokens, 36_000);
+        assert!(!period.estimate_complete);
+        assert!((period.estimated_cost_usd.unwrap() - 0.0164).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn omp_last_thirty_days_include_today_and_twenty_nine_prior_local_dates() {
+    let directory = tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("usage.db")).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 7, 12, 15, 0, 0).unwrap();
+    let today = now.with_timezone(&Local).date_naive();
+    let entries: Vec<_> = [29, 30]
+        .into_iter()
+        .map(|days| {
+            let mut event = auxiliary(&format!("day-{days}"), 100, 0);
+            let date = today.checked_sub_days(Days::new(days)).unwrap();
+            event["timestamp"] = json!(date
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .earliest()
+                .unwrap()
+                .to_utc()
+                .to_rfc3339());
+            event
+        })
+        .collect();
+    write_session(directory.path(), "boundary.jsonl", &entries);
+    let (outcome, histories) = source_scan(
+        &storage,
+        directory.path(),
+        "account-a",
+        &crate::pricing::test_bundled_pricing(),
+    );
+    assert_eq!(outcome.events.len(), 2);
+    assert_eq!(histories[0].last_30_days.as_ref().unwrap().tokens, 100);
+    assert_eq!(histories[0].daily.len(), 1);
 }

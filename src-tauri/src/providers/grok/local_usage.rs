@@ -220,10 +220,13 @@ fn model_id(message: &str, context: &Map<String, Value>) -> Option<String> {
 
 fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing) -> UsageHistory {
     let today = now.with_timezone(&Local).date_naive();
-    let since = today.checked_sub_days(Days::new(30)).unwrap_or(today);
+    let since = today.checked_sub_days(Days::new(29)).unwrap_or(today);
     let mut accumulator = DailyUsageAccumulator::default();
 
     for event in events {
+        if event.timestamp > now {
+            continue;
+        }
         let date = event.timestamp.with_timezone(&Local).date_naive();
         if date < since {
             continue;
@@ -354,6 +357,43 @@ mod tests {
         let history = aggregate(parse_jsonl(content), now(), &fixture_pricing());
         assert!(history.today.is_none());
         assert!(history.daily.is_empty());
+    }
+
+    #[test]
+    fn calendar_window_includes_first_midnight_and_excludes_future_instants() {
+        let now = now();
+        let today = now.with_timezone(&chrono::Local).date_naive();
+        let first = today.checked_sub_days(chrono::Days::new(29)).unwrap();
+        let midnight = chrono::Local
+            .from_local_datetime(&first.and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .to_utc();
+        let mut event = parse_jsonl(include_str!("fixtures/usage.jsonl")).remove(0);
+        event.model = Some("grok-build".into());
+        event.prompt = 100;
+        event.cached_prompt = 0;
+        event.completion = 10;
+        event.reasoning = 0;
+        event.cache_usage = Some((0, 100));
+        let events = [
+            midnight - chrono::Duration::seconds(1),
+            midnight,
+            now,
+            now + chrono::Duration::seconds(1),
+        ]
+        .into_iter()
+        .map(|timestamp| {
+            let mut row = event.clone();
+            row.timestamp = timestamp;
+            row
+        })
+        .collect();
+        let history = aggregate(events, now, &fixture_pricing());
+        assert_eq!(history.today.unwrap().tokens, 110);
+        assert_eq!(history.last_30_days.unwrap().tokens, 220);
+        assert_eq!(history.daily.len(), 2);
+        assert_eq!(history.daily.last().unwrap().date, first.to_string());
     }
 
     #[test]

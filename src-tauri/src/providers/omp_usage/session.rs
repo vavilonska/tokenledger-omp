@@ -29,9 +29,13 @@ pub(super) struct SessionUsageEvent {
     pub(super) input: u64,
     pub(super) output: u64,
     pub(super) cache_read: u64,
-    /// Includes the one-hour cache-write bucket.
+    /// Includes both explicitly identified long cache-write buckets.
     pub(super) cache_write: u64,
     pub(super) cache_write_1h: u64,
+    #[serde(default)]
+    pub(super) cache_write_12h: u64,
+    #[serde(default)]
+    pub(super) incomplete_cache_write: bool,
     pub(super) total: u64,
     #[serde(default)]
     pub(super) cache_usage: Option<(u64, u64)>,
@@ -53,7 +57,7 @@ pub(super) struct SessionUsageEvent {
 
 impl SessionUsageEvent {
     pub(super) fn has_complete_usage(&self) -> bool {
-        self.orchestration.as_ref().is_none_or(|usage| usage.valid)
+        !self.incomplete_cache_write && self.orchestration.as_ref().is_none_or(|usage| usage.valid)
     }
 }
 
@@ -197,12 +201,28 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
             orchestration.merge_into(&mut billable);
         }
         let [input, output, cache_read] = billable;
-        let complete_usage = orchestration.as_ref().is_none_or(|usage| usage.valid);
+        let orchestration_complete = orchestration.as_ref().is_none_or(|usage| usage.valid);
         let cache_write = usage.get("cacheWrite").and_then(Value::as_u64).unwrap_or(0);
         let cache_write_1h = usage
             .get("cacheWrite1h")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        let cache_write_12h = usage
+            .get("cacheWrite12h")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let incomplete_cache_write =
+            ["cacheWrite", "cacheWrite1h", "cacheWrite12h"]
+                .iter()
+                .any(|key| {
+                    usage
+                        .get(*key)
+                        .is_some_and(|value| value.as_u64().is_none())
+                })
+                || cache_write_1h
+                    .checked_add(cache_write_12h)
+                    .is_none_or(|long| long > cache_write);
+        let complete_usage = orchestration_complete && !incomplete_cache_write;
         let total = usage
             .get("totalTokens")
             .and_then(Value::as_u64)
@@ -255,6 +275,8 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
             cache_read,
             cache_write,
             cache_write_1h,
+            cache_write_12h,
+            incomplete_cache_write,
             total,
             speed,
             entry_kind: entry_type.map(str::to_owned),
