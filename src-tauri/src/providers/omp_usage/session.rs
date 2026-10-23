@@ -20,6 +20,10 @@ pub(super) struct SessionUsageEvent {
     pub(super) response_id: Option<String>,
     #[serde(default)]
     pub(super) session_id: Option<String>,
+    /// Some(true) proves this request predates a fork's creation. None is legacy/unproven,
+    /// not an original: old journals may already contain the cost-reset fork copy.
+    #[serde(default)]
+    pub(super) inherited_from_fork: Option<bool>,
     /// One-based occurrence within this session's anonymous calls at the same time/model.
     /// Zero denotes a legacy cache; normalization restores the ordinal before journaling.
     #[serde(default)]
@@ -58,6 +62,29 @@ pub(super) struct SessionUsageEvent {
 impl SessionUsageEvent {
     pub(super) fn has_complete_usage(&self) -> bool {
         !self.incomplete_cache_write && self.orchestration.as_ref().is_none_or(|usage| usage.valid)
+    }
+}
+
+/// Select the whole authoritative fact, never splice one copy's cost into another's tokens.
+/// Original requests outrank legacy facts, which in turn outrank proven inherited copies.
+/// Equal-provenance copies cannot replace retained facts from another session; rereading the
+/// same source still applies parser corrections, including explicitly unknown tiers.
+pub(super) fn merge_session_event(
+    existing: &SessionUsageEvent,
+    incoming: &SessionUsageEvent,
+) -> SessionUsageEvent {
+    let authority = |event: &SessionUsageEvent| match event.inherited_from_fork {
+        Some(false) => 2,
+        None => 1,
+        Some(true) => 0,
+    };
+    if authority(existing) > authority(incoming)
+        || (authority(existing) == authority(incoming)
+            && existing.session_id != incoming.session_id)
+    {
+        existing.clone()
+    } else {
+        incoming.clone()
     }
 }
 
@@ -120,6 +147,8 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
     let mut events = Vec::new();
     let mut has_header = false;
     let mut session_id = None;
+    let mut parent_session = false;
+    let mut session_started_at = None;
     let mut branch_tiers = HashMap::<String, Option<RequestSpeed>>::new();
 
     for line in content.lines() {
@@ -131,6 +160,8 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
         if entry_type == Some("session") {
             has_header = true;
             session_id = entry.get("id").and_then(Value::as_str).map(str::to_owned);
+            parent_session = entry.get("parentSession").and_then(Value::as_str).is_some();
+            session_started_at = entry.get("timestamp").and_then(parse_timestamp);
             branch_tiers.clear();
             continue;
         }
@@ -257,6 +288,11 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
         events.push(SessionUsageEvent {
             cache_usage,
             session_id: session_id.clone(),
+            inherited_from_fork: if parent_session {
+                session_started_at.map(|started_at| timestamp < started_at)
+            } else {
+                Some(false)
+            },
             anonymous_occurrence: 0,
             id: entry
                 .get("id")

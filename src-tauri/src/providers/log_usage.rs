@@ -156,6 +156,7 @@ where
         |_| {},
         event_key,
         include,
+        None,
     )
 }
 
@@ -173,10 +174,28 @@ pub fn retain_log_usage_with_normalization<T>(
     normalize: impl Fn(&mut [T]),
     event_key: impl Fn(&T) -> Result<String, serde_json::Error>,
     include: impl Fn(&T) -> bool,
+    merge: Option<fn(&T, &T) -> T>,
 ) -> Result<Vec<T>, LogCacheError>
 where
     T: Serialize + DeserializeOwned,
 {
+    let record = |events: &[T]| {
+        if let Some(merge) = merge {
+            storage.record_usage_events_with_reconciliation(
+                provider_id,
+                identity_key,
+                1,
+                events,
+                &event_key,
+                &event_key,
+                |_| Ok(None),
+                |_, _| None,
+                merge,
+            )
+        } else {
+            storage.record_usage_events(provider_id, identity_key, 1, events, &event_key)
+        }
+    };
     for (path, json) in
         storage.recoverable_log_events(provider_id, identity_key, identity_provider)?
     {
@@ -192,7 +211,7 @@ where
         let mut events = cached.events;
         normalize(&mut events);
         events.retain(&include);
-        storage.record_usage_events(provider_id, identity_key, 1, &events, &event_key)?;
+        record(&events)?;
     }
     for path in paths {
         if let Some(mut events) =
@@ -200,7 +219,7 @@ where
         {
             normalize(&mut events);
             events.retain(&include);
-            storage.record_usage_events(provider_id, identity_key, 1, &events, &event_key)?;
+            record(&events)?;
         }
     }
     storage.prune_log_events(provider_id, &paths.iter().cloned().collect())?;

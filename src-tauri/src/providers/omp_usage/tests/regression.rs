@@ -1,3 +1,5 @@
+mod forks;
+
 use chrono::{Days, Local};
 use serde_json::{json, Value};
 
@@ -68,6 +70,7 @@ fn legacy_values(events: &[SessionUsageEvent]) -> Value {
             "entry_kind",
             "purpose",
             "recorded_cost",
+            "inherited_from_fork",
             "cache_usage",
         ] {
             value.remove(key);

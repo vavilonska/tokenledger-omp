@@ -22,7 +22,9 @@ use crate::{
 mod session;
 
 use super::log_usage::LogCacheError;
-use session::{normalize_anonymous_occurrences, parse_jsonl, SessionUsageEvent};
+use session::{
+    merge_session_event, normalize_anonymous_occurrences, parse_jsonl, SessionUsageEvent,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OmpUsageError {
@@ -174,7 +176,7 @@ pub(super) fn scan_sessions_into(
         source.cache_key,
         source.identity_key,
         "codex",
-        7,
+        8,
         1,
         &paths,
         parse_jsonl,
@@ -206,6 +208,7 @@ pub(super) fn scan_sessions_into(
                     .allowed_models
                     .contains(&pricing.display_family(&event.model).as_str())
         },
+        Some(merge_session_event),
     )?;
     events.sort_by_key(|event| event.timestamp);
     // References keep the response identifiers out of an extra allocation per event.

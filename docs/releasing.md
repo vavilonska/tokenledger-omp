@@ -1,5 +1,44 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.11 OMP fork 计费证据修复（源码验收）
+
+四处应用版本更新为 0.5.11。OMP fork 继承的旧请求保留 ID 和 tokens，但可能清零费用；
+入账现在按整条记录选择原件、来源未知旧事实、已证明继承副本的优先级，不能借另一快照
+的价格配当前 tokens。parser schema 8 重解析现存源并恢复污染事实，不改变请求键、
+首次观察账号或 Fast／Ultrafast 定价。原件显式非法／冲突仍未知；无原件证据不猜 Standard，
+不增加 job-widget 用途兜底，不手改正式账本。公开身份及不包含 QuantLab 的边界不变。
+
+实际 GNU x64 检查均退出 0：
+
+- `cargo test --target x86_64-pc-windows-gnu --lib providers::omp_usage`：46 项。
+- 同命令过滤 `providers::log_usage`：6 项；`storage::tests`：15 项。
+- `cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings`。
+- 受影响文件 `rustfmt --edition 2021 --check --config skip_children=true`。
+- `corepack pnpm verify:versions`。
+
+临时 ignored 验收直接调用生产 `scan_local_usage`，使用私有真实账本的一致性隔离副本、
+复制的安装定价和真实源发现／同账号校验，固定时间 `2026-10-23T08:21:13.959583300Z`。
+两次完整 usage DTO（含请求数、tokens、历史金额）完全一致，冷／热扫描分别
+229.141／99.702 秒；不是仅凭合成 fixture 或公式。19 条共 87,334 tokens 恢复原件
+费用 $0.1323832，旧 event/cycle 键、token 总量和首账号零丢失／零变更；
+新增入账请求全部晚于固定时间。临时入口已移除。
+
+当前周 API $420.6539418 → $420.665251，credits USD-equivalent
+$365.1335548 → $365.144864；完整额度恢复为 $1752.77187917／$1521.43693333。
+10 月 20 日开始的历史周期 API $1407.5002506 → $1407.6213246，
+credits $1237.115336，额度分别 $1636.76898209／$1438.50620465，均恢复 complete。
+今日 API $436.487941、昨日 $841.2486922，以及 10 月 20–23 日每日计价恢复完整。
+30 日仍 partial：9 月 24 日及 9 月 27 日至 10 月 10 日的旧 assistant/find 等请求
+缺少可识别档位；10 月 15 日两条 `gpt-5.6-luna` task-completion-probe 为原件，
+虽有正 recorded cost 但 speed 缺失，现有历史推速覆盖 Sol 6.1/Astra，不包含该模型。
+这些不是本次清零 fork 覆盖，不猜档位，也不声称今后绝无恢复可能。公开 30 日 tokens
+比私有少 3,098,097，来自未接入的私有 QuantLab。
+
+两版证据集中在私有工作区 `.local/fork-pricing-20261023/`，不提交私人账本。
+首次临时 runner 的 SQLite count 使用 `u64` 编译失败，改 `i64` 后通过；私有全仓
+fmt 还指出无关 Cursor/OpenCode 历史格式，未扩大修改，只检查本次 Rust 文件。
+本次不提交／推送、不建 tag／Release、不打包或安装公开产品；已发布 0.5.8 下载不变。
+
 ## 0.5.10 滚动周期图与用量明细（源码验收）
 
 四处应用版本一致为 0.5.10；保留 TokenLedger OMP 独立产品、数据与凭据边界，不引入
