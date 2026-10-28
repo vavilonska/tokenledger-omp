@@ -63,6 +63,25 @@ fn cache_warm_preserves_verified_fast_and_ultrafast_producer_multipliers() {
 }
 
 #[test]
+fn terra_6_1_does_not_guess_historical_speed_from_new_api_prices() {
+    let mut call = json!({
+        "type": "model_usage", "id": "terra", "parentId": "fast",
+        "timestamp": "2026-09-08T01:02:03Z", "purpose": "title",
+        "provider": "openai-codex", "model": "gpt-6.1-terra",
+        "usage": {"input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 110, "cost": {"input": 0.0001, "output": 0.00005, "total": 0.00015}}
+    });
+    let missing = parse_jsonl(&journal(&[call.clone()])).remove(0);
+    assert_eq!(missing.speed, None);
+    assert_eq!(missing.total, 110);
+    assert!(missing.has_complete_usage());
+    call["serviceTier"] = json!("priority");
+    let explicit = parse_jsonl(&journal(&[call])).remove(0);
+    assert_eq!(explicit.speed, Some(RequestSpeed::Fast));
+    assert_eq!(explicit.total, 110);
+}
+
+#[test]
 fn missing_conflicting_and_zero_cost_evidence_stays_unknown() {
     let mut absent = auxiliary(279, 145, 1.0);
     absent["usage"].as_object_mut().unwrap().remove("cost");

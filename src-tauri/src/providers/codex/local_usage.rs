@@ -1665,6 +1665,59 @@ mod tests {
     }
 
     #[test]
+    fn terra_6_1_turns_keep_long_context_api_separate_from_credits() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 28, 12, 0, 0).unwrap();
+        let content = r#"{"type":"turn_context","payload":{"model":"openai-codex/gpt-6.1-terra-high","service_tier":"fast"}}
+{"timestamp":"2026-10-28T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":272001,"cached_input_tokens":52001,"output_tokens":10000,"total_tokens":282001}}}}
+{"type":"turn_context","payload":{"model":"gpt-6.1-terra","service_tier":"default"}}
+{"timestamp":"2026-10-28T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":272000,"cached_input_tokens":52000,"output_tokens":10000,"total_tokens":282000}}}}"#;
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("codex");
+        let sessions = home.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let source = sessions.join("terra.jsonl");
+        fs::write(&source, content).unwrap();
+        let database = directory.path().join("usage.db");
+        let storage = Storage::open(&database).unwrap();
+        let events = scan_codex_events(
+            &storage,
+            std::slice::from_ref(&home),
+            NaiveDate::MIN,
+            Some("account"),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            assert_eq!(
+                event.speed,
+                if event.input == 272_001 {
+                    RequestSpeed::Fast
+                } else {
+                    RequestSpeed::Standard
+                }
+            );
+        }
+        let mut pricing = test_bundled_pricing();
+        let api = aggregate(events.clone(), now, &pricing).today.unwrap();
+        fs::remove_file(source).unwrap();
+        drop(storage);
+        let storage = Storage::open(&database).unwrap();
+        let retained =
+            scan_codex_events(&storage, &[home], NaiveDate::MIN, Some("account")).unwrap();
+        assert_eq!(retained, events);
+        pricing.codex_credit_mode = true;
+        let credits = aggregate(retained, now, &pricing).today.unwrap();
+        // Input includes cached tokens in Codex logs. The >272K request reprices
+        // all API buckets once; purchased credits have no long-context premium.
+        assert!((api.estimated_cost_usd.unwrap() - 1.3130002).abs() < 1e-9);
+        assert!((credits.estimated_cost_usd.unwrap() - 0.8178001).abs() < 1e-9);
+        assert!(api.estimate_complete);
+        assert!(credits.estimate_complete);
+        assert_eq!(api.tokens, 564_001);
+        assert_eq!(credits.tokens, api.tokens);
+    }
+
+    #[test]
     fn astra_api_long_context_threshold_is_strict_and_applies_once() {
         let pricing = test_bundled_pricing();
         let cost = |input| {
@@ -2827,6 +2880,8 @@ mod model_classification_regressions {
             for (model, known) in [
                 ("gpt-5.5", true),
                 ("gpt-5.5-ultrafast", true),
+                ("gpt-6.1-terra", true),
+                ("openai-codex/gpt-6.1-terra-high-ultrafast", true),
                 ("missing-model", false),
             ] {
                 assert_eq!(model_has_rates(&now, model, &pricing), known);

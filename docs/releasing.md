@@ -1,5 +1,101 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.12 GPT-6.1 Terra 与计价核对
+
+四处应用版本更新为 0.5.12，包括 Cargo.lock 的应用条目。保留 TokenLedger OMP 产品名、
+应用标识、独立数据库与凭据目录，不引入私有业务适配器、数据或凭据。
+
+- Terra canonical `gpt-6.1-terra` 覆盖 `openai/`／`openai-codex/`、日期、官方
+  none／low／medium／high／xhigh／max 推理后缀和 Fast 的两种后缀顺序。
+- API 每百万 tokens：输入 $1、读取缓存 $0.05、30m 写缓存 $1.25、12h 写缓存 $2.50、
+  输出 $5。严格超过 272,000 prompt tokens 才对全请求输入／缓存乘 2、输出乘 1.5；
+  Fast 为 Standard 的 2 倍。显式 Fast 补充价防止旧动态目录抢占新价。
+- 购买 Codex credits 独立价卡：输入 25、读取缓存 1.25、输出 125 credits／百万 tokens，
+  仍按 25 credits = $1 展示美元等值；所有写缓存按普通输入计价，没有 API 长上下文溢价。
+  Fast 为 2 倍，不使用套餐内 2.5 倍消耗。Terra 无已公布 Ultrafast 价，保留 tokens、
+  费用未知；旧 OMP producer 的速度证据合同不扩展到 Terra，不因新 API 价格猜档位。
+- 补充表日期为 `2026-10-28T00:00:00Z`，替换旧版及同日旧缓存；不无差别刷新整个模型目录。
+- 永久回归覆盖 Terra 别名、272K／272001 全 prompt 边界、12h 写缓存、Fast 只乘一次、
+  独立 credits、未知 Ultrafast、旧动态目录刷新／重载和 Codex 生产解析至用量 DTO，
+  并保护缺失 OMP 历史速度仍未知。
+
+核价范围包括现有 OpenAI 6／5.6 系列、5.4／5.5／Pro 长上下文及 Fast、旧常用
+5／5.1／5.2／5.4 mini／nano，当前 Codex 6／5.6／Daybreak／Rosalind 积分价卡，
+Claude Opus／Sonnet／Haiku 与缓存价，以及 Cursor Composer 2.5、Grok 4.5／4.6、
+Kimi K2.7／K3 与 Sonnet 4 1M。可与现行官方页面直接对应的补充价未发现额外错价。
+Sonnet 5.5 的旧目录缓存读取 $0.20 已由补充价 $0.10 覆盖；
+Opus 5.5 Fast 的次目录旧价 $9.60／$48 不会覆盖实际优先派生的 $8／$40。
+Sonnet 4.5 历史 API 长价不机械删除：Cursor 扫描本来就不应用 API 长上下文价。
+
+当前官方页未再列出的 Cursor auto／Composer 1／1.5／2／Bugbot 历史值及
+GPT-5.4／5.5／5.4 mini 旧积分卡保留原值，不能声称已经确认仍是当前价。
+Batch／Flex／区域处理、未携带的价格修饰元数据和套餐内额度不混入本次标准估算。
+
+2026-10-28 官方核对来源：
+
+- [Terra API 模型页](https://developers.openai.com/api/docs/models/gpt-6.1-terra)
+- [OpenAI API 价格](https://developers.openai.com/api/docs/pricing)
+- [Codex 独立购买积分](https://learn.chatgpt.com/docs/pricing#token-rates)
+- [Claude 价格](https://platform.claude.com/docs/en/about-claude/pricing)
+- [Cursor 模型价格](https://cursor.com/docs/models-and-pricing)
+
+### 公开版实际源码与生产扫描验收
+
+2026-10-28 在公开仓执行 GNU x64 定向检查，最终有效用例共 169 项：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu --lib --locked pricing::`：
+  47 项先通过；修正资源引用检查后，单独重跑该项退出 0，共 48 项有效证据。
+- 同命令过滤 `providers::codex::local_usage`：73 项先通过；修正新增用例的扫描顺序假设后，
+  单独重跑该项退出 0，共 74 项有效证据。
+- 同命令过滤 `providers::omp_usage`：47 项通过，退出 0。
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu --locked --lib --tests -- -D warnings`
+  退出 0；仅对本次 6 个 Rust 文件执行 `rustfmt --edition 2021 --check --config skip_children=true`，退出 0。
+- `corepack pnpm verify:versions`：退出 0，四处版本一致为 0.5.12。
+
+首轮资源检查仍假设每个别名都可报价，与 Terra Ultrafast 已知但无公布价格的合同冲突。
+删除目录长度／非空等实现细节断言，保留正则解码完整性及 canonical 的基础模型合法引用；
+不增加 Terra 特例或虚假价。新增 Codex 回归还误把持久账本的 `event_key` 顺序当时间升序，
+改为按事件输入身份核速度，保留金额、tokens 和重启留存断言。首轮定向格式发现一处新增长行，
+仅修该行。版本检查的初始 cmd 包装语法失败，改用 Node 运行 Corepack 官方 JS 入口；
+均复用未变成功证据，不重复整套检查。
+
+临时 Cargo example 直接编译生产 crate 并调用
+`providers::codex::local_usage::scan_local_usage`，沿 `PricingStore` 正式资源加载、
+Codex／OMP 正式源发现及 OMP 同账号校验，使用完全隔离的合成日志、账号元数据和 SQLite；
+没有扫描真实用户历史。4 个场景各执行冷扫与删除源文件后的独立新进程重启，共 8 次真实运行
+全部退出 0；每组完整 API／credits history DTO 完全相等，不只比较公式或单个金额：
+
+| 输入场景 | tokens | API USD | credits 美元等值 | 完整性／未知语义 |
+| --- | ---: | ---: | ---: | --- |
+| Codex Terra Fast 272001 prompt 与 Standard 272000 prompt，无写缓存 | 564001 | 1.3130002 | 0.8178001 | complete |
+| 同两条各增加 60000 个 30m 与 60000 个 12h 写缓存，prompt 总数不变 | 564001 | 1.8380002 | 0.8178001 | complete；与上行差 $0.525 是 API 写缓存溢价 |
+| 首行再加一条 Terra Ultrafast 110 tokens | 564111 | 1.3130002 | 0.8178001 | partial；保留已知金额，Terra 不列为未知模型 |
+| OMP 显式 priority、缺速度、真正未知模型各 110 tokens | 330 | 0.0003 | 0.0003 | partial；只计显式 Fast，缺速度不猜，unknownModels 仅含 `missing-terra-model` |
+
+OMP 模型明细保留 `Oh My Pi` 来源。上述无写／写缓存两组也与私有版相同输入的实际扫描结果一致。
+临时 example 初始直接启动缺动态库，补其 GNU debug 根目录的 `WebView2Loader.dll`
+及 Rust sysroot 运行库搜索路径后闭环；没有改生产源码或全局环境。临时 example 源码已移除。
+去敏命令退出、完整 DTO 和日志仅留在 ignored `.local/terra-0512/`。
+这些证据不外推原生 UI、真实账号刷新或安装验收；本片未提交／推送、安装或创建 GitHub Release。
+既有 v0.5.8 下载记录在产生新的实际公开发布前保持不变。
+
+### 本地公开 0.5.12 安装包
+
+`corepack pnpm build:installer` 退出 0，使用正式脚本指定的
+`x86_64-pc-windows-gnu`／NSIS，`CARGO_BUILD_JOBS=4`；子进程隐藏执行并保留真实退出与日志。
+内含的前端生产构建完成 217 模块；Rust release 构建和 x64 NSIS bundle 均成功。
+
+- 本地交付：`release/TokenLedger-OMP_0.5.12_x64-setup.exe`，10,442,990 bytes，
+  及同名 `.sha256`；源安装包与交付副本摘要一致。
+- SHA-256：`9a71b1ac359d0963788b2d08d3b4b7070f7c5d17b7fe8c4e29a3c739c1ca4bdf`。
+- 安装包和构建应用的 Windows 资源均为产品 `TokenLedger OMP`、ProductVersion／FileVersion
+  `0.5.12`；应用 PE machine 为 `0x8664`（x64）。NSIS 引导 stub 为 `0x014c`，
+  不将它误称为应用架构。
+- 只构建和静态核身份，没有执行公开安装程序／应用、安装、提交／推送或创建 GitHub Release。
+  临时执行器、合成 SQLite／账号元数据及 example 编译工件已清理；精简收据在 ignored
+  `.local/terra-0512/`，旧版本安装包保持不变。
+
+
 ## 0.5.11 OMP fork 计费证据修复（源码验收）
 
 四处应用版本更新为 0.5.11。OMP fork 继承的旧请求保留 ID 和 tokens，但可能清零费用；

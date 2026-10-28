@@ -1,4 +1,4 @@
-//! Codex purchased-credit rate card, verified 2026-10-15:
+//! Codex purchased-credit rate card; currently listed rates verified 2026-10-28:
 //! https://learn.chatgpt.com/docs/pricing#token-rates
 //! https://learn.chatgpt.com/docs/agent-configuration/speed
 //! Kept separate from API catalogs, promotions, Batch/Flex and API Fast rates.
@@ -44,6 +44,7 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
     let (input, cached, output, fast_multiplier) = match base.as_ref() {
         "gpt-6-astra" => (250.0, 25.0, 1250.0, 2.0),
         "gpt-6.1-sol" => (50.0, 2.5, 250.0, 2.0),
+        "gpt-6.1-terra" => (25.0, 1.25, 125.0, 2.0),
         "gpt-6-sol" => (50.0, 5.0, 250.0, 2.0),
         "gpt-6-luna" => (2.5, 0.25, 12.5, 2.0),
         "gpt-5.6-sol" => (100.0, 10.0, 500.0, 2.0),
@@ -51,6 +52,7 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
         "gpt-5.6-luna" => (5.0, 0.5, 30.0, 2.0),
         "gpt-5.6-cyber" => (312.5, 31.25, 1875.0, 2.0),
         "gpt-rosalind-research" => (125.0, 12.5, 625.0, 1.0),
+        // Historical rows retained after removal from the current published card.
         "gpt-5.5" => (125.0, 12.5, 750.0, 2.0),
         "gpt-5.4" => (62.5, 6.25, 375.0, 2.0),
         "gpt-5.4-mini" => (18.75, 1.875, 113.0, 2.0),
@@ -96,6 +98,7 @@ mod tests {
         for (model, expected) in [
             ("gpt-6-astra", 20.0),
             ("gpt-6.1-sol", 4.0),
+            ("gpt-6.1-terra", 2.0),
             ("gpt-6-sol", 4.0),
             ("gpt-6-luna", 0.2),
             ("gpt-5.6-sol", 8.0),

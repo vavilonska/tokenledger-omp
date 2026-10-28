@@ -675,10 +675,15 @@ mod tests {
 
     #[test]
     fn authoritative_rates_survive_stale_and_equal_revision_dynamic_feeds() {
-        for updated_at in ["2026-09-23", "2026-10-15T00:00:00Z", "2026-10-22T00:00:00Z"] {
+        for updated_at in [
+            "2026-09-23",
+            "2026-10-15T00:00:00Z",
+            "2026-10-22T00:00:00Z",
+            "2026-10-28T00:00:00Z",
+        ] {
             let directory = tempdir().unwrap();
             let http = Arc::new(StubHttp::default());
-            http.push(response(br#"{"gpt-6.1-sol":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-6.1-sol-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198},"gpt-5.4":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-5.4-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198},"gpt-5.5":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"claude-sonnet-5-5":{"input_cost_per_token":0.000002,"output_cost_per_token":0.000010,"cache_read_input_token_cost":0.0000002}}"#));
+            http.push(response(br#"{"gpt-6.1-sol":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-6.1-sol-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198},"gpt-6.1-terra":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-6.1-terra-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198},"gpt-5.4":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"gpt-5.4-fast":{"input_cost_per_token":0.000198,"output_cost_per_token":0.000198},"gpt-5.5":{"input_cost_per_token":0.000099,"output_cost_per_token":0.000099},"claude-sonnet-5-5":{"input_cost_per_token":0.000002,"output_cost_per_token":0.000010,"cache_read_input_token_cost":0.0000002}}"#));
             http.push(response(
                 br#"{"openai":{"models":{"gpt-6.1-sol":{"cost":{"input":88,"output":88}}}}}"#,
             ));
@@ -727,6 +732,18 @@ mod tests {
                 ..Default::default()
             };
             for snapshot in [store.snapshot(), Arc::new(reloaded)] {
+                assert_eq!(
+                    snapshot.estimated_cost_dollars(
+                        "openai-codex/gpt-6.1-terra-high",
+                        tokens,
+                        false
+                    ),
+                    Some(0.05)
+                );
+                assert_eq!(
+                    snapshot.estimated_cost_dollars("gpt-6.1-terra-fast", tokens, false),
+                    Some(0.1)
+                );
                 for (model, expected) in [("gpt-5.4", 1.5225), ("gpt-5.5", 3.045)] {
                     let cost = snapshot
                         .estimated_cost_dollars(model, long_tokens, true)

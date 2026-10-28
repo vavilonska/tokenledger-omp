@@ -1,6 +1,6 @@
 {
   "$comment": "OpenQuota pricing supplement. Prices models that no public catalog carries, supplies fast-variant multipliers the catalogs omit, and maps provider log model slugs to canonical pricing keys (LiteLLM keys, models.dev ids, or entries in this file). The raw main-branch file is refreshed by installed apps, so merged corrections arrive without an app release. Rates are USD per million tokens.",
-  "updated_at": "2026-10-22T00:00:00Z",
+  "updated_at": "2026-10-28T00:00:00Z",
   "pricing": {
     "auto": {
       "input_per_million": 1.25,
@@ -242,6 +242,30 @@
       "cache_write_above_200k_per_million": 10.0,
       "output_above_200k_per_million": 30.0
     },
+    "gpt-6.1-terra": {
+      "$comment": "Standard API pricing verified 2026-10-28: https://developers.openai.com/api/docs/models/gpt-6.1-terra. Cached input is 5%; ordinary cache writes use 30m retention, 12h writes use 2.5x input. Fast 2x; no published Terra Ultrafast rate. >272K prompt tokens doubles input/cache and multiplies output by 1.5. Codex purchased credits use an independent card.",
+      "input_per_million": 1.0,
+      "cache_write_per_million": 1.25,
+      "cache_read_per_million": 0.05,
+      "output_per_million": 5.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 2.0,
+      "cache_read_above_200k_per_million": 0.1,
+      "cache_write_above_200k_per_million": 2.5,
+      "output_above_200k_per_million": 7.5
+    },
+    "gpt-6.1-terra-fast": {
+      "$comment": "Published Fast API pricing (2x Standard); explicit rates prevent stale remote Fast catalog entries from winning.",
+      "input_per_million": 2.0,
+      "cache_write_per_million": 2.5,
+      "cache_read_per_million": 0.1,
+      "output_per_million": 10.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 4.0,
+      "cache_read_above_200k_per_million": 0.2,
+      "cache_write_above_200k_per_million": 5.0,
+      "output_above_200k_per_million": 15.0
+    },
     "gpt-6-luna": {
       "input_per_million": 0.1,
       "cache_write_per_million": 0.125,
@@ -315,12 +339,18 @@
     "gpt-6-astra": 2.0,
     "gpt-6-sol": 2.0,
     "gpt-6.1-sol": 2.0,
+    "gpt-6.1-terra": 2.0,
     "gpt-6-luna": 2.0,
     "gpt-5.6-sol": 2.0,
     "gpt-5.6-terra": 2.0,
     "gpt-5.6-luna": 2.0
   },
   "alias_rules": [
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-terra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max))?-ultrafast$", "canonical": "gpt-6.1-terra-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-terra(?:-\\d{4}-?\\d{2}-?\\d{2})?-ultrafast(?:-(?:none|low|medium|high|xhigh|max))?$", "canonical": "gpt-6.1-terra-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-terra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max))?-fast$", "canonical": "gpt-6.1-terra-fast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-terra(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:none|low|medium|high|xhigh|max))?$", "canonical": "gpt-6.1-terra-fast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-terra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max))?$", "canonical": "gpt-6.1-terra"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-ultrafast$", "canonical": "gpt-6.1-sol-ultrafast"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?-ultrafast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.1-sol-ultrafast"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-ultrafast$", "canonical": "gpt-6-astra-ultrafast"},

@@ -16,6 +16,8 @@
 
 基于 [OpenQuota](https://github.com/deviffyy/OpenQuota) 的独立桌面用量面板。集中查看 AI 编程工具的额度、重置时间、Token 用量和费用估算。公开版保留 **Oh My Pi 与 Codex 同账号用量合并、Codex 周额度估算和重置周期历史**，不包含私有业务适配器。
 
+**0.5.12 计价更新**：新增 GPT-6.1 Terra，每百万 tokens 的 API 标准价为输入 $1、缓存读取 $0.05、30 分钟写缓存 $1.25、输出 $5；12 小时写缓存 $2.50。超过 272K prompt tokens 时按全请求输入／缓存 2×、输出 1.5× 计价，Fast 再乘 2。购买 Codex credits 独立使用输入 25、缓存读取 1.25、输出 125 credits／百万 tokens，写缓存按普通输入计价；不套用 API 长上下文溢价，不猜 Terra Ultrafast 或历史缺失速度。保留公开版独立身份与数据目录。价格来源及本次实际验收／发布状态见[发布记录](docs/releasing.md)。
+
 **0.5.11 源码更新**：修复 OMP fork 清零费用的继承副本覆盖原请求计费证据。现存源日志会在刷新时自动重解析恢复，保留 tokens、请求键与首次账号，不把 job-widget 一律当 Standard，不覆盖显式非法／冲突档位。两版真实生产扫描已验证当前与受影响上一周期的 API／credits 计价和额度恢复；旧历史其他缺速仍可令 30 日显示 partial。本次仅本地源码交付，不推送、不发布或安装公开产品；详见[发布记录](docs/releasing.md)。
 
 **0.5.10 源码更新**：周期双图固定显示最近 6 个真实周期，按时间升序、最新在右；不足 6 个不补点，取消分页，完整旧历史仍可在下方滚动查看。选最新时跟随新周期，选旧周期时刷新保留，滑出窗口后回最新；左右键与 Home／End 仅在可见窗口内联动两图。Cache rate 的汇总／模型／来源明细统一次色、紧凑字号与弱分隔，最多 1 位小数并去掉 `.0`，计算口径放在悬浮 title，不再常驻占行。未知、零分母及 partial 语义不变。2026-10-23 定向检查与真实组件无头浏览器烟测通过，覆盖明暗／compact、三处悬浮和 320px 窄屏滚动，证据范围见[发布记录](docs/releasing.md)。本次仍仅交付源码，不新建 tag／Release、不安装公开版；已发布下载仍为 0.5.8。
@@ -94,6 +96,8 @@ corepack pnpm build:installer
 ## English
 
 An independent desktop usage dashboard based on [OpenQuota](https://github.com/deviffyy/OpenQuota), showing AI coding quotas, resets, tokens and estimated costs. This public edition preserves **same-account Oh My Pi/Codex usage merging, Codex weekly quota estimates and reset-cycle history**, without private business adapters.
+
+**0.5.12 pricing update:** Adds GPT-6.1 Terra at API Standard rates of $1 input, $0.05 cached input, $1.25 30-minute cache writes and $5 output per million tokens; 12-hour writes cost $2.50. Prompts above 272K reprice the whole request at 2× input/cache and 1.5× output; Fast costs another 2×. Purchased Codex credits independently use 25 input, 1.25 cached-input and 125 output credits per million tokens, with cache writes billed as input and no API long-context premium. Terra Ultrafast and missing historical speed remain unpriced. Public application/data isolation is unchanged. See [release notes](docs/releasing.md) for sources and actual verification/delivery status.
 
 **0.5.10 source update:** The linked charts always show the latest six real cycles, oldest to newest, without pagination or fabricated points; the complete older history remains scrollable below. Latest selection follows new cycles, while older selections survive refresh until leaving the visible window. Arrow keys and Home/End stay within that window. Cache-rate summaries, models and source variants share muted typography, compact density and lightweight separators, with at most one decimal and no trailing `.0`; one hover title replaces permanent calculation copy. Unknown, zero-denominator and partial semantics are unchanged. Targeted checks and isolated real-component headless browser acceptance passed on 2026-10-23, including themes, three period hovers and 320px scrolling; see the [release record](docs/releasing.md) for scope. This remains a source-only delivery, without a new tag/Release or public-edition installation; the published download remains 0.5.8.
 

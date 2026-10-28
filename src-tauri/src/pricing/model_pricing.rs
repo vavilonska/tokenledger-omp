@@ -474,4 +474,105 @@ mod tests {
             .estimated_cost_dollars("gpt-6.1-sol-none", tokens, true)
             .is_none());
     }
+
+    #[test]
+    fn terra_6_1_aliases_and_prompt_boundary_keep_api_fast_and_retention_rates() {
+        let pricing = crate::pricing::test_bundled_pricing();
+        let tokens = TokenBreakdown {
+            input: 100_000,
+            cache_write_5m: 100_000,
+            cache_write_12h: 20_000,
+            cache_read: 52_000,
+            output: 10_000,
+            ..Default::default()
+        };
+        for model in [
+            "gpt-6.1-terra",
+            "openai/gpt-6.1-terra-none",
+            "openai-codex/gpt-6.1-terra-high",
+            "gpt-6.1-terra-20261028-max",
+            "gpt-6.1-terra-2026-10-28-xhigh",
+        ] {
+            let cost = pricing.estimated_cost_dollars(model, tokens, true).unwrap();
+            assert!((cost - 0.3276).abs() < 1e-9, "{model}: {cost}");
+            assert_eq!(pricing.display_family(model), "gpt-6.1-terra");
+        }
+        let above_boundary = TokenBreakdown {
+            cache_read: 52_001,
+            ..tokens
+        };
+        for (model, speed, long_context, expected) in [
+            ("gpt-6.1-terra", RequestSpeed::Standard, false, 0.32760005),
+            ("gpt-6.1-terra", RequestSpeed::Standard, true, 0.6302001),
+            ("gpt-6.1-terra", RequestSpeed::Fast, true, 1.2604002),
+            (
+                "openai-codex/gpt-6.1-terra-high-fast",
+                RequestSpeed::Fast,
+                true,
+                1.2604002,
+            ),
+            (
+                "openai/gpt-6.1-terra-2026-10-28-fast-max",
+                RequestSpeed::Standard,
+                true,
+                1.2604002,
+            ),
+        ] {
+            let cost = pricing
+                .estimated_cost_dollars(
+                    model,
+                    TokenBreakdown {
+                        speed,
+                        ..above_boundary
+                    },
+                    long_context,
+                )
+                .unwrap();
+            assert!((cost - expected).abs() < 1e-9, "{model}: {cost}");
+        }
+    }
+
+    #[test]
+    fn terra_6_1_credits_are_independent_and_unpublished_ultrafast_stays_unknown() {
+        let mut pricing = crate::pricing::test_bundled_pricing();
+        let tokens = TokenBreakdown {
+            input: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 1_000_000,
+            cache_write_12h: 1_000_000,
+            output: 1_000_000,
+            ..Default::default()
+        };
+        for credit_mode in [false, true] {
+            pricing.codex_credit_mode = credit_mode;
+            for model in [
+                "gpt-6.1-terra-ultra",
+                "gpt-6.1-terra-ultrafast",
+                "openai-codex/gpt-6.1-terra-high-ultrafast",
+                "openai/gpt-6.1-terra-ultrafast-none",
+            ] {
+                assert_eq!(pricing.estimated_cost_dollars(model, tokens, true), None);
+            }
+            assert_eq!(
+                pricing.estimated_cost_dollars(
+                    "gpt-6.1-terra",
+                    TokenBreakdown {
+                        speed: RequestSpeed::Ultrafast,
+                        ..tokens
+                    },
+                    true,
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            pricing.estimated_cost_dollars("openai-codex/gpt-6.1-terra-max", tokens, true),
+            Some(9.05)
+        );
+        assert_eq!(
+            pricing.estimated_cost_dollars("gpt-6.1-terra-none-fast", tokens, true),
+            Some(18.1)
+        );
+    }
 }
