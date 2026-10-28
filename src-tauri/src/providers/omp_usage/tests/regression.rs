@@ -1,6 +1,6 @@
 mod forks;
 
-use chrono::{Days, Local};
+use chrono::{DateTime, Days, Local};
 use serde_json::{json, Value};
 
 use super::*;
@@ -29,6 +29,16 @@ fn source_scan(
     pricing: &ModelPricing,
 ) -> (OmpScanOutcome, [UsageHistory; 3]) {
     let now = Utc.with_ymd_and_hms(2026, 7, 12, 15, 0, 0).unwrap();
+    source_scan_at(storage, home, identity, pricing, now)
+}
+
+fn source_scan_at(
+    storage: &Storage,
+    home: &std::path::Path,
+    identity: &str,
+    pricing: &ModelPricing,
+    now: DateTime<Utc>,
+) -> (OmpScanOutcome, [UsageHistory; 3]) {
     let mut daily = DailyUsageAccumulator::default();
     let mut session = DailyUsageAccumulator::default();
     let mut weekly = DailyUsageAccumulator::default();
@@ -88,6 +98,105 @@ fn entry_key(value: &Value) -> Result<String, serde_json::Error> {
         event.timestamp,
         &event.model,
     ))
+}
+
+#[test]
+fn terra_schema_eight_reparse_corrects_retained_facts_and_deleted_source_periods() {
+    for invalid_tier in [false, true] {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("terra.db");
+        let storage = Storage::open(&database).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 10, 28, 8, 0, 0).unwrap();
+        let calls: Vec<_> = [("standard", 1.0), ("priority", 2.5)]
+            .into_iter()
+            .map(|(id, multiplier)| {
+                let mut call = json!({"type":"model_usage","id":id,
+                    "timestamp":"2026-10-28T07:28:38.096Z",
+                    "purpose":"task-completion-probe","provider":"openai-codex",
+                    "model":"gpt-6.1-terra",
+                    "usage":{"input":549,"output":31,"cacheRead":60544,"cacheWrite":0,
+                        "totalTokens":61124,
+                        "cost":{"input":0.000549 * multiplier,"output":0.000155 * multiplier,
+                            "cacheRead":0.0030272 * multiplier,"cacheWrite":0,
+                            "total":0.0037312 * multiplier}}});
+                if invalid_tier {
+                    call["serviceTier"] = json!("invalid-tier");
+                }
+                call
+            })
+            .collect();
+        write_session(directory.path(), "terra.jsonl", &calls);
+        let source = directory.path().join("agent/sessions/terra.jsonl");
+        let mut old =
+            serde_json::to_value(parse_jsonl(&fs::read_to_string(&source).unwrap())).unwrap();
+        for event in old.as_array_mut().unwrap() {
+            event["speed"] = Value::Null;
+            event["speed_evidence"] = Value::Null;
+        }
+        storage
+            .record_usage_events("omp", "account-a", 1, old.as_array().unwrap(), entry_key)
+            .unwrap();
+        let fingerprint =
+            LogFileFingerprint::from_metadata(&fs::metadata(&source).unwrap()).unwrap();
+        storage
+            .save_log_events(
+                "omp",
+                &source,
+                fingerprint.size,
+                fingerprint.modified_nanos,
+                &json!({"schema_version":8,"events":old}).to_string(),
+            )
+            .unwrap();
+        let mut snapshots = Vec::new();
+        for credits in [false, true] {
+            let mut pricing = crate::pricing::test_bundled_pricing();
+            pricing.codex_credit_mode = credits;
+            let (outcome, histories) =
+                source_scan_at(&storage, directory.path(), "account-a", &pricing, now);
+            assert_eq!(outcome.events.len(), 2, "reparse must preserve event keys");
+            for history in &histories {
+                let period = history.today.as_ref().unwrap();
+                assert_eq!(period.tokens, 122248);
+                assert_eq!(period.estimate_complete, !invalid_tier);
+                assert!(period.unknown_models.is_empty());
+                if !invalid_tier {
+                    assert!((period.estimated_cost_usd.unwrap() - 0.0111936).abs() < 1e-12);
+                }
+            }
+            snapshots.push(serde_json::to_value(&histories).unwrap());
+        }
+        let retained: Vec<SessionUsageEvent> =
+            storage.load_usage_events("omp", "account-a", 1).unwrap();
+        assert_eq!(retained.len(), 2);
+        for event in &retained {
+            assert_eq!(
+                event.speed,
+                if invalid_tier {
+                    None
+                } else if event.id.as_deref() == Some("priority") {
+                    Some(RequestSpeed::Fast)
+                } else {
+                    Some(RequestSpeed::Standard)
+                }
+            );
+        }
+        fs::remove_file(source).unwrap();
+        drop(storage);
+        let reopened = Storage::open(&database).unwrap();
+        for (index, credits) in [false, true].into_iter().enumerate() {
+            let mut pricing = crate::pricing::test_bundled_pricing();
+            pricing.codex_credit_mode = credits;
+            let (outcome, histories) =
+                source_scan_at(&reopened, directory.path(), "account-a", &pricing, now);
+            assert_eq!(outcome.events.len(), 2);
+            assert_eq!(serde_json::to_value(&histories).unwrap(), snapshots[index]);
+            assert!(
+                !source_scan_at(&reopened, directory.path(), "account-b", &pricing, now)
+                    .0
+                    .included
+            );
+        }
+    }
 }
 
 #[test]

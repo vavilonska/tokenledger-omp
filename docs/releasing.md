@@ -1,5 +1,45 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.13 OMP Terra 辅助请求速度证据修复
+
+四处应用版本更新为 0.5.13。产品名、应用标识、独立数据库、账号／事件身份、
+留存账本 schema 均不变；不修改 OMP、配置、凭据或用户账本，不引入私有业务代码。
+
+- 冻结本机 OMP 18.13.2 `models.db` catalog 与内嵌费用计算已核实的 producer 规则，
+  仅精确模型 `gpt-6.1-terra`：每百万 tokens 输入 $1、输出 $5、缓存读取 $0.05、
+  普通写缓存 $0，无长上下文／时间附加价；priority 逐桶乘 2.5，而非 API Fast 的 2。
+  Flex 0.5 与 producer 拒绝的 Ultrafast 不推断为 Standard／Fast，也不扩展模型别名。
+- 仅对缺少两种显式 tier 字段的辅助 `model_usage` 请求推断。费用总额须有效且为正，
+  非零 token 桶必须有费用，所有已给费用桶及总额须与唯一支持档位一致。
+  持久化证据名为 `omp18132_terra_cost`。显式非法／冲突档位仍阻止回退，不借分支档位；
+  fork 继承费用清零不代表 Standard。Sol／Astra 的旧 producer 规则与原始／fork 优先级不变。
+- 解析缓存版本 8→9：普通刷新会重解析仍在的源 JSONL，用同一事件键修正留存事实，
+  现有日／会话／周统计及周期重算路径据此更新。修正后的事实删除源并重开 SQLite 后
+  仍保留档位与定价。已删源的旧 unknown 无法证明当时不存在显式非法元数据，
+  因此保留 partial，不新增猜测回填／迁移机制。
+- 回归覆盖真实 cache-heavy probe（输入 549、输出 31、缓存读取 60,544、总 61,124，
+  producer Standard 费用 $0.0037312）、Fast 2.5、API／Flex／Ultrafast 错误倍率、
+  逐桶／总额冲突、显式非法／冲突、fork 零费用、schema-8 重解析及删源重启留存，
+  并检查 API 与独立购买 credits 两种展示基准。
+
+2026-10-28 公开版实际验收已完成：
+
+- GNU x64 locked library tests 过滤 `providers::omp_usage`：49 项通过。
+- `corepack pnpm verify:versions` 通过，四处版本一致为 0.5.13。
+- 限定四个变更 Rust 文件的 rustfmt check 与 GNU x64 locked lib/tests Clippy 均通过。
+- 独立 CLI 调用生产 `scan_local_usage`，使用隔离的 schema-8 解析缓存和 schema-1
+  unknown 留存事实，重解析两条 Terra Standard／Fast 请求。API 与独立购买 credits
+  两种展示基准的 today／30d／session／weekly 均 complete，合计 122,248 tokens、
+  $0.0111936，留存证据为 `omp18132_terra_cost`。Fast 展示倍率为 2，而非用于证明
+  producer 档位的 2.5。
+- 删除隔离源后，以第二个 CLI 进程重开 SQLite，统计及留存证据保持稳定；
+  金额比较容差为 `1e-12`。这证明正常扫描可修正仍有源的旧 unknown，
+  不代表已删源的旧 unknown 可以安全回填。
+
+验收证据保存在 `.local/terra-0513/`。临时扫描入口和隔离数据库已清理；
+未生成公开版安装包、未安装。永久最小隔离扫描回归入口：
+`terra_schema_eight_reparse_corrects_retained_facts_and_deleted_source_periods`。
+
 ## 0.5.12 GPT-6.1 Terra 与计价核对
 
 四处应用版本更新为 0.5.12，包括 Cargo.lock 的应用条目。保留 TokenLedger OMP 产品名、
@@ -13,7 +53,8 @@
 - 购买 Codex credits 独立价卡：输入 25、读取缓存 1.25、输出 125 credits／百万 tokens，
   仍按 25 credits = $1 展示美元等值；所有写缓存按普通输入计价，没有 API 长上下文溢价。
   Fast 为 2 倍，不使用套餐内 2.5 倍消耗。Terra 无已公布 Ultrafast 价，保留 tokens、
-  费用未知；旧 OMP producer 的速度证据合同不扩展到 Terra，不因新 API 价格猜档位。
+  费用未知；0.5.12 当时未扩展 OMP producer 证据，0.5.13 仅按上节独立已核规则补足，
+  不因新 API 价格猜档位。
 - 补充表日期为 `2026-10-28T00:00:00Z`，替换旧版及同日旧缓存；不无差别刷新整个模型目录。
 - 永久回归覆盖 Terra 别名、272K／272001 全 prompt 边界、12h 写缓存、Fast 只乘一次、
   独立 credits、未知 Ultrafast、旧动态目录刷新／重载和 Codex 生产解析至用量 DTO，

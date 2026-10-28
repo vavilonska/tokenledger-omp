@@ -63,25 +63,6 @@ fn cache_warm_preserves_verified_fast_and_ultrafast_producer_multipliers() {
 }
 
 #[test]
-fn terra_6_1_does_not_guess_historical_speed_from_new_api_prices() {
-    let mut call = json!({
-        "type": "model_usage", "id": "terra", "parentId": "fast",
-        "timestamp": "2026-09-08T01:02:03Z", "purpose": "title",
-        "provider": "openai-codex", "model": "gpt-6.1-terra",
-        "usage": {"input": 100, "output": 10, "cacheRead": 0, "cacheWrite": 0,
-            "totalTokens": 110, "cost": {"input": 0.0001, "output": 0.00005, "total": 0.00015}}
-    });
-    let missing = parse_jsonl(&journal(&[call.clone()])).remove(0);
-    assert_eq!(missing.speed, None);
-    assert_eq!(missing.total, 110);
-    assert!(missing.has_complete_usage());
-    call["serviceTier"] = json!("priority");
-    let explicit = parse_jsonl(&journal(&[call])).remove(0);
-    assert_eq!(explicit.speed, Some(RequestSpeed::Fast));
-    assert_eq!(explicit.total, 110);
-}
-
-#[test]
 fn missing_conflicting_and_zero_cost_evidence_stays_unknown() {
     let mut absent = auxiliary(279, 145, 1.0);
     absent["usage"].as_object_mut().unwrap().remove("cost");
@@ -181,6 +162,103 @@ fn producer_evidence_does_not_accept_display_api_multipliers() {
         let events = parse_jsonl(&journal(&[auxiliary(279, 145, multiplier)]));
         assert_eq!(events[0].speed, None);
     }
+}
+
+fn terra_probe(multiplier: f64) -> Value {
+    json!({"type":"model_usage","id":"b568ea05","parentId":"fast",
+        "timestamp":"2026-10-28T07:28:38.096Z","purpose":"task-completion-probe",
+        "provider":"openai-codex","model":"gpt-6.1-terra",
+        "usage":{"input":549,"output":31,"cacheRead":60544,"cacheWrite":0,
+            "totalTokens":61124,
+            "cost":{"input":0.000549 * multiplier,"output":0.000155 * multiplier,
+                "cacheRead":0.0030272 * multiplier,"cacheWrite":0,
+                "total":0.0037312 * multiplier}}})
+}
+
+#[test]
+fn terra_18132_cache_heavy_probe_recovers_only_verified_standard_and_fast() {
+    for (multiplier, expected) in [(1.0, RequestSpeed::Standard), (2.5, RequestSpeed::Fast)] {
+        let event = parse_jsonl(&journal(&[terra_probe(multiplier)])).remove(0);
+        assert_eq!(event.speed, Some(expected));
+        assert_eq!(event.speed_evidence, Some(SpeedEvidence::Omp18132TerraCost));
+        assert_eq!(event.total, 61124);
+        assert_eq!(
+            (event.input, event.output, event.cache_read),
+            (549, 31, 60544)
+        );
+        let retained: SessionUsageEvent =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        assert_eq!(retained.speed, Some(expected));
+        assert_eq!(retained.speed_evidence, event.speed_evidence);
+    }
+    // Producer has no API long-context surcharge.
+    let mut long = terra_probe(1.0);
+    long["usage"]["input"] = json!(272001);
+    long["usage"]["cost"]["input"] = json!(0.272001);
+    long["usage"]["cost"]["total"] = json!(0.2751832);
+    assert_eq!(
+        parse_jsonl(&journal(&[long]))[0].speed,
+        Some(RequestSpeed::Standard)
+    );
+}
+
+#[test]
+fn terra_inference_rejects_unproven_tiers_aliases_and_inconsistent_evidence() {
+    let mut cases: Vec<Value> = [0.0, 0.5, 2.0, 6.0, 8.0]
+        .into_iter()
+        .map(terra_probe)
+        .collect();
+    let mut wrong_total = terra_probe(1.0);
+    wrong_total["usage"]["cost"]["total"] = json!(0.004);
+    cases.push(wrong_total);
+    let mut wrong_buckets = terra_probe(1.0);
+    wrong_buckets["usage"]["cost"]["input"] = json!(0.000649);
+    wrong_buckets["usage"]["cost"]["output"] = json!(0.000055);
+    cases.push(wrong_buckets);
+    let mut missing_bucket = terra_probe(1.0);
+    missing_bucket["usage"]["cost"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cacheRead");
+    cases.push(missing_bucket);
+    let mut invalid_cost = terra_probe(1.0);
+    invalid_cost["usage"]["cost"]["input"] = json!(-0.000549);
+    cases.push(invalid_cost);
+    for tier in [Value::Null, json!("flex"), json!("not-a-tier")] {
+        let mut invalid = terra_probe(1.0);
+        invalid["serviceTier"] = tier;
+        cases.push(invalid);
+    }
+    let mut conflict = terra_probe(1.0);
+    conflict["serviceTier"] = json!("default");
+    conflict["service_tier"] = json!("priority");
+    cases.push(conflict);
+    for model in [
+        "openai/gpt-6.1-terra",
+        "gpt-6.1-terra-high",
+        "unproven-model",
+    ] {
+        let mut alias = terra_probe(1.0);
+        alias["model"] = json!(model);
+        cases.push(alias);
+    }
+    for call in cases {
+        let event = parse_jsonl(&journal(std::slice::from_ref(&call))).remove(0);
+        assert_eq!(event.speed, None, "{call}");
+        assert_eq!(event.speed_evidence, None);
+    }
+    // A fork's reset-to-zero costs are not proof of a free Standard request.
+    let inherited = [
+        json!({"type":"session","id":"fork","parentSession":"original",
+            "timestamp":"2026-10-28T08:00:00Z"}),
+        terra_probe(0.0),
+    ]
+    .map(|entry| entry.to_string())
+    .join("\n");
+    let event = parse_jsonl(&inherited).remove(0);
+    assert_eq!(event.inherited_from_fork, Some(true));
+    assert_eq!(event.speed, None);
+    assert_eq!(event.total, 61124);
 }
 
 #[test]
