@@ -952,3 +952,140 @@ fn omp_last_thirty_days_include_today_and_twenty_nine_prior_local_dates() {
     assert_eq!(histories[0].last_30_days.as_ref().unwrap().tokens, 100);
     assert_eq!(histories[0].daily.len(), 1);
 }
+
+#[test]
+fn luna_schema_nine_reparse_preserves_identity_and_prices_titles_after_source_deletion() {
+    for (source_present, invalid_tier) in [(true, false), (true, true), (false, false)] {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("luna.db");
+        let storage = Storage::open(&database).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 10, 8, 0, 0).unwrap();
+        let calls: Vec<_> = [
+            ("first", 511, 83, 0.0000511, 0.0000415, 0.0000926),
+            ("second", 420, 52, 0.000042, 0.000026, 0.000068),
+        ]
+        .into_iter()
+        .map(|(id, input, output, input_cost, output_cost, total_cost)| {
+            let mut call = json!({"type":"model_usage","id":id,"purpose":"title",
+                "timestamp":"2026-11-10T07:28:38.096Z",
+                "provider":"openai-codex","model":"gpt-6-luna",
+                "usage":{"input":input,"output":output,"cacheRead":0,"cacheWrite":0,
+                    "totalTokens":input + output,"reasoningTokens":50,
+                    "cost":{"input":input_cost,"output":output_cost,"cacheRead":0,
+                        "cacheWrite":0,"total":total_cost}}});
+            if invalid_tier {
+                call["serviceTier"] = json!("invalid-tier");
+            }
+            call
+        })
+        .collect();
+        // Repeated source rows must not change durable request identity or token totals.
+        write_session(
+            directory.path(),
+            "luna.jsonl",
+            &[calls[0].clone(), calls[1].clone(), calls[0].clone()],
+        );
+        let source = directory.path().join("agent/sessions/luna.jsonl");
+        let mut old =
+            serde_json::to_value(parse_jsonl(&fs::read_to_string(&source).unwrap())).unwrap();
+        for event in old.as_array_mut().unwrap() {
+            event["speed"] = Value::Null;
+            event["speed_evidence"] = Value::Null;
+        }
+        let mut original_keys: Vec<_> = old
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| entry_key(event).unwrap())
+            .collect();
+        original_keys.sort();
+        original_keys.dedup();
+        storage
+            .record_usage_events("omp", "account-a", 1, old.as_array().unwrap(), entry_key)
+            .unwrap();
+        let fingerprint =
+            LogFileFingerprint::from_metadata(&fs::metadata(&source).unwrap()).unwrap();
+        storage
+            .save_log_events(
+                "omp",
+                &source,
+                fingerprint.size,
+                fingerprint.modified_nanos,
+                &json!({"schema_version":9,"events":old}).to_string(),
+            )
+            .unwrap();
+        if !source_present {
+            fs::remove_file(&source).unwrap();
+        }
+        let complete = source_present && !invalid_tier;
+        let mut snapshots = Vec::new();
+        for credits in [false, true] {
+            let mut pricing = crate::pricing::test_bundled_pricing();
+            pricing.codex_credit_mode = credits;
+            let (outcome, histories) =
+                source_scan_at(&storage, directory.path(), "account-a", &pricing, now);
+            assert_eq!(outcome.events.len(), 2);
+            let mut costs: Vec<_> = outcome.events.iter().map(|event| event.cost).collect();
+            costs.sort_by(|left, right| left.partial_cmp(right).unwrap());
+            if complete {
+                let expected = [0.000068, 0.0000926];
+                for (cost, expected) in costs.into_iter().zip(expected) {
+                    assert!((cost.unwrap() - expected).abs() < 1e-12);
+                }
+            } else {
+                assert_eq!(costs, vec![None, None]);
+            }
+            for history in &histories {
+                let period = history.today.as_ref().unwrap();
+                assert_eq!(period.tokens, 1066);
+                assert_eq!(period.estimate_complete, complete);
+                assert!(period.unknown_models.is_empty());
+                if complete {
+                    assert!((period.estimated_cost_usd.unwrap() - 0.0001606).abs() < 1e-12);
+                } else {
+                    assert_eq!(period.estimated_cost_usd, None);
+                }
+            }
+            snapshots.push(serde_json::to_value(&histories).unwrap());
+            assert!(
+                !source_scan_at(&storage, directory.path(), "account-b", &pricing, now)
+                    .0
+                    .included,
+                "reparse must not transfer retained requests to another account"
+            );
+        }
+        let retained: Vec<SessionUsageEvent> =
+            storage.load_usage_events("omp", "account-a", 1).unwrap();
+        assert_eq!(retained.len(), 2);
+        let mut retained_keys: Vec<_> = retained
+            .iter()
+            .map(|event| entry_key(&serde_json::to_value(event).unwrap()).unwrap())
+            .collect();
+        retained_keys.sort();
+        assert_eq!(retained_keys, original_keys);
+        for event in &retained {
+            assert_eq!(event.speed, complete.then_some(RequestSpeed::Standard));
+            assert_eq!(event.speed_evidence.is_some(), complete);
+            assert_eq!(event.purpose.as_deref(), Some("title"));
+            assert_eq!(event.total, event.input + event.output);
+        }
+        if source_present {
+            fs::remove_file(&source).unwrap();
+        }
+        drop(storage);
+        let reopened = Storage::open(&database).unwrap();
+        for (index, credits) in [false, true].into_iter().enumerate() {
+            let mut pricing = crate::pricing::test_bundled_pricing();
+            pricing.codex_credit_mode = credits;
+            let (outcome, histories) =
+                source_scan_at(&reopened, directory.path(), "account-a", &pricing, now);
+            assert_eq!(outcome.events.len(), 2);
+            assert_eq!(serde_json::to_value(&histories).unwrap(), snapshots[index]);
+            assert!(
+                !source_scan_at(&reopened, directory.path(), "account-b", &pricing, now)
+                    .0
+                    .included
+            );
+        }
+    }
+}

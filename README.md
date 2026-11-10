@@ -16,6 +16,8 @@
 
 基于 [OpenQuota](https://github.com/deviffyy/OpenQuota) 的独立桌面用量面板。集中查看 AI 编程工具的额度、重置时间、Token 用量和费用估算。公开版保留 **Oh My Pi 与 Codex 同账号用量合并、Codex 周额度估算和重置周期历史**，不包含私有业务适配器。
 
+**0.5.14 Luna 修复**：OMP title 等辅助请求可从精确 `gpt-6-luna` 的已核实、完整历史费用桶恢复 Standard。普通刷新重解析有源日志，保留请求键、账号归属与 tokens，修正证据删除源后仍留存；显式非法／冲突档位、fork 零费用和无源旧 unknown 仍保留 partial，不猜 priority 倍率。验收、安装包与发布状态见[发布记录](docs/releasing.md)。
+
 **0.5.12 计价更新**：新增 GPT-6.1 Terra，每百万 tokens 的 API 标准价为输入 $1、缓存读取 $0.05、30 分钟写缓存 $1.25、输出 $5；12 小时写缓存 $2.50。超过 272K prompt tokens 时按全请求输入／缓存 2×、输出 1.5× 计价，Fast 再乘 2。购买 Codex credits 独立使用输入 25、缓存读取 1.25、输出 125 credits／百万 tokens，写缓存按普通输入计价；不套用 API 长上下文溢价，不猜 Terra Ultrafast 或历史缺失速度。保留公开版独立身份与数据目录。价格来源及本次实际验收／发布状态见[发布记录](docs/releasing.md)。
 
 **0.5.11 源码更新**：修复 OMP fork 清零费用的继承副本覆盖原请求计费证据。现存源日志会在刷新时自动重解析恢复，保留 tokens、请求键与首次账号，不把 job-widget 一律当 Standard，不覆盖显式非法／冲突档位。两版真实生产扫描已验证当前与受影响上一周期的 API／credits 计价和额度恢复；旧历史其他缺速仍可令 30 日显示 partial。本次仅本地源码交付，不推送、不发布或安装公开产品；详见[发布记录](docs/releasing.md)。
@@ -96,6 +98,8 @@ corepack pnpm build:installer
 ## English
 
 An independent desktop usage dashboard based on [OpenQuota](https://github.com/deviffyy/OpenQuota), showing AI coding quotas, resets, tokens and estimated costs. This public edition preserves **same-account Oh My Pi/Codex usage merging, Codex weekly quota estimates and reset-cycle history**, without private business adapters.
+
+**0.5.14 Luna repair:** OMP title and other auxiliary requests may recover Standard from verified, complete historical producer cost buckets for the exact `gpt-6-luna` model. Ordinary refresh reparses available logs without changing request identity, ownership or tokens; repaired evidence survives source deletion. Invalid/conflicting tiers, fork-zero costs and source-less old unknown facts remain partial; priority multipliers are not guessed. See [release notes](docs/releasing.md) for verification and delivery status.
 
 **0.5.12 pricing update:** Adds GPT-6.1 Terra at API Standard rates of $1 input, $0.05 cached input, $1.25 30-minute cache writes and $5 output per million tokens; 12-hour writes cost $2.50. Prompts above 272K reprice the whole request at 2× input/cache and 1.5× output; Fast costs another 2×. Purchased Codex credits independently use 25 input, 1.25 cached-input and 125 output credits per million tokens, with cache writes billed as input and no API long-context premium. Terra Ultrafast and missing historical speed remain unpriced. Public application/data isolation is unchanged. See [release notes](docs/releasing.md) for sources and actual verification/delivery status.
 

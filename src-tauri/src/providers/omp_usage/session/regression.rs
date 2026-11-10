@@ -336,3 +336,116 @@ fn producer_free_cache_writes_and_long_context_do_not_use_api_rates() {
         assert_eq!(event.input, 272_001);
     }
 }
+
+fn luna_title(second: bool) -> Value {
+    let (input, output, input_cost, output_cost, total_cost) = if second {
+        (420, 52, 0.000042, 0.000026, 0.000068)
+    } else {
+        (511, 83, 0.0000511, 0.0000415, 0.0000926)
+    };
+    json!({"type":"model_usage","parentId":"fast","purpose":"title",
+        "timestamp":"2026-11-10T07:28:38.096Z","provider":"openai-codex","model":"gpt-6-luna",
+        "usage":{"input":input,"output":output,"cacheRead":0,"cacheWrite":0,
+            "reasoningTokens":50,"totalTokens":input + output,
+            "cost":{"input":input_cost,"output":output_cost,"cacheRead":0,"cacheWrite":0,
+                "total":total_cost}}})
+}
+
+#[test]
+fn luna_18186_real_titles_recover_standard_without_inheriting_priority_or_reasoning() {
+    for (second, expected) in [(false, (511, 83, 594)), (true, (420, 52, 472))] {
+        let event = parse_jsonl(&journal(&[luna_title(second)])).remove(0);
+        assert_eq!(event.speed, Some(RequestSpeed::Standard));
+        assert_eq!(event.speed_evidence, Some(SpeedEvidence::Omp18186LunaCost));
+        assert_eq!((event.input, event.output, event.total), expected);
+        assert_eq!(event.purpose.as_deref(), Some("title"));
+        assert!(event.has_complete_usage());
+        let retained: SessionUsageEvent =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        assert_eq!(retained.speed, event.speed);
+        assert_eq!(retained.speed_evidence, event.speed_evidence);
+    }
+    let mut cached = luna_title(false);
+    cached["usage"]["cacheRead"] = json!(100);
+    cached["usage"]["cacheWrite"] = json!(7);
+    cached["usage"]["totalTokens"] = json!(701);
+    cached["usage"]["cost"]["cacheRead"] = json!(0.000001);
+    cached["usage"]["cost"]["total"] = json!(0.0000936);
+    let event = parse_jsonl(&journal(&[cached])).remove(0);
+    assert_eq!(event.speed, Some(RequestSpeed::Standard));
+    assert_eq!(
+        (event.cache_read, event.cache_write, event.total),
+        (100, 7, 701)
+    );
+}
+
+#[test]
+fn luna_inference_rejects_unverified_multipliers_aliases_and_bad_cost_or_tier_evidence() {
+    let mut cases = Vec::new();
+    for multiplier in [0.0, 0.5, 2.0, 2.5, 6.0, 8.0] {
+        let mut call = luna_title(false);
+        for bucket in ["input", "output", "cacheRead", "cacheWrite", "total"] {
+            let cost = call["usage"]["cost"][bucket].as_f64().unwrap();
+            call["usage"]["cost"][bucket] = json!(cost * multiplier);
+        }
+        cases.push(call);
+    }
+    let mut wrong_buckets = luna_title(false);
+    wrong_buckets["usage"]["cost"]["input"] = json!(0.0000415);
+    wrong_buckets["usage"]["cost"]["output"] = json!(0.0000511);
+    cases.push(wrong_buckets);
+    let mut wrong_total = luna_title(false);
+    wrong_total["usage"]["cost"]["total"] = json!(0.0001);
+    cases.push(wrong_total);
+    let mut missing_bucket = luna_title(false);
+    missing_bucket["usage"]["cost"]
+        .as_object_mut()
+        .unwrap()
+        .remove("output");
+    cases.push(missing_bucket);
+    let mut absent = luna_title(false);
+    absent["usage"].as_object_mut().unwrap().remove("cost");
+    cases.push(absent);
+    let mut negative = luna_title(false);
+    negative["usage"]["cost"]["cacheRead"] = json!(-1);
+    cases.push(negative);
+    for tier in [Value::Null, json!("flex"), json!("invalid-tier")] {
+        let mut call = luna_title(false);
+        call["serviceTier"] = tier;
+        cases.push(call);
+    }
+    let mut conflict = luna_title(false);
+    conflict["serviceTier"] = json!("default");
+    conflict["service_tier"] = json!("priority");
+    cases.push(conflict);
+    for model in [
+        "openai/gpt-6-luna",
+        "openai-codex/gpt-6-luna",
+        "gpt-6-luna-high",
+        "gpt-6-luna-fast",
+    ] {
+        let mut call = luna_title(false);
+        call["model"] = json!(model);
+        cases.push(call);
+    }
+    for call in cases {
+        let event = parse_jsonl(&journal(std::slice::from_ref(&call))).remove(0);
+        assert_eq!(event.speed, None, "{call}");
+        assert_eq!(event.speed_evidence, None);
+        assert_eq!((event.input, event.output, event.total), (511, 83, 594));
+    }
+    let mut inherited = luna_title(false);
+    inherited["usage"]["cost"] =
+        json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0});
+    let content = [
+        json!({"type":"session","id":"fork","parentSession":"original",
+            "timestamp":"2026-11-10T08:00:00Z"}),
+        inherited,
+    ]
+    .map(|entry| entry.to_string())
+    .join("\n");
+    let event = parse_jsonl(&content).remove(0);
+    assert_eq!(event.inherited_from_fork, Some(true));
+    assert_eq!(event.speed, None);
+    assert_eq!(event.total, 594);
+}

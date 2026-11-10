@@ -1,5 +1,58 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.14 OMP Luna 辅助请求速度证据修复
+
+四处应用版本更新为 0.5.14。产品名、应用标识、独立数据库、设置、账号／事件身份
+与留存账本 schema 不变；不引入私有业务代码、数据或凭据。
+
+- 仅精确模型 `gpt-6-luna` 使用 OMP 18.18.6 已核实的 producer 标准费用：
+  每百万 tokens 输入 $0.1、输出 $0.5、缓存读取 $0.01、普通写缓存 $0。
+  catalog 列有 priority 不足以证明倍率，不推断未核实的 priority／Flex／Ultrafast，
+  不扩展模型别名。
+- 包括 title 在内的辅助 `model_usage` 仅在两种显式 tier 字段均缺失时使用历史费用
+  证据；沿用非零 token 桶费用完整、所有已给费用桶及正总额一致的检查。
+  显式非法／冲突档位、错桶／总额与 fork 零费用仍保留 unknown，不借 assistant 分支档位。
+- 解析缓存版本 9→10，普通刷新重解析仍存在的源 JSONL，用同一留存事件键及账号归属
+  更新证据。修正事实重开数据库、删除源后仍保留；已删源的旧 unknown 不猜测回填，
+  既有无证 partial 保留。
+
+### 本次源码验收
+
+- GNU x64 `cargo test --manifest-path src-tauri/Cargo.toml --target
+  x86_64-pc-windows-gnu --locked --lib providers::omp_usage -- --test-threads=2`
+  退出 0，52 项通过，包括新增三项 Luna 回归。
+- `corepack pnpm verify:versions` 退出 0；另核对 Cargo.lock 的应用条目，
+  四处版本均为 0.5.14。
+- 仅对四个受影响 Rust 文件执行 `rustfmt --edition 2021 --check --config
+  skip_children=true`，最终退出 0；初次仅新测试换行不符合格式，已定向修正。
+- 永久隔离 SQLite 回归
+  `luna_schema_nine_reparse_preserves_identity_and_prices_titles_after_source_deletion`
+  沿生产解析／扫描／留存路径覆盖 schema-9 有源重解析、请求键及账号隔离、
+  API／credits 费用、重复源行去重、实际删除合成源并重开，以及显式非法 tier
+  和无源旧 unknown 不补价。没有使用或提交真实用户日志、账号或账本。
+- GNU x64 `cargo clippy --locked --lib --tests -- -D warnings` 退出 0。
+
+### Windows x64 NSIS 安装包
+
+`corepack pnpm build:installer` 退出 0（655.223 秒），使用正式 GNU x64／NSIS
+入口、`CARGO_BUILD_JOBS=2`，包括前端生产构建。交付文件保留既有规范命名：
+`release/TokenLedger-OMP_0.5.14_x64-setup.exe` 及相邻 `.sha256`，旧包不变。
+安装包为 10,438,635 bytes，SHA-256：
+`7dbd6d86f7e9ef30674c7b4dd5559df5dc017853664c7f8dd3d299f3f283822f`。
+
+安装程序、构建应用及实际提取 payload 的资源均为 **TokenLedger OMP 0.5.14**；
+应用 PE machine 为 AMD64 `0x8664`。
+构建 exe SHA-256 为
+`36fc90ef87f3e5611d4c1eb9b7fdcf2ee49dfda07ae205fd2f68d8e99ff23956`。
+仅将字节位置 27,173,176 的单个 `__TAURI_BUNDLE_TYPE_VAR_UNK` 替换为
+`__TAURI_BUNDLE_TYPE_VAR_NSS` 后，与 NSIS 实际 payload 完全一致，SHA-256 为
+`299c456e65a190c1142aaeaa20cfc5c910dd300d54810b7ef62493f8421ca801`。
+
+公开版没有在本机安装或启动；未签名（`NotSigned`），updater 仍未配置。
+本次没有因解析修复重跑无关前端全套测试；正式安装包命令执行了必要生产构建。
+去敏命令及包身份收据仅保留在 ignored `.local/luna-20261110/`，
+不把调试工件、数据库、日志或安装包加入源码历史。
+
 ## 0.5.13 OMP Terra 辅助请求速度证据修复
 
 四处应用版本更新为 0.5.13。产品名、应用标识、独立数据库、账号／事件身份、

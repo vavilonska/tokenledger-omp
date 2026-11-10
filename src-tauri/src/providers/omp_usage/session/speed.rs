@@ -50,6 +50,7 @@ pub(crate) enum SpeedEvidence {
     AssistantBranch,
     Omp1811Cost,
     Omp18132TerraCost,
+    Omp18186LunaCost,
 }
 
 pub(super) fn explicit_tier(value: &Value) -> Option<RequestSpeed> {
@@ -102,14 +103,24 @@ fn historical_speed(
     cost: &RecordedCost,
 ) -> Option<(RequestSpeed, SpeedEvidence)> {
     // Frozen producer USD/million buckets, NOT the mutable display pricing catalog.
-    // OMP 18.13.2 models.db and bundled calculateCost confirm this exact Terra ID:
-    // free ordinary cache writes, no long-context/time-based premium, priority=2.5.
-    // Flex=0.5 is not Standard; ultrafast is rejected by the producer. Do not infer
-    // aliases or unsupported tiers from today's API prices (whose Fast multiplier is 2).
-    let (rates, evidence, ultrafast) = if model == "gpt-6.1-terra" {
+    let (rates, evidence, infer_fast, infer_ultrafast) = if model == "gpt-6-luna" {
+        // OMP 18.18.6 models.db confirms this exact ID's standard buckets.
+        // Priority is listed, but its producer multiplier is unverified: infer Standard only.
+        (
+            [0.1, 0.5, 0.01, 0.0],
+            SpeedEvidence::Omp18186LunaCost,
+            false,
+            false,
+        )
+    } else if model == "gpt-6.1-terra" {
+        // OMP 18.13.2 models.db and bundled calculateCost confirm this exact Terra ID:
+        // free ordinary cache writes, no long-context/time-based premium, priority=2.5.
+        // Flex=0.5 is not Standard; ultrafast is rejected by the producer. Do not infer
+        // aliases or unsupported tiers from today's API prices (whose Fast multiplier is 2).
         (
             [1.0, 5.0, 0.05, 0.0],
             SpeedEvidence::Omp18132TerraCost,
+            true,
             false,
         )
     } else {
@@ -125,7 +136,7 @@ fn historical_speed(
             "gpt-6-astra" => [10.0, 50.0, 1.0, 0.0],
             _ => return None,
         };
-        (rates, SpeedEvidence::Omp1811Cost, true)
+        (rates, SpeedEvidence::Omp1811Cost, true, true)
     };
     if !cost.valid || cost.total.is_none_or(|total| total <= 0.0) {
         return None;
@@ -144,7 +155,9 @@ fn historical_speed(
         (RequestSpeed::Fast, 2.5),
         (RequestSpeed::Ultrafast, 8.0),
     ] {
-        if speed == RequestSpeed::Ultrafast && !ultrafast {
+        if (speed == RequestSpeed::Fast && !infer_fast)
+            || (speed == RequestSpeed::Ultrafast && !infer_ultrafast)
+        {
             continue;
         }
         let expected = std::array::from_fn::<_, 4, _>(|index| {
