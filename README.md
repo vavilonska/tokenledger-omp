@@ -81,7 +81,7 @@ corepack pnpm build:installer
 
 现有周期历史浮层的上下两图共享周期横轴：上图显示服务器观察到的额度消耗百分比，下图显示周期完整 Token 用量；当前源码只显示最近 6 周期、无分页，完整历史仍在下方保留。保留中文和主题，未知值不补零；不增加独立 WebUI 服务、服务器或依赖。
 
-当前已发布 Windows x64 NSIS 包见 [v0.5.8](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.8)：`TokenLedger-OMP_0.5.8_x64-setup.exe`，10,446,920 bytes，SHA-256 为 `7cf53c744660d8d679271badc61f75981ca16b73e5cdbd706eff22b52f35525d`，附 `.sha256`。旧版本 tag 和资产保留。公开版未安装或验证原生 UI，完整范围与首次失败／定向修复见[发布记录](docs/releasing.md)。
+当前已发布 Windows x64 NSIS 包见 [v0.5.14](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.14)：`TokenLedger-OMP_0.5.14_x64-setup.exe`，10,438,635 bytes，SHA-256 为 `7dbd6d86f7e9ef30674c7b4dd5559df5dc017853664c7f8dd3d299f3f283822f`，附 `.sha256`；发布后已无认证下载核对两资产。旧版本 tag 和资产保留。公开版未安装或验证原生 UI，完整范围及依赖告警边界见[发布记录](docs/releasing.md)。
 
 **0.5.5** 区分 Standard、Fast、Ultrafast；GPT-6 Astra 与 GPT-6.1 Sol 的 Ultrafast 按 API／购买积分 6× 计价，不采用套餐额度消耗倍率。OMP 辅助调用不再直接继承主会话速度，缺失或冲突证据保持未知。总计、模型、周期和分享明确标记部分估算；Cost/MTok 只纳入完整计价提供商，并说明覆盖范围，无可用费用时仍显示 tokens。
 
@@ -148,7 +148,7 @@ Requires Node.js 22+, pnpm 11.11.0, stable Rust and [Tauri 2 prerequisites](http
 
 The cycle-history popup has two stacked charts sharing the cycle axis: server-observed quota-used percentage above and complete cycle tokens below. Current source shows only the latest six cycles without pagination, while retaining the full history below, Chinese labels and themes. Unknown values remain gaps rather than zero. No separate WebUI service, server or dependency is added.
 
-The current published [v0.5.8 Windows x64 NSIS package](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.8), `TokenLedger-OMP_0.5.8_x64-setup.exe`, is 10,446,920 bytes with SHA-256 `7cf53c744660d8d679271badc61f75981ca16b73e5cdbd706eff22b52f35525d` and an adjacent `.sha256`. Previous tags and assets remain available. This public edition was not installed or exercised in the native host; see the [release record](docs/releasing.md) for scope, original failures and targeted repairs.
+The current published [v0.5.14 Windows x64 NSIS package](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.14), `TokenLedger-OMP_0.5.14_x64-setup.exe`, is 10,438,635 bytes with SHA-256 `7dbd6d86f7e9ef30674c7b4dd5559df5dc017853664c7f8dd3d299f3f283822f` and an adjacent `.sha256`. Both public assets were independently downloaded without authentication and verified. Previous tags and assets remain available. This public edition was not installed or exercised in the native host; see the [release record](docs/releasing.md) for coverage and the existing dependency-advisory boundary.
 
 **0.5.4** refreshes price catalogs and adds GPT-6.1 Sol (USD per million tokens: input $2, cached input $0.10, cache writes $2.50, output $10), including Fast and long-context pricing. Codex credits independently estimate purchased-credit/PAYG rates, not included plan-limit consumption. A compact local ledger retains observed Codex, OMP, Claude, pi, Grok and OpenCode usage.
 

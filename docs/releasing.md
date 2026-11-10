@@ -53,6 +53,21 @@
 去敏命令及包身份收据仅保留在 ignored `.local/luna-20261110/`，
 不把调试工件、数据库、日志或安装包加入源码历史。
 
+### 源码与公开发行
+
+实现提交 `6418ad01fbb96e85ea39ce94f919f434161268cb` 已正常推送既有
+`origin/main`，新 tag `v0.5.14` 精确指向该提交，不移动旧 tag。
+已发布 [v0.5.14 Release](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.14)，
+仅上传上述安装包与 `.sha256`；没有把二进制加入源码提交。
+发布后不携带认证独立下载两个公开资产，安装包大小、SHA-256 与校验文件内容全部一致。
+后续只补实际交付证据的文档提交，不改变已发布 tag 或构建载荷。
+
+GitHub 在推送时报告默认分支有 13 项依赖告警（1 critical、5 high、
+3 moderate、4 low）；见
+[Dependabot](https://github.com/vavilonska/tokenledger-omp/security/dependabot)。
+本次仅改 Cargo.lock 的应用版本，不扩项升级依赖，也未审计这些既有告警的可利用性；
+不声称修复了它们。公开版仍未在本机安装／验收原生 UI。
+
 ## 0.5.13 OMP Terra 辅助请求速度证据修复
 
 四处应用版本更新为 0.5.13。产品名、应用标识、独立数据库、账号／事件身份、
