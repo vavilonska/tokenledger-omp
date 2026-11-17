@@ -54,16 +54,25 @@ impl ParsedMessage {
             .unwrap_or(part_tokens);
         let (cost, provenance, incomplete) = match self.cost {
             StoredCost::Exact(cost) => (Some(cost), CostProvenance::Exact, false),
-            StoredCost::Invalid | StoredCost::Missing if !parts.is_empty() => {
-                cost_from_parts(parts, &self.provider_id, &self.model, pricing)
-            }
+            StoredCost::Invalid | StoredCost::Missing if !parts.is_empty() => cost_from_parts(
+                parts,
+                &self.provider_id,
+                &self.model,
+                pricing,
+                self.timestamp,
+            ),
             StoredCost::Invalid => (None, CostProvenance::Exact, tokens.total > 0),
-            StoredCost::Missing => {
-                estimate_cost(pricing, &self.provider_id, &self.model, tokens.breakdown).map_or(
-                    (None, CostProvenance::Estimated, tokens.total > 0),
-                    |cost| (Some(cost), CostProvenance::Estimated, false),
-                )
-            }
+            StoredCost::Missing => estimate_cost(
+                pricing,
+                &self.provider_id,
+                &self.model,
+                tokens.breakdown,
+                self.timestamp,
+            )
+            .map_or(
+                (None, CostProvenance::Estimated, tokens.total > 0),
+                |cost| (Some(cost), CostProvenance::Estimated, false),
+            ),
         };
         (tokens, cost, provenance, incomplete)
     }
@@ -284,6 +293,7 @@ fn cost_from_parts(
     provider_id: &str,
     model: &str,
     pricing: &ModelPricing,
+    timestamp: DateTime<Utc>,
 ) -> (Option<f64>, CostProvenance, bool) {
     let mut total = 0.0;
     let mut has_cost = false;
@@ -297,7 +307,7 @@ fn cost_from_parts(
             }
             StoredCost::Missing => {
                 let estimate = part.tokens.and_then(|tokens| {
-                    estimate_cost(pricing, provider_id, model, tokens.breakdown)
+                    estimate_cost(pricing, provider_id, model, tokens.breakdown, timestamp)
                 });
                 if let Some(cost) = estimate {
                     total += cost;
@@ -326,13 +336,16 @@ fn estimate_cost(
     provider_id: &str,
     model: &str,
     tokens: TokenBreakdown,
+    timestamp: DateTime<Utc>,
 ) -> Option<f64> {
     if tokens.total_tokens() == 0 || model == "Unattributed" {
         return None;
     }
     pricing
-        .estimated_cost_dollars(model, tokens, true)
-        .or_else(|| pricing.estimated_cost_dollars(&format!("{provider_id}/{model}"), tokens, true))
+        .estimated_cost_at(model, tokens, true, timestamp)
+        .or_else(|| {
+            pricing.estimated_cost_at(&format!("{provider_id}/{model}"), tokens, true, timestamp)
+        })
         .filter(|cost| cost.is_finite() && *cost >= 0.0)
 }
 

@@ -308,9 +308,12 @@ fn aggregate_into(
             );
             contributed = true;
         } else if !model.is_empty() {
-            if let Some(cost) =
-                pricing.estimated_cost_dollars(model, event.tokens.pricing_tokens(), true)
-            {
+            if let Some(cost) = pricing.estimated_cost_at(
+                model,
+                event.tokens.pricing_tokens(),
+                true,
+                event.timestamp,
+            ) {
                 accumulator.add(
                     date,
                     event.reported_total_tokens,

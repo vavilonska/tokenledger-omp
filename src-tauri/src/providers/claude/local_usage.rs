@@ -676,7 +676,7 @@ fn aggregate_into(
         } else {
             event
                 .cost_usd
-                .or_else(|| pricing.estimated_cost_dollars(model_name?, tokens, true))
+                .or_else(|| pricing.estimated_cost_at(model_name?, tokens, true, event.timestamp))
         };
         let model = model_name.unwrap_or("Unattributed");
         if let Some(cost) = cost {

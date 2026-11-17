@@ -33,7 +33,7 @@ pub fn parse_usage_csv(csv: &str, pricing: &ModelPricing) -> Vec<CursorCsvRow> {
                 output: parse_integer(record.get("Output Tokens")).unwrap_or_default(),
                 ..TokenBreakdown::default()
             };
-            let estimated_cost_usd = pricing.estimated_cost_dollars(&model, tokens, false);
+            let estimated_cost_usd = pricing.estimated_cost_at(&model, tokens, false, date);
             Some(CursorCsvRow {
                 cache_usage: input.zip(cache_read).zip(cache_write).map(
                     |((input, read), write)| {

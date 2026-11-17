@@ -89,6 +89,8 @@ Prices verified against official OpenAI documentation on 2026-09-30, per million
 
 | Model         | Standard API input / cached / output (USD) | Codex input / cached / output (credits) | API Fast | Purchased credit Fast |
 | ------------- | ------------------------------------------ | --------------------------------------- | -------- | --------------------- |
+| GPT-6.2 Astra | 8 / 0.4 / 40                               | 200 / 10 / 1,000                        | 2×       | 2×                    |
+| GPT-6.2 Sol   | 2 / 0.1 / 10                               | 50 / 2.5 / 250                          | 2×       | 2×                    |
 | GPT-6 Astra   | 10 / 1 / 50                                | 250 / 25 / 1,250                        | 2×       | 2×                    |
 | GPT-6.1 Sol   | 2 / 0.1 / 10                               | 50 / 2.5 / 250                          | 2×       | 2×                    |
 | GPT-6 Sol     | 2 / 0.2 / 10                               | 50 / 5 / 250                            | 2×       | 2×                    |
@@ -108,10 +110,16 @@ Codex credit estimates use the independent published token credit card. They do 
 Batch/Flex discounts, API Fast multipliers, API-only long-context surcharges or cache-write charges.
 Hover a credit value to see its USD equivalent at the fixed display anchor **2,500 credits = $100**
 (1 credit = $0.04). This equivalent is not the API list-price estimate or a subscription invoice.
-At Standard speed, the seven models in the table have the same input, cached-input and output
+At Standard speed, the models in the table have the same input, cached-input and output
 numbers after this display conversion. Credit estimates use purchased-credit/Enterprise PAYG
 Fast rates (2×), not included subscription-limit consumption (2.5×). These are different quantities;
 do not infer subscription usage from the displayed credit estimate.
+For GPT-6.2 Astra and Sol, Ultrafast uses 3× Standard for API and purchased-credit
+estimates through February 28, 2027 Pacific time, then 6×. Historical requests use their
+own timestamp. Included subscription usage has a separate 6× multiplier throughout.
+See the [API speed prices](https://developers.openai.com/api/docs/pricing) and
+[purchased-credit rates](https://learn.chatgpt.com/docs/pricing#token-rates).
+
 Ultrafast is a distinct request speed: GPT-6 Astra and GPT-6.1 Sol use 6× for API USD and purchased
 credits, not the 8× included-quota consumption rate. Unsupported Ultrafast/model combinations stay
 unpriced. GPT-5.5 retains its distinct Fast rates: 2.5× API and 2× purchased credits.

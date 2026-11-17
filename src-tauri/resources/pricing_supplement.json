@@ -1,6 +1,6 @@
 {
   "$comment": "OpenQuota pricing supplement. Prices models that no public catalog carries, supplies fast-variant multipliers the catalogs omit, and maps provider log model slugs to canonical pricing keys (LiteLLM keys, models.dev ids, or entries in this file). The raw main-branch file is refreshed by installed apps, so merged corrections arrive without an app release. Rates are USD per million tokens.",
-  "updated_at": "2026-10-28T00:00:00Z",
+  "updated_at": "2026-11-17T00:00:00Z",
   "pricing": {
     "auto": {
       "input_per_million": 1.25,
@@ -217,6 +217,56 @@
       "cache_write_above_200k_per_million": 5.0,
       "output_above_200k_per_million": 15.0
     },
+    "gpt-6.2-astra": {
+      "$comment": "OpenAI API rates per million tokens. https://developers.openai.com/api/docs/models/gpt-6.2-astra Ultrafast list multiplier applies from 2027-03-01 Pacific. Earlier requests use the launch rate.",
+      "input_per_million": 8.0,
+      "cache_write_per_million": 10.0,
+      "cache_read_per_million": 0.4,
+      "output_per_million": 40.0,
+      "ultrafast_multiplier": 6.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 16.0,
+      "cache_read_above_200k_per_million": 0.8,
+      "cache_write_above_200k_per_million": 20.0,
+      "output_above_200k_per_million": 60.0
+    },
+    "gpt-6.2-astra-fast": {
+      "$comment": "OpenAI API rates per million tokens. https://developers.openai.com/api/docs/models/gpt-6.2-astra",
+      "input_per_million": 16.0,
+      "cache_write_per_million": 20.0,
+      "cache_read_per_million": 0.8,
+      "output_per_million": 80.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 32.0,
+      "cache_read_above_200k_per_million": 1.6,
+      "cache_write_above_200k_per_million": 40.0,
+      "output_above_200k_per_million": 120.0
+    },
+    "gpt-6.2-sol": {
+      "$comment": "OpenAI API rates per million tokens. https://developers.openai.com/api/docs/models/gpt-6.2-sol Ultrafast list multiplier applies from 2027-03-01 Pacific. Earlier requests use the launch rate.",
+      "input_per_million": 2.0,
+      "cache_write_per_million": 2.5,
+      "cache_read_per_million": 0.1,
+      "output_per_million": 10.0,
+      "ultrafast_multiplier": 6.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 4.0,
+      "cache_read_above_200k_per_million": 0.2,
+      "cache_write_above_200k_per_million": 5.0,
+      "output_above_200k_per_million": 15.0
+    },
+    "gpt-6.2-sol-fast": {
+      "$comment": "OpenAI API rates per million tokens. https://developers.openai.com/api/docs/models/gpt-6.2-sol",
+      "input_per_million": 4.0,
+      "cache_write_per_million": 5.0,
+      "cache_read_per_million": 0.2,
+      "output_per_million": 20.0,
+      "long_context_threshold_tokens": 272000,
+      "input_above_200k_per_million": 8.0,
+      "cache_read_above_200k_per_million": 0.4,
+      "cache_write_above_200k_per_million": 10.0,
+      "output_above_200k_per_million": 30.0
+    },
     "gpt-6.1-sol": {
       "$comment": "Standard API pricing verified 2026-09-30: https://developers.openai.com/api/docs/models/gpt-6.1-sol. Cached input is 5% of input, not the previous Sol's 10%. Fast 2x; Ultrafast 6x API/purchased credits (not included quota's 8x); >272K prompt tokens doubles input/cache and multiplies output by 1.5.",
       "input_per_million": 2.0,
@@ -338,6 +388,8 @@
     "gpt-5.5": 2.5,
     "gpt-6-astra": 2.0,
     "gpt-6-sol": 2.0,
+    "gpt-6.2-astra": 2.0,
+    "gpt-6.2-sol": 2.0,
     "gpt-6.1-sol": 2.0,
     "gpt-6.1-terra": 2.0,
     "gpt-6-luna": 2.0,
@@ -346,6 +398,16 @@
     "gpt-5.6-luna": 2.0
   },
   "alias_rules": [
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-ultrafast$", "canonical": "gpt-6.2-astra-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?-ultrafast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.2-astra-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6.2-astra-fast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.2-astra-fast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-astra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.2-astra"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-ultrafast$", "canonical": "gpt-6.2-sol-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?-ultrafast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.2-sol-ultrafast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?-fast$", "canonical": "gpt-6.2-sol-fast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?-fast(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.2-sol-fast"},
+    {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.2-sol(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:low|medium|high|xhigh|max|ultra))?$", "canonical": "gpt-6.2-sol"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-terra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max))?-ultrafast$", "canonical": "gpt-6.1-terra-ultrafast"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-terra(?:-\\d{4}-?\\d{2}-?\\d{2})?-ultrafast(?:-(?:none|low|medium|high|xhigh|max))?$", "canonical": "gpt-6.1-terra-ultrafast"},
     {"pattern": "^(?:(?:openai|openai-codex)/)?gpt-6\\.1-terra(?:-\\d{4}-?\\d{2}-?\\d{2})?(?:-(?:none|low|medium|high|xhigh|max))?-fast$", "canonical": "gpt-6.1-terra-fast"},

@@ -1475,9 +1475,6 @@ pub(crate) fn estimate_token_cost(
     } else {
         display_model
     };
-    if pricing.codex_credit_mode {
-        return crate::pricing::codex_credits::equivalent_usd(pricing, model, tokens);
-    }
     let canonical = pricing.supplement.canonical_name(model).unwrap_or(model);
     let (rate_model, suffix_speed) = if let Some(base) = canonical.strip_suffix("-ultrafast") {
         (base, RequestSpeed::Ultrafast)
@@ -1486,6 +1483,9 @@ pub(crate) fn estimate_token_cost(
     } else {
         (canonical, RequestSpeed::Standard)
     };
+    if pricing.codex_credit_mode || matches!(rate_model, "gpt-6.2-astra" | "gpt-6.2-sol") {
+        return pricing.estimated_cost_at(canonical, tokens, true, *timestamp);
+    }
     let rates = match pricing.resolve(rate_model) {
         Some(rates) => rates,
         None if suffix_speed == RequestSpeed::Fast && tokens.speed != RequestSpeed::Ultrafast => {
@@ -1715,6 +1715,68 @@ mod tests {
         assert!(credits.estimate_complete);
         assert_eq!(api.tokens, 564_001);
         assert_eq!(credits.tokens, api.tokens);
+    }
+
+    #[test]
+    fn gpt_62_prices_retained_requests_at_their_timestamp_in_both_bases() {
+        let mut pricing = test_bundled_pricing();
+        let last_promo = Utc.with_ymd_and_hms(2027, 3, 1, 7, 59, 59).unwrap();
+        let first_list = Utc.with_ymd_and_hms(2027, 3, 1, 8, 0, 0).unwrap();
+        for credits in [false, true] {
+            pricing.codex_credit_mode = credits;
+            for (model, input_rate) in [("gpt-6.2-astra", 8.0), ("gpt-6.2-sol", 2.0)] {
+                for cached in [52_000, 52_001] {
+                    let tokens = TokenBreakdown {
+                        input: 100_000,
+                        cache_write_5m: 60_000,
+                        cache_write_12h: 60_000,
+                        cache_read: cached,
+                        output: 10_000,
+                        ..Default::default()
+                    };
+                    let cache_cost = cached as f64 * 0.05;
+                    let expected = if credits {
+                        (220_000.0 + cache_cost + 50_000.0) * input_rate
+                    } else {
+                        let prompt = 100_000.0 + 60_000.0 * 1.25 + 60_000.0 * 2.5 + cache_cost;
+                        if cached == 52_000 {
+                            (prompt + 50_000.0) * input_rate
+                        } else {
+                            (prompt * 2.0 + 75_000.0) * input_rate
+                        }
+                    } / 1_000_000.0;
+                    for (when, ultra) in [(last_promo, 3.0), (first_list, 6.0)] {
+                        for (suffix, speed, multiplier) in [
+                            ("-high", RequestSpeed::Standard, 1.0),
+                            ("-ultra-fast", RequestSpeed::Standard, 2.0),
+                            ("-fast-max", RequestSpeed::Fast, 2.0),
+                            ("-ultrafast", RequestSpeed::Fast, 2.0),
+                            ("-ultrafast-ultra", RequestSpeed::Standard, ultra),
+                            ("-max-ultrafast", RequestSpeed::Ultrafast, ultra),
+                            ("-fast", RequestSpeed::Ultrafast, ultra),
+                            ("", RequestSpeed::Ultrafast, ultra),
+                        ] {
+                            let alias = format!("openai-codex/{model}-2026-11-17{suffix}");
+                            let tokens = TokenBreakdown { speed, ..tokens };
+                            let cost = super::estimate_token_cost(&when, &alias, tokens, &pricing)
+                                .unwrap();
+                            assert!(
+                                (cost - expected * multiplier).abs() < 1e-9,
+                                "{alias} {speed:?} {when}, credits={credits}: {cost}"
+                            );
+                            assert_eq!(pricing.display_family(&alias), model);
+                        }
+                    }
+                }
+                assert!(super::estimate_token_cost(
+                    &last_promo,
+                    &format!("{model}-none"),
+                    TokenBreakdown::default(),
+                    &pricing
+                )
+                .is_none());
+            }
+        }
     }
 
     #[test]

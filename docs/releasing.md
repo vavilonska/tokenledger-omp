@@ -1,5 +1,19 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.15 GPT-6.2 Astra and Sol
+
+API Standard input, cache read and output cost $8 / $0.40 / $40 per million tokens
+for Astra and $2 / $0.10 / $10 for Sol. API cache writes cost 1.25× input for 30 minutes
+and 2.5× for 12 hours. Above 272,000 prompt tokens, the full request uses double the
+input and cache rates and 1.5× output. Purchased credits use 200 / 10 / 1,000 for Astra
+and 50 / 2.5 / 250 for Sol per million tokens, with cache writes charged as input.
+
+GPT-6.2 Astra and Sol now have separate API and purchased-credit estimates. Fast uses 2× Standard. Ultrafast uses the request timestamp for the 3× launch price and the 6× price from March 1, 2027 Pacific time.
+Provider, dated, reasoning and speed aliases share the published rates.
+[GPT-6.2 Astra](https://developers.openai.com/api/docs/models/gpt-6.2-astra),
+[GPT-6.2 Sol](https://developers.openai.com/api/docs/models/gpt-6.2-sol),
+[Codex purchased credits](https://learn.chatgpt.com/docs/pricing#token-rates).
+
 ## 0.5.14 OMP Luna 辅助请求速度证据修复
 
 四处应用版本更新为 0.5.14。产品名、应用标识、独立数据库、设置、账号／事件身份

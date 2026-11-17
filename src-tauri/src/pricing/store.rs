@@ -680,6 +680,7 @@ mod tests {
             "2026-10-15T00:00:00Z",
             "2026-10-22T00:00:00Z",
             "2026-10-28T00:00:00Z",
+            "2026-11-17T00:00:00Z",
         ] {
             let directory = tempdir().unwrap();
             let http = Arc::new(StubHttp::default());

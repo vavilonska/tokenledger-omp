@@ -1,4 +1,4 @@
-//! Codex purchased-credit rate card; currently listed rates verified 2026-10-28:
+//! Codex purchased-credit rate card; currently listed rates verified 2026-11-18:
 //! https://learn.chatgpt.com/docs/pricing#token-rates
 //! https://learn.chatgpt.com/docs/agent-configuration/speed
 //! Kept separate from API catalogs, promotions, Batch/Flex and API Fast rates.
@@ -37,13 +37,18 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
         regex::Regex::new(r"-\d{4}-?\d{2}-?\d{2}$").expect("valid date regex")
     });
     let base = DATED.replace(base, "");
-    if canonical.ends_with("-ultrafast") && !matches!(base.as_ref(), "gpt-6-astra" | "gpt-6.1-sol")
+    if canonical.ends_with("-ultrafast")
+        && !matches!(
+            base.as_ref(),
+            "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6.2-astra" | "gpt-6.2-sol"
+        )
     {
         return None;
     }
     let (input, cached, output, fast_multiplier) = match base.as_ref() {
+        "gpt-6.2-astra" => (200.0, 10.0, 1000.0, 2.0),
         "gpt-6-astra" => (250.0, 25.0, 1250.0, 2.0),
-        "gpt-6.1-sol" => (50.0, 2.5, 250.0, 2.0),
+        "gpt-6.2-sol" | "gpt-6.1-sol" => (50.0, 2.5, 250.0, 2.0),
         "gpt-6.1-terra" => (25.0, 1.25, 125.0, 2.0),
         "gpt-6-sol" => (50.0, 5.0, 250.0, 2.0),
         "gpt-6-luna" => (2.5, 0.25, 12.5, 2.0),
@@ -62,7 +67,7 @@ pub fn equivalent_usd(pricing: &ModelPricing, model: &str, tokens: TokenBreakdow
         RequestSpeed::Standard => 1.0,
         RequestSpeed::Fast => fast_multiplier,
         RequestSpeed::Ultrafast => match base.as_ref() {
-            "gpt-6-astra" | "gpt-6.1-sol" => 6.0,
+            "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6.2-astra" | "gpt-6.2-sol" => 6.0,
             _ => return None,
         },
     };

@@ -41,6 +41,34 @@ impl ModelPricing {
         resolved
     }
 
+    /// Apply time-limited rates to the request timestamp, including when replaying retained usage.
+    pub fn estimated_cost_at(
+        &self,
+        model: &str,
+        tokens: TokenBreakdown,
+        apply_long_context_rates: bool,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Option<f64> {
+        let list_cost = self.estimated_cost_dollars(model, tokens, apply_long_context_rates)?;
+        // Midnight Pacific on 2027-03-01 is 08:00 UTC.
+        const GPT_62_ULTRAFAST_LIST_START: i64 = 1_803_888_000;
+        if timestamp.timestamp() < GPT_62_ULTRAFAST_LIST_START
+            && (tokens.speed == RequestSpeed::Ultrafast || model.contains("-ultrafast"))
+        {
+            let canonical = self.supplement.canonical_name(model).unwrap_or(model);
+            let base = canonical
+                .strip_suffix("-ultrafast")
+                .or_else(|| canonical.strip_suffix("-fast"))
+                .unwrap_or(canonical);
+            let ultrafast = tokens.speed == RequestSpeed::Ultrafast
+                || (tokens.speed == RequestSpeed::Standard && canonical.ends_with("-ultrafast"));
+            if ultrafast && matches!(base, "gpt-6.2-astra" | "gpt-6.2-sol") {
+                return Some(list_cost * (3.0 / 6.0));
+            }
+        }
+        Some(list_cost)
+    }
+
     pub fn estimated_cost_dollars(
         &self,
         model: &str,

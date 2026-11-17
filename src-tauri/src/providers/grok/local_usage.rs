@@ -244,7 +244,7 @@ fn aggregate(events: Vec<TokenEvent>, now: DateTime<Utc>, pricing: &ModelPricing
             .prompt
             .saturating_add(event.completion)
             .saturating_add(event.reasoning);
-        if let Some(cost) = pricing.estimated_cost_dollars(model, tokens, true) {
+        if let Some(cost) = pricing.estimated_cost_at(model, tokens, true, event.timestamp) {
             accumulator.add(date, total, cost, model, event.cache_usage);
         } else if total > 0 {
             accumulator.add_unknown_model(date, model);
