@@ -1,5 +1,19 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.16 OMP GPT-6.2 辅助请求档位恢复
+
+- 仅精确 `gpt-6.2-astra`／`gpt-6.2-sol` 的辅助 `model_usage` 在没有显式档位时
+  使用 OMP 18.22.2 的历史费用证据。两款模型均支持从费用恢复 Standard 或 Fast
+  （2×），仅 Sol 可恢复 Ultrafast（6×）。这套费用无长上下文或时间附加，普通写缓存
+  免费，只用于判定档位；API USD／购买 Codex credits 仍各按自己的价表计价。
+- 原始 token 和费用桶须完整、费用总额须为正且唯一匹配；`premiumRequests` 若有也须
+  一致。显式非法或冲突档位、Flex、fork 清零费用和不明确证据都不猜价；辅助请求不继承
+  assistant 分支档位。
+- 解析缓存 10→11：普通刷新重解析有源 JSONL，沿用原请求键、账号归属与薄账本 schema，
+  不重复累计 tokens。已恢复的档位在删除源文件后仍留存；升级前已删源的旧 unknown 不回填。
+  新回归用合成日志与临时 SQLite，不提交真实日志、私有回放、账号或账本。
+- 四处应用版本更新为 0.5.16。公开版应用标识、独立数据目录、设置及凭据隔离不变。
+
 ## 0.5.15 GPT-6.2 Astra and Sol
 
 API Standard input, cache read and output cost $8 / $0.40 / $40 per million tokens
@@ -13,6 +27,11 @@ Provider, dated, reasoning and speed aliases share the published rates.
 [GPT-6.2 Astra](https://developers.openai.com/api/docs/models/gpt-6.2-astra),
 [GPT-6.2 Sol](https://developers.openai.com/api/docs/models/gpt-6.2-sol),
 [Codex purchased credits](https://learn.chatgpt.com/docs/pricing#token-rates).
+
+The [v0.5.15 release](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.15)
+includes `TokenLedger-OMP_0.5.15_x64-setup.exe` and its `.sha256` file. GitHub lists the
+installer at 10,445,707 bytes with SHA-256
+`3cc23b4d636dd315ee980f9fb1beb66e2247284ccfe2c4f66f0a158f55016037`.
 
 ## 0.5.14 OMP Luna 辅助请求速度证据修复
 

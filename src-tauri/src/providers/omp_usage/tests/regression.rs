@@ -1089,3 +1089,117 @@ fn luna_schema_nine_reparse_preserves_identity_and_prices_titles_after_source_de
         }
     }
 }
+
+#[test]
+fn codex_62_schema_ten_refresh_reprices_auxiliary_calls_and_retains_tiers() {
+    let astra = json!({"type":"model_usage","id":"title","purpose":"title",
+        "timestamp":"2026-07-12T14:01:00Z","provider":"openai-codex","model":"gpt-6.2-astra",
+        "usage":{"input":1000,"output":50,"cacheRead":25000,"cacheWrite":0,"totalTokens":26050,
+            "premiumRequests":0,"cost":{"input":0.008,"output":0.002,
+                "cacheRead":0.01,"cacheWrite":0,"total":0.02}}});
+    let sol = json!({"type":"model_usage","id":"probe","purpose":"task-completion-probe",
+        "timestamp":"2026-07-12T14:02:00Z","provider":"openai-codex","model":"gpt-6.2-sol",
+        "usage":{"input":2000,"output":60,"cacheRead":60000,"cacheWrite":0,"totalTokens":62060,
+            "premiumRequests":0,"cost":{"input":0.004,"output":0.0006,
+                "cacheRead":0.006,"cacheWrite":0,"total":0.0106}}});
+    let now = Utc.with_ymd_and_hms(2026, 7, 12, 14, 4, 0).unwrap();
+    for source_present in [true, false] {
+        let directory = tempdir().unwrap();
+        let home = directory.path();
+        let database = home.join("cache.db");
+        let storage = Storage::open(&database).unwrap();
+        write_session(
+            home,
+            "codex-62.jsonl",
+            &[astra.clone(), sol.clone(), astra.clone()],
+        );
+        let source = fs::canonicalize(home.join("agent/sessions/codex-62.jsonl")).unwrap();
+        let mut old =
+            serde_json::to_value(parse_jsonl(&fs::read_to_string(&source).unwrap())).unwrap();
+        let old_events = old.as_array_mut().unwrap();
+        for event in old_events.iter_mut() {
+            event["speed"] = Value::Null;
+            event["speed_evidence"] = Value::Null;
+        }
+        let expected_keys = [
+            entry_key(&old_events[0]).unwrap(),
+            entry_key(&old_events[1]).unwrap(),
+        ];
+        storage
+            .record_usage_events("omp", "account-a", 1, old_events, entry_key)
+            .unwrap();
+        let fingerprint =
+            LogFileFingerprint::from_metadata(&fs::metadata(&source).unwrap()).unwrap();
+        storage
+            .save_log_events(
+                "omp",
+                &source,
+                fingerprint.size,
+                fingerprint.modified_nanos,
+                &json!({"schema_version":10,"events":old}).to_string(),
+            )
+            .unwrap();
+        if !source_present {
+            fs::remove_file(&source).unwrap();
+        }
+
+        let assert_refresh = |storage: &Storage| {
+            for credits in [false, true] {
+                let mut pricing = crate::pricing::test_bundled_pricing();
+                pricing.codex_credit_mode = credits;
+                let (outcome, histories) =
+                    source_scan_at(storage, home, "account-a", &pricing, now);
+                assert_eq!(outcome.events.len(), 2);
+                for (event, (model, cost)) in outcome
+                    .events
+                    .iter()
+                    .zip([("gpt-6.2-astra", 0.02), ("gpt-6.2-sol", 0.0106)])
+                {
+                    assert_eq!(event.model, model);
+                    if source_present {
+                        assert!((event.cost.unwrap() - cost).abs() < 1e-12);
+                    } else {
+                        // Schema 10 cannot distinguish a missing tier from invalid explicit
+                        // metadata, so a missing source cannot safely be upgraded.
+                        assert_eq!(event.cost, None);
+                    }
+                }
+                for history in histories {
+                    for period in [history.today.unwrap(), history.last_30_days.unwrap()] {
+                        assert_eq!(period.tokens, 88_110);
+                        assert_eq!(period.estimate_complete, source_present);
+                        assert!(period.unknown_models.is_empty());
+                        if source_present {
+                            assert!((period.estimated_cost_usd.unwrap() - 0.0306).abs() < 1e-12);
+                        } else {
+                            assert_eq!(period.estimated_cost_usd, None);
+                        }
+                    }
+                }
+                assert!(
+                    !source_scan_at(storage, home, "account-b", &pricing, now)
+                        .0
+                        .included
+                );
+            }
+            let retained: Vec<SessionUsageEvent> =
+                storage.load_usage_events("omp", "account-a", 1).unwrap();
+            assert_eq!(retained.len(), 2);
+            for event in retained {
+                let key = entry_key(&serde_json::to_value(&event).unwrap()).unwrap();
+                assert!(expected_keys.contains(&key));
+                assert_eq!(
+                    event.speed,
+                    source_present.then_some(RequestSpeed::Standard)
+                );
+                assert_eq!(event.speed_evidence.is_some(), source_present);
+            }
+        };
+        assert_refresh(&storage);
+        if source_present {
+            fs::remove_file(&source).unwrap();
+        }
+        drop(storage);
+        assert_refresh(&Storage::open(&database).unwrap());
+    }
+}

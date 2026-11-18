@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::pricing::RequestSpeed;
 
@@ -51,6 +51,7 @@ pub(crate) enum SpeedEvidence {
     Omp1811Cost,
     Omp18132TerraCost,
     Omp18186LunaCost,
+    Omp18222Codex62Cost,
 }
 
 pub(super) fn explicit_tier(value: &Value) -> Option<RequestSpeed> {
@@ -73,6 +74,7 @@ pub(super) fn resolve_speed(
     model: &str,
     tokens: [u64; 4],
     cost: Option<&RecordedCost>,
+    usage: &Map<String, Value>,
 ) -> (Option<RequestSpeed>, Option<SpeedEvidence>) {
     let camel = message.get("serviceTier");
     let snake = message.get("service_tier");
@@ -91,7 +93,7 @@ pub(super) fn resolve_speed(
     if assistant {
         return (branch, branch.map(|_| SpeedEvidence::AssistantBranch));
     }
-    cost.and_then(|cost| historical_speed(model, tokens, cost))
+    cost.and_then(|cost| historical_speed(model, tokens, cost, usage))
         .map_or((None, None), |(speed, evidence)| {
             (Some(speed), Some(evidence))
         })
@@ -101,16 +103,33 @@ fn historical_speed(
     model: &str,
     tokens: [u64; 4],
     cost: &RecordedCost,
+    usage: &Map<String, Value>,
 ) -> Option<(RequestSpeed, SpeedEvidence)> {
     // Frozen producer USD/million buckets, NOT the mutable display pricing catalog.
-    let (rates, evidence, infer_fast, infer_ultrafast) = if model == "gpt-6-luna" {
+    let is_codex_62 = matches!(model, "gpt-6.2-astra" | "gpt-6.2-sol");
+    let (rates, evidence, priority, ultrafast) = if is_codex_62 {
+        // OMP 18.22.2 models.db (openai-codex:0.169.x) and its bundled Codex
+        // terminal-event handler: no long-context or time-based rates, free ordinary
+        // writes, priority=2, and ultrafast=6 advertised only by Sol. Flex is not Standard.
+        let (rates, ultrafast) = if model == "gpt-6.2-astra" {
+            ([8.0, 40.0, 0.4, 0.0], None)
+        } else {
+            ([2.0, 10.0, 0.1, 0.0], Some(6.0))
+        };
+        (
+            rates,
+            SpeedEvidence::Omp18222Codex62Cost,
+            Some(2.0),
+            ultrafast,
+        )
+    } else if model == "gpt-6-luna" {
         // OMP 18.18.6 models.db confirms this exact ID's standard buckets.
         // Priority is listed, but its producer multiplier is unverified: infer Standard only.
         (
             [0.1, 0.5, 0.01, 0.0],
             SpeedEvidence::Omp18186LunaCost,
-            false,
-            false,
+            None,
+            None,
         )
     } else if model == "gpt-6.1-terra" {
         // OMP 18.13.2 models.db and bundled calculateCost confirm this exact Terra ID:
@@ -120,8 +139,8 @@ fn historical_speed(
         (
             [1.0, 5.0, 0.05, 0.0],
             SpeedEvidence::Omp18132TerraCost,
-            true,
-            false,
+            Some(2.5),
+            None,
         )
     } else {
         // Preserve the separately verified OMP 18.11 Sol/Astra producer semantics.
@@ -136,12 +155,20 @@ fn historical_speed(
             "gpt-6-astra" => [10.0, 50.0, 1.0, 0.0],
             _ => return None,
         };
-        (rates, SpeedEvidence::Omp1811Cost, true, true)
+        (rates, SpeedEvidence::Omp1811Cost, Some(2.5), Some(8.0))
     };
     if !cost.valid || cost.total.is_none_or(|total| total <= 0.0) {
         return None;
     }
     let recorded = [cost.input, cost.output, cost.cache_read, cost.cache_write];
+    if is_codex_62
+        && (recorded.iter().any(Option::is_none)
+            || ["input", "output", "cacheRead", "cacheWrite"]
+                .iter()
+                .any(|key| usage.get(*key).and_then(Value::as_u64).is_none()))
+    {
+        return None;
+    }
     if tokens
         .iter()
         .zip(recorded)
@@ -151,15 +178,13 @@ fn historical_speed(
     }
     let mut matched = None;
     for (speed, multiplier) in [
-        (RequestSpeed::Standard, 1.0),
-        (RequestSpeed::Fast, 2.5),
-        (RequestSpeed::Ultrafast, 8.0),
+        (RequestSpeed::Standard, Some(1.0)),
+        (RequestSpeed::Fast, priority),
+        (RequestSpeed::Ultrafast, ultrafast),
     ] {
-        if (speed == RequestSpeed::Fast && !infer_fast)
-            || (speed == RequestSpeed::Ultrafast && !infer_ultrafast)
-        {
+        let Some(multiplier) = multiplier else {
             continue;
-        }
+        };
         let expected = std::array::from_fn::<_, 4, _>(|index| {
             tokens[index] as f64 * rates[index] * multiplier / 1_000_000.0
         });
@@ -179,5 +204,14 @@ fn historical_speed(
         }
         matched = Some(speed);
     }
-    matched.map(|speed| (speed, evidence))
+    let speed = matched?;
+    // A recorded premium count must agree, but it cannot replace bucket evidence.
+    if is_codex_62
+        && usage.get("premiumRequests").is_some_and(|reported| {
+            reported.as_u64() != Some((speed != RequestSpeed::Standard) as u64)
+        })
+    {
+        return None;
+    }
+    Some((speed, evidence))
 }

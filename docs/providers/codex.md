@@ -134,12 +134,16 @@ subscription allowances depend on the plan and are not inferred from this displa
 remain unpriced. For OMP, explicit request speed takes precedence; only assistant requests may
 inherit an explicitly configured session branch's speed. An assistant without either source also
 stays unknown. Auxiliary `model_usage` entries never inherit that branch or default to Standard.
-Historical numeric cost buckets can establish speed only for exact GPT-6 Astra / GPT-6.1 Sol
-identities (including provider prefixes), when they uniquely match documented, fixed producer-era
-OMP 18.11 `openai-codex` rates: Standard 1×, Fast 2.5× and Ultrafast 8×, with zero cache-write
-cost and no producer long-context surcharge. API display multipliers 2×/6× are not candidates
-for recovering this producer's historical speed. These buckets are evidence, not current display
-prices; display estimates still use their separate API/credit cards and API long-context rules.
+Historical numeric cost buckets can establish speed when they uniquely match a verified producer's
+rates. For GPT-6 Astra and GPT-6.1 Sol (including provider prefixes), OMP 18.11 uses Standard 1×,
+Fast 2.5× and Ultrafast 8×. For exact `gpt-6.2-astra` and `gpt-6.2-sol`, OMP 18.22.2 uses
+Standard 1× and Fast 2×, with Ultrafast 6× supported for inference only on Sol. The GPT-6.2 rule
+requires complete numeric token and cost buckets, a matching positive total, and agreement with
+`premiumRequests` if present. Neither producer schedule charges ordinary cache writes or applies
+the API long-context surcharge. These costs are tier evidence, not display prices: API USD and
+purchased credits still use their independent rates, including the request-date Ultrafast rate.
+An ordinary refresh can recover tiers from available source logs; no speed is assumed for older
+unresolved requests whose source is gone.
 Codex's own legacy log format retains its Standard default when no speed is recorded; that default
 does not apply to OMP. Missing, conflicting or non-discriminating evidence remains unknown, even
 for a known model.

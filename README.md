@@ -16,6 +16,8 @@
 
 基于 [OpenQuota](https://github.com/deviffyy/OpenQuota) 的独立桌面用量面板。集中查看 AI 编程工具的额度、重置时间、Token 用量和费用估算。公开版保留 **Oh My Pi 与 Codex 同账号用量合并、Codex 周额度估算和重置周期历史**，不包含私有业务适配器。
 
+**0.5.16 OMP 计价修复**：GPT-6.2 Astra／Sol 的标题、探测等辅助请求缺少档位时，可用 OMP 原始费用恢复已核实的档位，从而修复由这些请求引起的“额度不可用”。更新后正常刷新即可重解析仍在的日志；旧记录如果已删源且缺少档位证据，仍不猜价。详见[发布记录](docs/releasing.md)。
+
 **0.5.15 模型更新**　新增 GPT-6.2 Astra 与 Sol 的 API 和购买 credits 计价。Fast 为标准价的 2 倍。Ultrafast 按请求时间计价，太平洋时间 2027 年 3 月 1 日起从 3 倍调整为 6 倍。
 
 **0.5.14 Luna 修复**：OMP title 等辅助请求可从精确 `gpt-6-luna` 的已核实、完整历史费用桶恢复 Standard。普通刷新重解析有源日志，保留请求键、账号归属与 tokens，修正证据删除源后仍留存；显式非法／冲突档位、fork 零费用和无源旧 unknown 仍保留 partial，不猜 priority 倍率。验收、安装包与发布状态见[发布记录](docs/releasing.md)。
@@ -83,7 +85,7 @@ corepack pnpm build:installer
 
 现有周期历史浮层的上下两图共享周期横轴：上图显示服务器观察到的额度消耗百分比，下图显示周期完整 Token 用量；当前源码只显示最近 6 周期、无分页，完整历史仍在下方保留。保留中文和主题，未知值不补零；不增加独立 WebUI 服务、服务器或依赖。
 
-当前已发布 Windows x64 NSIS 包见 [v0.5.14](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.14)：`TokenLedger-OMP_0.5.14_x64-setup.exe`，10,438,635 bytes，SHA-256 为 `7dbd6d86f7e9ef30674c7b4dd5559df5dc017853664c7f8dd3d299f3f283822f`，附 `.sha256`；发布后已无认证下载核对两资产。旧版本 tag 和资产保留。公开版未安装或验证原生 UI，完整范围及依赖告警边界见[发布记录](docs/releasing.md)。
+公开发布的 Windows x64 NSIS 安装包及对应 `.sha256` 见 [Releases](https://github.com/vavilonska/tokenledger-omp/releases/latest)。既往版本见完整 [Releases 列表](https://github.com/vavilonska/tokenledger-omp/releases)；各版验收、安装与发布范围见[发布记录](docs/releasing.md)。
 
 **0.5.5** 区分 Standard、Fast、Ultrafast；GPT-6 Astra 与 GPT-6.1 Sol 的 Ultrafast 按 API／购买积分 6× 计价，不采用套餐额度消耗倍率。OMP 辅助调用不再直接继承主会话速度，缺失或冲突证据保持未知。总计、模型、周期和分享明确标记部分估算；Cost/MTok 只纳入完整计价提供商，并说明覆盖范围，无可用费用时仍显示 tokens。
 
@@ -100,6 +102,8 @@ corepack pnpm build:installer
 ## English
 
 An independent desktop usage dashboard based on [OpenQuota](https://github.com/deviffyy/OpenQuota), showing AI coding quotas, resets, tokens and estimated costs. This public edition preserves **same-account Oh My Pi/Codex usage merging, Codex weekly quota estimates and reset-cycle history**, without private business adapters.
+
+**0.5.16 OMP pricing fix:** Title, probe and other auxiliary GPT-6.2 Astra/Sol requests with no recorded tier can recover a verified tier from OMP's original costs, restoring allowance estimates that those requests made incomplete. An ordinary refresh reparses available logs; old records without a source or tier evidence remain unpriced. See [release notes](docs/releasing.md).
 
 **0.5.15 model update**　GPT-6.2 Astra and Sol now have separate API and purchased-credit estimates. Fast uses 2× Standard. Ultrafast uses the request timestamp for the 3× launch price and the 6× price from March 1, 2027 Pacific time.
 
@@ -152,7 +156,7 @@ Requires Node.js 22+, pnpm 11.11.0, stable Rust and [Tauri 2 prerequisites](http
 
 The cycle-history popup has two stacked charts sharing the cycle axis: server-observed quota-used percentage above and complete cycle tokens below. Current source shows only the latest six cycles without pagination, while retaining the full history below, Chinese labels and themes. Unknown values remain gaps rather than zero. No separate WebUI service, server or dependency is added.
 
-The current published [v0.5.14 Windows x64 NSIS package](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.14), `TokenLedger-OMP_0.5.14_x64-setup.exe`, is 10,438,635 bytes with SHA-256 `7dbd6d86f7e9ef30674c7b4dd5559df5dc017853664c7f8dd3d299f3f283822f` and an adjacent `.sha256`. Both public assets were independently downloaded without authentication and verified. Previous tags and assets remain available. This public edition was not installed or exercised in the native host; see the [release record](docs/releasing.md) for coverage and the existing dependency-advisory boundary.
+Find the published Windows x64 NSIS installer and its `.sha256` under [Releases](https://github.com/vavilonska/tokenledger-omp/releases/latest). Previous packages are listed under [all Releases](https://github.com/vavilonska/tokenledger-omp/releases); see the [release record](docs/releasing.md) for each version's verification, installation and publication scope.
 
 **0.5.4** refreshes price catalogs and adds GPT-6.1 Sol (USD per million tokens: input $2, cached input $0.10, cache writes $2.50, output $10), including Fast and long-context pricing. Codex credits independently estimate purchased-credit/PAYG rates, not included plan-limit consumption. A compact local ledger retains observed Codex, OMP, Claude, pi, Grok and OpenCode usage.
 

@@ -276,6 +276,7 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
             model,
             [input, output, cache_read, cache_write],
             recorded_cost.as_ref().filter(|_| complete_usage),
+            usage,
         );
         let cache_usage = (complete_usage
             && ["input", "cacheRead", "cacheWrite"]

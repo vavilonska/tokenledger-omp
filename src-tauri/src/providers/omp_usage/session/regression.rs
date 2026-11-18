@@ -449,3 +449,138 @@ fn luna_inference_rejects_unverified_multipliers_aliases_and_bad_cost_or_tier_ev
     assert_eq!(event.speed, None);
     assert_eq!(event.total, 594);
 }
+
+fn codex_62_probe(model: &str, input: u64, output: u64, cached: u64, costs: [f64; 4]) -> Value {
+    let [input_cost, output_cost, cache_read_cost, total] = costs;
+    json!({
+        "type": "model_usage", "parentId": "fast", "purpose": "task-completion-probe",
+        "timestamp": "2026-07-12T14:01:00Z", "provider": "openai-codex", "model": model,
+        "usage": {"input": input, "output": output, "cacheRead": cached, "cacheWrite": 0,
+            "cost": {"input": input_cost, "output": output_cost, "cacheRead": cache_read_cost,
+                "cacheWrite": 0, "total": total}}
+    })
+}
+
+#[test]
+fn codex_62_infers_verified_tiers_without_api_long_context_or_launch_rates() {
+    for (model, factor, ultrafast) in [
+        ("gpt-6.2-astra", 4.0, None),
+        ("gpt-6.2-sol", 1.0, Some(6.0)),
+    ] {
+        for (speed, multiplier) in [
+            (RequestSpeed::Standard, Some(1.0)),
+            (RequestSpeed::Fast, Some(2.0)),
+            (RequestSpeed::Ultrafast, ultrafast),
+        ] {
+            let Some(multiplier) = multiplier else {
+                continue;
+            };
+            // The merged OMP prompt is 272,001 tokens, but its Codex catalog has no
+            // long-context rates. Ordinary cache writes are free in this catalog.
+            let scale = factor * multiplier;
+            let costs = [0.004 * scale, 0.0001 * scale, 0.027 * scale, 0.0311 * scale];
+            let mut call = codex_62_probe(model, 1_997, 10, 270_000, costs);
+            call["usage"]["orchestration"] = json!({"input": 3});
+            call["usage"]["cacheWrite"] = json!(1);
+            call["usage"]["premiumRequests"] = json!((speed != RequestSpeed::Standard) as u64);
+            let event = parse_jsonl(&journal(&[call])).remove(0);
+            assert_eq!(event.speed, Some(speed), "{model}");
+            assert_eq!(
+                event.speed_evidence,
+                Some(SpeedEvidence::Omp18222Codex62Cost)
+            );
+            assert_eq!(
+                (event.input, event.cache_read, event.cache_write),
+                (2_000, 270_000, 1)
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_62_missing_tier_rejects_bad_or_ambiguous_evidence() {
+    let sol = || {
+        codex_62_probe(
+            "gpt-6.2-sol",
+            1_001,
+            51,
+            60_001,
+            [0.002002, 0.00051, 0.0060001, 0.0085121],
+        )
+    };
+    let mut cases = Vec::new();
+    for multiplier in [0.0, 0.5, 2.5, 3.0, 8.0] {
+        let mut call = sol();
+        for bucket in ["input", "output", "cacheRead", "total"] {
+            let amount = call["usage"]["cost"][bucket].as_f64().unwrap();
+            call["usage"]["cost"][bucket] = json!(amount * multiplier);
+        }
+        cases.push(call);
+    }
+    // Astra's catalog does not advertise Ultrafast, even though it has a generic 6x cost entry.
+    cases.push(codex_62_probe(
+        "gpt-6.2-astra",
+        1_001,
+        55,
+        25_001,
+        [0.048048, 0.0132, 0.0600024, 0.1212504],
+    ));
+    // A near-zero fabricated total can match more than one candidate within tolerance.
+    cases.push(codex_62_probe(
+        "gpt-6.2-sol",
+        0,
+        0,
+        0,
+        [0.0, 0.0, 0.0, 1e-15],
+    ));
+    for model in ["openai-codex/gpt-6.2-sol", "gpt-6.2-sol-fast"] {
+        let mut call = sol();
+        call["model"] = json!(model);
+        cases.push(call);
+    }
+    let mut wrong_cost = sol();
+    wrong_cost["usage"]["cost"]["input"] = json!(0.00051);
+    wrong_cost["usage"]["cost"]["output"] = json!(0.002002);
+    cases.push(wrong_cost);
+    let mut wrong_total = sol();
+    wrong_total["usage"]["cost"]["total"] = json!(0.008);
+    cases.push(wrong_total);
+    let mut missing_zero_bucket = sol();
+    missing_zero_bucket["usage"]["cost"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cacheWrite");
+    cases.push(missing_zero_bucket);
+    let mut malformed_tokens = codex_62_probe(
+        "gpt-6.2-sol",
+        0,
+        51,
+        60_001,
+        [0.0, 0.00051, 0.0060001, 0.0065101],
+    );
+    malformed_tokens["usage"]["input"] = json!("0");
+    cases.push(malformed_tokens);
+    let mut contradictory_premium = sol();
+    contradictory_premium["usage"]["premiumRequests"] = json!(1);
+    cases.push(contradictory_premium);
+    for tier in [Value::Null, json!("flex"), json!("invalid-tier")] {
+        let mut call = sol();
+        call["serviceTier"] = tier;
+        cases.push(call);
+    }
+    let mut conflict = sol();
+    conflict["serviceTier"] = json!("default");
+    conflict["service_tier"] = json!("priority");
+    cases.push(conflict);
+
+    for call in cases {
+        let event = parse_jsonl(&journal(std::slice::from_ref(&call))).remove(0);
+        assert_eq!(event.speed, None, "{call}");
+        assert_eq!(event.speed_evidence, None);
+    }
+    let mut explicit = sol();
+    explicit["serviceTier"] = json!("priority");
+    let event = parse_jsonl(&journal(&[explicit])).remove(0);
+    assert_eq!(event.speed, Some(RequestSpeed::Fast));
+    assert_eq!(event.speed_evidence, Some(SpeedEvidence::ExplicitTier));
+}
