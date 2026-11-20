@@ -35,6 +35,8 @@ pub struct CycleRecovery {
     pub baseline_tokens: u64,
     pub covered_until: chrono::DateTime<chrono::Utc>,
     pub boundary_conflict: bool,
+    #[serde(default)]
+    pub baseline_excludes_omp_image_usage: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -619,6 +621,7 @@ impl Storage {
                             updated_at,
                         ))?,
                         boundary_conflict: false,
+                        baseline_excludes_omp_image_usage: false,
                     },
                 };
                 Ok(StoredResetCycle {
@@ -1110,6 +1113,7 @@ mod tests {
                 baseline_tokens: cycle.usage.tokens,
                 covered_until: cycle.started_at,
                 boundary_conflict: false,
+                baseline_excludes_omp_image_usage: true,
             },
             cycle,
         };
@@ -1149,6 +1153,7 @@ mod tests {
             .unwrap();
         let models = loaded[0].cycle.model_usage.as_ref().unwrap();
         assert_eq!(loaded[0].exhausted_at, None);
+        assert!(!loaded[0].recovery.baseline_excludes_omp_image_usage);
         assert_eq!(models[0].total_tokens, 8);
         assert_eq!(models[0].request_count, Some(2));
         assert_eq!(models[1].total_tokens, 4);

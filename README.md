@@ -16,6 +16,8 @@
 
 基于 [OpenQuota](https://github.com/deviffyy/OpenQuota) 的独立桌面用量面板。集中查看 AI 编程工具的额度、重置时间、Token 用量和费用估算。公开版保留 **Oh My Pi 与 Codex 同账号用量合并、Codex 周额度估算和重置周期历史**，不包含私有业务适配器。
 
+**0.5.17 OMP 生图统计修复**：通过 `openai-codex` 发起的 OMP 生图请求不再计入文本 Tokens、请求数、费用或周额度估算。更新后刷新 Codex 即可重算；旧周期只扣除有明确 OMP 生图归属的部分，缺失的文本用量不会被抵销。详见[发布记录](docs/releasing.md)。
+
 **0.5.16 OMP 计价修复**：GPT-6.2 Astra／Sol 的标题、探测等辅助请求缺少档位时，可用 OMP 原始费用恢复已核实的档位，从而修复由这些请求引起的“额度不可用”。更新后正常刷新即可重解析仍在的日志；旧记录如果已删源且缺少档位证据，仍不猜价。详见[发布记录](docs/releasing.md)。
 
 **0.5.15 模型更新**　新增 GPT-6.2 Astra 与 Sol 的 API 和购买 credits 计价。Fast 为标准价的 2 倍。Ultrafast 按请求时间计价，太平洋时间 2027 年 3 月 1 日起从 3 倍调整为 6 倍。
@@ -102,6 +104,8 @@ corepack pnpm build:installer
 ## English
 
 An independent desktop usage dashboard based on [OpenQuota](https://github.com/deviffyy/OpenQuota), showing AI coding quotas, resets, tokens and estimated costs. This public edition preserves **same-account Oh My Pi/Codex usage merging, Codex weekly quota estimates and reset-cycle history**, without private business adapters.
+
+**0.5.17 OMP image usage fix:** OMP image-generation requests made through `openai-codex` no longer count toward text tokens, requests, costs, or weekly allowance estimates. Refresh Codex after updating. Older cycles remove only attributable OMP image usage, without masking missing text usage. See [release notes](docs/releasing.md).
 
 **0.5.16 OMP pricing fix:** Title, probe and other auxiliary GPT-6.2 Astra/Sol requests with no recorded tier can recover a verified tier from OMP's original costs, restoring allowance estimates that those requests made incomplete. An ordinary refresh reparses available logs; old records without a source or tier evidence remain unpriced. See [release notes](docs/releasing.md).
 

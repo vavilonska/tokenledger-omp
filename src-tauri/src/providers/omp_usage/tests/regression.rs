@@ -847,6 +847,191 @@ fn only_explicit_memory_excludes_cost_without_losing_usage_in_both_price_bases()
     }
 }
 
+fn image_fixture(id: &str, model: &str, purpose: Option<&str>, total: u64) -> Value {
+    json!({
+        "type": "model_usage", "id": id, "timestamp": "2026-07-12T14:00:00Z",
+        "provider": "openai-codex", "model": model, "purpose": purpose, "serviceTier": "default",
+        "usage": {"input": total, "output": 0, "totalTokens": total}
+    })
+}
+
+#[test]
+fn omp_raw_image_usage_never_enters_retained_facts() {
+    let directory = tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
+    let pricing = crate::pricing::test_bundled_pricing();
+    let observed = image_fixture("image", "gpt-image-2-codex", Some("image-gen"), 8500);
+    let model_only = image_fixture("model-only", "gpt-image-2-codex", None, 848);
+    let purpose_only = image_fixture("purpose-only", "gpt-6.1-sol", Some("image-gen"), 17);
+    let similar_slug = "gpt-image-2-codex-text-fixture";
+    let similar_model = image_fixture("similar", similar_slug, Some("title"), 13);
+    let mut assistant = message("assistant", "2026-07-12T14:00:00Z");
+    assistant["purpose"] = json!("image-gen");
+    assistant["message"]["model"] = json!("gpt-6.1-sol");
+    let mut foreign_model = observed.clone();
+    foreign_model["id"] = json!("foreign-model");
+    foreign_model["provider"] = json!("openai");
+    let mut foreign_purpose = purpose_only.clone();
+    foreign_purpose["id"] = json!("foreign-purpose");
+    foreign_purpose["provider"] = json!("anthropic");
+    write_session(
+        directory.path(),
+        "mixed.jsonl",
+        &[
+            observed,
+            model_only,
+            purpose_only,
+            similar_model,
+            assistant,
+            auxiliary("title", 279, 145),
+            foreign_model,
+            foreign_purpose,
+        ],
+    );
+
+    let (outcome, histories) = source_scan(&storage, directory.path(), "account-a", &pricing);
+    assert!(outcome.included);
+    assert_eq!(outcome.events.len(), 3);
+    assert!(outcome
+        .events
+        .iter()
+        .any(|event| event.model == similar_slug));
+    for history in histories {
+        let period = history.last_30_days.unwrap();
+        assert_eq!(period.tokens, 617);
+        assert_eq!(period.unknown_models, [similar_slug]);
+    }
+    let retained: Vec<SessionUsageEvent> = storage.load_usage_events("omp", "account-a", 1).unwrap();
+    assert_eq!(retained.len(), 3);
+    assert!(retained.iter().all(|event| !event.is_image_usage()));
+    let path = fs::canonicalize(directory.path().join("agent/sessions/mixed.jsonl")).unwrap();
+    let fingerprint = LogFileFingerprint::from_metadata(&fs::metadata(&path).unwrap()).unwrap();
+    let cached = storage
+        .load_log_events("omp", &path, fingerprint.size, fingerprint.modified_nanos)
+        .unwrap()
+        .unwrap();
+    let cached: Value = serde_json::from_str(&cached).unwrap();
+    assert_eq!(cached["events"].as_array().unwrap().len(), 3);
+
+    let other = scan_sessions_into(
+        &storage,
+        SessionSource {
+            directory: &directory.path().join("agent/sessions"),
+            cache_key: "other-test-source",
+            identity_key: "account-a",
+            label: "Other test source",
+            allowed_models: &[],
+        },
+        Utc.with_ymd_and_hms(2026, 7, 12, 15, 0, 0).unwrap(),
+        &pricing,
+        None,
+        None,
+        &mut DailyUsageAccumulator::default(),
+        &mut DailyUsageAccumulator::default(),
+        &mut DailyUsageAccumulator::default(),
+    )
+    .unwrap();
+    assert_eq!(other.events.len(), 6);
+    assert_eq!(
+        other
+            .events
+            .iter()
+            .filter(|event| event.model == "gpt-image-2-codex")
+            .count(),
+        2
+    );
+    assert!(other
+        .events
+        .iter()
+        .any(|event| event.model == "gpt-6.1-sol" && event.total == 17));
+}
+
+#[test]
+fn omp_filters_cached_images_without_deleting_existing_ledger_facts() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("cache.db");
+    let storage = Storage::open(&database).unwrap();
+    let pricing = crate::pricing::test_bundled_pricing();
+    let live_path = directory.path().join("agent/sessions/live-cache.jsonl");
+    let deleted_path = live_path.with_file_name("deleted-cache.jsonl");
+    write_session(
+        directory.path(),
+        "live-cache.jsonl",
+        &[
+            auxiliary("live-title", 279, 145),
+            image_fixture("live-image", "gpt-6.1-sol", Some("image-gen"), 250),
+        ],
+    );
+    let live_events = parse_jsonl(&fs::read_to_string(&live_path).unwrap());
+    // Re-parsing the raw file cannot recover the title; only the compatible cache can.
+    write_session(directory.path(), "live-cache.jsonl", &[]);
+    let fingerprint = LogFileFingerprint::from_metadata(&fs::metadata(&live_path).unwrap()).unwrap();
+    let live_path = fs::canonicalize(live_path).unwrap();
+    storage
+        .save_log_events(
+            "omp",
+            &live_path,
+            fingerprint.size,
+            fingerprint.modified_nanos,
+            &json!({"schema_version":11, "events":live_events}).to_string(),
+        )
+        .unwrap();
+
+    write_session(
+        directory.path(),
+        "deleted-cache.jsonl",
+        &[
+            image_fixture("deleted-image", "gpt-image-2-codex", None, 450),
+            auxiliary("deleted-title", 270, 120),
+            image_fixture("ledger-image", "gpt-image-2-codex", None, 350),
+        ],
+    );
+    let events = parse_jsonl(&fs::read_to_string(&deleted_path).unwrap());
+    let legacy_ledger = legacy_values(&events[2..]);
+    storage
+        .record_usage_events("omp", "", 1, legacy_ledger.as_array().unwrap(), entry_key)
+        .unwrap();
+    let mut deleted_cache = serde_json::to_value(&events[..2]).unwrap();
+    let deleted_image = deleted_cache[0].as_object_mut().unwrap();
+    deleted_image.remove("entry_kind");
+    deleted_image.remove("purpose");
+    storage
+        .save_log_events(
+            "omp",
+            &deleted_path,
+            0,
+            0,
+            &json!({"schema_version":8, "events":deleted_cache}).to_string(),
+        )
+        .unwrap();
+    fs::remove_file(deleted_path).unwrap();
+
+    let assert_scan = |storage: &Storage| {
+        let (outcome, histories) = source_scan(storage, directory.path(), "", &pricing);
+        assert!(outcome.included);
+        assert_eq!(outcome.events.len(), 2, "only titles contribute requests");
+        for history in histories {
+            let period = history.last_30_days.unwrap();
+            assert_eq!(period.tokens, 814);
+            assert!(period.unknown_models.is_empty());
+            assert!(period.estimate_complete);
+            assert!((period.estimated_cost_usd.unwrap() - 0.003748).abs() < 1e-12);
+        }
+        let retained: Vec<SessionUsageEvent> = storage.load_usage_events("omp", "", 1).unwrap();
+        let mut retained_ids: Vec<_> = retained
+            .iter()
+            .filter_map(|event| event.id.as_deref())
+            .collect();
+        retained_ids.sort_unstable();
+        assert_eq!(retained_ids, ["deleted-title", "ledger-image", "live-title"]);
+    };
+    assert_scan(&storage);
+    fs::remove_file(&live_path).unwrap();
+    storage.remove_log_events("omp", &live_path).unwrap();
+    drop(storage);
+    assert_scan(&Storage::open(&database).unwrap());
+}
+
 #[test]
 fn explicit_cache_write_ttls_survive_schema_refresh_retention_and_memory_exclusion() {
     let directory = tempdir().unwrap();

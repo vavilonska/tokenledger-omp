@@ -73,6 +73,7 @@ fn deserialize_codex_speed<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+const OMP_USAGE_SOURCE: &str = "Oh My Pi";
 const LOG_CACHE_SCHEMA_VERSION: u8 = 9;
 const CYCLE_CLUSTER_SECONDS: i64 = 5 * 60;
 
@@ -192,17 +193,7 @@ fn scan_usage_basis(
         &mut weekly_accumulator,
         &mut cycle_buckets,
     );
-    for event in &omp_outcome.events {
-        add_cycle_event(
-            &mut cycle_buckets,
-            event.timestamp,
-            &event.model,
-            event.total,
-            event.cost,
-            "Oh My Pi",
-            event.cost.is_none() && !model_has_rates(&event.timestamp, &event.model, pricing),
-        );
-    }
+    add_omp_cycle_events(&mut cycle_buckets, &omp_outcome.events, pricing);
     let includes_pi = match pi_usage::scan_into(
         storage,
         now,
@@ -222,7 +213,7 @@ fn scan_usage_basis(
     };
     let mut sources = vec!["Codex"];
     if omp_outcome.included {
-        sources.push("Oh My Pi");
+        sources.push(OMP_USAGE_SOURCE);
     }
     if includes_pi {
         sources.push("pi");
@@ -330,6 +321,52 @@ fn build_cycle_buckets(
         .collect()
 }
 
+fn corrected_recovery(record: &StoredResetCycle) -> CycleRecovery {
+    let mut recovery = record.recovery.clone();
+    if recovery.baseline_excludes_omp_image_usage {
+        return recovery;
+    }
+    // A fact's timestamp alone cannot show that an old baseline included it.
+    // Use only the dedicated model's explicitly attributed OMP subtotal in the
+    // stored cycle, including when the display grouped it under Other.
+    let image_tokens = record
+        .cycle
+        .usage
+        .model_breakdown
+        .iter()
+        .flat_map(|breakdown| &breakdown.models)
+        .flat_map(|model| {
+            model
+                .variants
+                .iter()
+                .flatten()
+                .filter(move |variant| {
+                    let (model_name, source) = if model.model == "Other" {
+                        let Some(parts) = variant.model.split_once(" · ") else {
+                            return false;
+                        };
+                        parts
+                    } else {
+                        (model.model.as_str(), variant.model.as_str())
+                    };
+                    model_name == omp_usage::OMP_CODEX_IMAGE_MODEL && source == OMP_USAGE_SOURCE
+                })
+        })
+        .fold(0_u64, |sum, variant| sum.saturating_add(variant.total_tokens));
+    // The stored subtotal may include calls newer than the immutable coverage.
+    // At most the excess over the baseline can belong to that newer usage.
+    let outside_baseline = record
+        .cycle
+        .usage
+        .tokens
+        .saturating_sub(recovery.baseline_tokens);
+    recovery.baseline_tokens = recovery
+        .baseline_tokens
+        .saturating_sub(image_tokens.saturating_sub(outside_baseline));
+    recovery.baseline_excludes_omp_image_usage = true;
+    recovery
+}
+
 fn restore_cycle_buckets(
     mut anchors: Vec<omp_usage::QuotaCycleAnchor>,
     persisted: &[StoredResetCycle],
@@ -347,7 +384,7 @@ fn restore_cycle_buckets(
                 exhausted_at: record.exhausted_at,
                 observed_tokens: 0,
                 recovered_tokens: 0,
-                recovery: Some(record.recovery.clone()),
+                recovery: Some(corrected_recovery(record)),
                 accumulator: DailyUsageAccumulator::default(),
                 model_usage: HashMap::new(),
             }
@@ -406,6 +443,24 @@ fn restore_cycle_buckets(
         }
     }
     buckets
+}
+
+fn add_omp_cycle_events(
+    buckets: &mut [CycleBucket],
+    events: &[omp_usage::PricedOmpEvent],
+    pricing: &ModelPricing,
+) {
+    for event in events {
+        add_cycle_event(
+            buckets,
+            event.timestamp,
+            &event.model,
+            event.total,
+            event.cost,
+            OMP_USAGE_SOURCE,
+            event.cost.is_none() && !model_has_rates(&event.timestamp, &event.model, pricing),
+        );
+    }
 }
 
 fn add_cycle_event(
@@ -495,6 +550,7 @@ fn build_cycle_history(
                 baseline_tokens: bucket.observed_tokens,
                 covered_until: now,
                 boundary_conflict: false,
+                baseline_excludes_omp_image_usage: true,
             });
             let missing_tokens = if had_snapshot {
                 recovery
@@ -545,7 +601,7 @@ fn build_cycle_history(
                     unknown_models: Vec::new(),
                 })
             })?;
-            if recovery.boundary_conflict && usage.tokens > 0 {
+            if recovery.boundary_conflict {
                 usage.estimate_complete = false;
                 usage.estimated_limit_usd = None;
             }
@@ -2801,6 +2857,7 @@ mod speed_and_cycle_regressions {
                             baseline_tokens: original.usage.tokens,
                             covered_until: now,
                             boundary_conflict: false,
+                            baseline_excludes_omp_image_usage: false,
                         },
                     }],
                 )
@@ -2876,6 +2933,7 @@ mod speed_and_cycle_regressions {
                 baseline_tokens: original.usage.tokens,
                 covered_until: now,
                 boundary_conflict: false,
+                baseline_excludes_omp_image_usage: false,
             },
         };
         for recovered in [false, true] {
@@ -2993,6 +3051,7 @@ mod model_classification_regressions {
 mod persistent_cycle_recovery_regressions {
     use super::*;
     use chrono::{Duration, TimeZone};
+    use serde_json::json;
 
     fn day(value: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, value, 0, 0, 0).unwrap()
@@ -3021,6 +3080,7 @@ mod persistent_cycle_recovery_regressions {
                 baseline_tokens: tokens,
                 covered_until: day(2),
                 boundary_conflict: false,
+                baseline_excludes_omp_image_usage: false,
             },
         }
     }
@@ -3028,6 +3088,20 @@ mod persistent_cycle_recovery_regressions {
     fn seed_legacy(path: &Path, record: &StoredResetCycle, credit_mode: bool) {
         drop(Storage::open(path).unwrap());
         let connection = rusqlite::Connection::open(path).unwrap();
+        seed_cycle_payload(
+            &connection,
+            record,
+            credit_mode,
+            serde_json::to_value(&record.cycle).unwrap(),
+        );
+    }
+
+    fn seed_cycle_payload(
+        connection: &rusqlite::Connection,
+        record: &StoredResetCycle,
+        credit_mode: bool,
+        payload: Value,
+    ) {
         connection
             .execute(
                 "INSERT INTO reset_cycle_usage
@@ -3036,7 +3110,7 @@ mod persistent_cycle_recovery_regressions {
                 rusqlite::params![
                     cycle_storage_key(credit_mode),
                     record.cycle.started_at.timestamp().div_euclid(300),
-                    serde_json::to_string(&record.cycle).unwrap(),
+                    serde_json::to_string(&payload).unwrap(),
                     record.recovery.covered_until.to_rfc3339(),
                 ],
             )
@@ -3084,6 +3158,230 @@ mod persistent_cycle_recovery_regressions {
             .sum()
     }
 
+    fn seed_image_fact(storage: &Storage, timestamp: DateTime<Utc>) {
+        let model = omp_usage::OMP_CODEX_IMAGE_MODEL;
+        let image = json!({
+            "id": "old-image", "response_id": null, "timestamp": timestamp,
+            "model": model, "input": 40, "output": 0, "cache_read": 0,
+            "cache_write": 0, "cache_write_1h": 0, "total": 40,
+            "entry_kind": "model_usage", "purpose": "image-gen"
+        });
+        storage
+            .record_usage_events("omp", "account", 1, &[image], |_| {
+                usage_event_key(&("entry", "old-image", timestamp, model))
+            })
+            .unwrap();
+    }
+
+    fn write_omp_text(sessions: &Path) -> PathBuf {
+        fs::create_dir_all(sessions).unwrap();
+        let path = sessions.join("text.jsonl");
+        let text = json!({
+            "type": "message", "id": "text-entry", "timestamp": day(2),
+            "message": {
+                "role": "assistant", "provider": "openai-codex", "model": "gpt-6-astra",
+                "responseId": "text-response", "serviceTier": "default",
+                "usage": {"input": 60, "output": 0, "totalTokens": 60}
+            }
+        });
+        fs::write(
+            &path,
+            format!("{{\"type\":\"session\",\"id\":\"session\"}}\n{text}\n"),
+        )
+        .unwrap();
+        path
+    }
+
+    fn refresh_omp(
+        path: &Path,
+        sessions: &Path,
+        credit_mode: bool,
+    ) -> (Vec<ResetCycleUsage>, Option<UsagePeriod>) {
+        let storage = Storage::open(path).unwrap();
+        let now = day(4);
+        let mut pricing = crate::pricing::test_bundled_pricing();
+        pricing.codex_credit_mode = credit_mode;
+        let start = Some(day(1));
+        let outcome = omp_usage::scan_sessions_into(
+            &storage,
+            omp_usage::SessionSource {
+                directory: sessions,
+                cache_key: "omp",
+                identity_key: "account",
+                label: OMP_USAGE_SOURCE,
+                allowed_models: &[],
+            },
+            now,
+            &pricing,
+            start,
+            start,
+            &mut DailyUsageAccumulator::default(),
+            &mut DailyUsageAccumulator::default(),
+            &mut DailyUsageAccumulator::default(),
+        )
+        .unwrap();
+        let persisted = storage
+            .load_reset_cycles("codex", "account", cycle_storage_key(credit_mode))
+            .unwrap();
+        let anchors = vec![omp_usage::QuotaCycleAnchor {
+            started_at: day(1),
+            scheduled_reset_at: day(8),
+            used_percent: 50.0,
+            exhausted_at: None,
+        }];
+        let mut buckets = restore_cycle_buckets(anchors, &persisted, now);
+        add_omp_cycle_events(&mut buckets, &outcome.events, &pricing);
+        let mut rebuilt = build_cycle_history(buckets, now, "test");
+        let weekly = current_weekly_period(&mut rebuilt, start, now, Some(50.0));
+        let history = persist_cycles(&storage, Some("account"), rebuilt, credit_mode).unwrap();
+        (history, weekly)
+    }
+
+    #[test]
+    fn old_omp_image_usage_migrates_only_attested_baseline_tokens() {
+        // An old refresh grouped unpriced image calls under Other once priced
+        // text was present. Post-coverage image calls cannot erase missing text.
+        for (baseline, stored_extra, timestamp, source, missing, closed) in [
+            (100, 0, day(1), Some(OMP_USAGE_SOURCE), 0, false),
+            (130, 0, day(2), Some(OMP_USAGE_SOURCE), 30, true),
+            (100, 0, day(2), None, 40, false),
+            (100, 0, day(2), Some("Codex"), 40, false),
+            (100, 0, day(3), None, 40, true),
+            (100, 40, day(3), Some(OMP_USAGE_SOURCE), 40, false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("usage.db");
+            let sessions = directory.path().join("omp/sessions");
+            write_omp_text(&sessions);
+            let storage = Storage::open(&database).unwrap();
+            seed_image_fact(&storage, timestamp);
+            drop(storage);
+            let mut original = snapshot(baseline, closed.then(|| day(3)));
+            if let Some(source) = source {
+                let mut usage = DailyUsageAccumulator::default();
+                let date = day(1).with_timezone(&Local).date_naive();
+                usage.add_variant(
+                    date,
+                    baseline + stored_extra - 40,
+                    1.0,
+                    "gpt-6-astra",
+                    "Codex",
+                    None,
+                );
+                usage.add_unpriced_variant(
+                    timestamp.with_timezone(&Local).date_naive(),
+                    40,
+                    omp_usage::OMP_CODEX_IMAGE_MODEL,
+                    source,
+                    None,
+                );
+                original.cycle.usage = cycle_period(usage, day(4), "old", Some(50.0)).unwrap();
+            }
+            for credit_mode in [false, true] {
+                let connection = rusqlite::Connection::open(&database).unwrap();
+                let mut payload = serde_json::to_value(&original).unwrap();
+                payload["_recovery"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("baseline_excludes_omp_image_usage");
+                seed_cycle_payload(&connection, &original, credit_mode, payload);
+                drop(connection);
+                for _ in 0..2 {
+                    let (cycles, weekly) = refresh_omp(&database, &sessions, credit_mode);
+                    let cycle = &cycles[0];
+                    assert_eq!(weekly.as_ref(), (!closed).then_some(&cycle.usage));
+                    assert_eq!(cycle.usage.tokens, 60 + missing);
+                    assert_eq!(unpriced_tokens(&cycle.usage), missing);
+                    assert_eq!(cycle.usage.estimate_complete, missing == 0);
+                    assert_eq!(cycle.usage.estimated_limit_usd.is_some(), missing == 0);
+                    assert!(cycle.usage.unknown_models.is_empty());
+                    let models = cycle.model_usage.as_ref().unwrap();
+                    assert_eq!(models.len(), if missing == 0 { 1 } else { 2 });
+                    assert_eq!(models[0].model, "gpt-6-astra");
+                    assert_eq!(models[0].request_count, Some(1));
+                    assert_eq!(models[0].total_tokens, 60);
+                    assert!(models[0].cost_usd.is_some_and(|cost| cost > 0.0));
+                    assert_eq!(cycle.usage.estimated_cost_usd, models[0].cost_usd);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn migrating_an_image_only_cycle_does_not_clear_its_boundary_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("usage.db");
+        let mut original = snapshot(40, Some(day(3)));
+        original.recovery.boundary_conflict = true;
+        let mut usage = DailyUsageAccumulator::default();
+        usage.add_unpriced_variant(
+            day(1).with_timezone(&Local).date_naive(),
+            40,
+            omp_usage::OMP_CODEX_IMAGE_MODEL,
+            OMP_USAGE_SOURCE,
+            None,
+        );
+        original.cycle.usage = cycle_period(usage, day(4), "old", Some(50.0)).unwrap();
+        let storage = Storage::open(&database).unwrap();
+        storage
+            .save_reset_cycles("codex", "account", cycle_storage_key(false), &[original])
+            .unwrap();
+        drop(storage);
+        // No OMP scan: attested attribution survives missing logs or authentication.
+        for _ in 0..2 {
+            let (cycles, weekly) = refresh(&database, day(4), &[], Vec::new(), false);
+            assert!(weekly.is_none());
+            assert_eq!(cycles[0].usage.tokens, 0);
+            assert!(!cycles[0].usage.estimate_complete);
+            assert_eq!(cycles[0].usage.estimated_limit_usd, None);
+            assert!(cycles[0].usage.unknown_models.is_empty());
+        }
+    }
+
+    #[test]
+    fn retained_old_omp_images_cannot_recover_missing_text_from_new_baselines() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("usage.db");
+        let sessions = directory.path().join("omp/sessions");
+        let text_path = fs::canonicalize(write_omp_text(&sessions)).unwrap();
+        let storage = Storage::open(&database).unwrap();
+        seed_image_fact(&storage, day(1));
+        drop(storage);
+        for credit_mode in [false, true] {
+            let (history, _) = refresh_omp(&database, &sessions, credit_mode);
+            assert_eq!(history[0].usage.tokens, 60);
+            assert!(history[0].usage.estimate_complete);
+        }
+        fs::remove_file(&text_path).unwrap();
+        let storage = Storage::open(&database).unwrap();
+        storage.remove_log_events("omp", &text_path).unwrap();
+        drop(storage);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "DELETE FROM local_usage_events WHERE provider_id = 'omp' AND event_key = ?1",
+                [usage_event_key(&("response", "text-response")).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+        for credit_mode in [false, true] {
+            for _ in 0..2 {
+                let (history, weekly) = refresh_omp(&database, &sessions, credit_mode);
+                let cycle = &history[0];
+                assert_eq!(weekly.as_ref(), Some(&cycle.usage));
+                assert_eq!(cycle.usage.tokens, 60);
+                assert_eq!(unpriced_tokens(&cycle.usage), 60);
+                assert!(!cycle.usage.estimate_complete);
+                assert_eq!(cycle.usage.estimated_limit_usd, None);
+                assert!(cycle.usage.unknown_models.is_empty());
+                let models = cycle.model_usage.as_ref().unwrap();
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].model, "Unattributed");
+                assert_eq!(models[0].request_count, None);
+            }
+        }
+    }
+
     #[test]
     fn new_requests_do_not_consume_legacy_coverage_after_database_reopen() {
         let directory = tempfile::tempdir().unwrap();
@@ -3125,7 +3423,13 @@ mod persistent_cycle_recovery_regressions {
                     .unwrap()
                     .load_reset_cycles("codex", "account", cycle_storage_key(credit_mode))
                     .unwrap();
-                assert_eq!(reopened[0].recovery, original.recovery);
+                assert_eq!(
+                    reopened[0].recovery,
+                    CycleRecovery {
+                        baseline_excludes_omp_image_usage: true,
+                        ..original.recovery.clone()
+                    }
+                );
                 assert_eq!(reopened[0].cycle.model_usage, history[0].model_usage);
             }
         }

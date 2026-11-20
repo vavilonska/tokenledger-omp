@@ -1,5 +1,24 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.17 OMP 生图统计修复 / OMP image usage fix
+
+- 排除 OMP `openai-codex` 的明确 `image-gen` 用途及专用 `gpt-image-2-codex` 模型；生图不计入文本 Tokens、请求、费用和未知模型标记。已有留存记录不删除，API USD 与购买 credits 都按相同范围重算。
+- 正常刷新 Codex 后生效。旧周周期仅扣除原始基线中能明确归属到 OMP 专用生图模型的部分；不猜测缺失文本用量，也不改变周期边界或公开版的数据隔离。
+- OMP `openai-codex` image-generation calls, identified by explicit `image-gen` purpose or the exact dedicated `gpt-image-2-codex` model, no longer contribute to text tokens, requests, costs, or unknown-model markers in API USD or purchased credits. Existing ledger facts are not deleted.
+- Refresh Codex after updating. Older weekly baselines remove only attributable OMP image model tokens; missing text remains incomplete, and reset boundaries and the public app's separate storage are unchanged.
+
+GNU x64 `cargo test --locked --lib` 的定向检查通过：OMP 57 项、Codex 本地用量 78 项、
+SQLite 周期留存 1 项。回归使用合成 JSONL 和临时数据库，覆盖新请求、已有缓存和账本、
+旧周期归属、缺失文本与重开数据库；验证两种计价模式。`corepack pnpm verify:versions` 通过。
+The same 136 focused tests passed on GNU x64, using synthetic logs and temporary databases.
+
+`corepack pnpm build:installer -- --locked` 完成 Windows x64 NSIS 构建。安装包和应用的
+产品名及版本资源均为 **TokenLedger OMP 0.5.17**，应用为 AMD64。安装包未签名，未在本机安装：
+The unsigned Windows x64 NSIS installer was built locally and was not installed:
+
+- `TokenLedger-OMP_0.5.17_x64-setup.exe` — 10,456,931 bytes.
+- SHA-256: `9d2eb23c07ecaa46e0dae6d0045d4c24681361ad3114ef6789db59c45bd01a0f`.
+
 ## 0.5.16 OMP GPT-6.2 辅助请求档位恢复
 
 - 仅精确 `gpt-6.2-astra`／`gpt-6.2-sol` 的辅助 `model_usage` 在没有显式档位时

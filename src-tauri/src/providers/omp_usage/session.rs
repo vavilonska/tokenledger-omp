@@ -63,6 +63,19 @@ impl SessionUsageEvent {
     pub(super) fn has_complete_usage(&self) -> bool {
         !self.incomplete_cache_write && self.orchestration.as_ref().is_none_or(|usage| usage.valid)
     }
+
+    pub(super) fn is_image_usage(&self) -> bool {
+        is_image_usage(
+            self.entry_kind.as_deref(),
+            self.purpose.as_deref(),
+            &self.model,
+        )
+    }
+}
+
+fn is_image_usage(entry_kind: Option<&str>, purpose: Option<&str>, model: &str) -> bool {
+    (entry_kind == Some("model_usage") && purpose == Some("image-gen"))
+        || model == super::OMP_CODEX_IMAGE_MODEL
 }
 
 /// Select the whole authoritative fact, never splice one copy's cost into another's tokens.
@@ -143,7 +156,12 @@ impl OrchestrationUsage {
     }
 }
 
+#[cfg(test)]
 pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
+    parse_session_usage(content, false)
+}
+
+pub(super) fn parse_session_usage(content: &str, exclude_image_usage: bool) -> Vec<SessionUsageEvent> {
     let mut events = Vec::new();
     let mut has_header = false;
     let mut session_id = None;
@@ -210,6 +228,15 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
         if message.get("provider").and_then(Value::as_str) != Some("openai-codex") {
             continue;
         }
+        let model = message
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let purpose = entry.get("purpose").and_then(Value::as_str);
+        if exclude_image_usage && is_image_usage(entry_type, purpose, model) {
+            continue;
+        }
         let Some(usage) = message.get("usage").and_then(Value::as_object) else {
             continue;
         };
@@ -263,11 +290,6 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
                     .saturating_add(cache_read)
                     .saturating_add(cache_write)
             });
-        let model = message
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim();
         let recorded_cost = usage.get("cost").and_then(RecordedCost::from_value);
         let (speed, speed_evidence) = resolve_speed(
             message,
@@ -317,10 +339,7 @@ pub(super) fn parse_jsonl(content: &str) -> Vec<SessionUsageEvent> {
             total,
             speed,
             entry_kind: entry_type.map(str::to_owned),
-            purpose: entry
-                .get("purpose")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            purpose: purpose.map(str::to_owned),
             recorded_cost,
             speed_evidence,
             orchestration,

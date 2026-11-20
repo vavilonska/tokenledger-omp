@@ -25,7 +25,7 @@ local usage history, but they cannot provide ChatGPT subscription limits.
 Spend history is calculated locally from the Codex `sessions` and `archived_sessions` logs. When Oh
 My Pi is authenticated to the same Codex account, TokenLedger OMP also reads its session JSONL files
 under `~/.omp/agent/sessions/**/*.jsonl`, combines both clients, and estimates their tokens at the current
-API list rate, except for the explicit memory exclusion below. No `/stats` command or `stats.db`
+API list rate, except for the exclusions below. No `/stats` command or `stats.db`
 export is required. Assistant request usage and
 `model_usage` entries include real subagent calls; parent `task` aggregate summaries are not added
 again. Parsed results are cached by file changes; a separate compact usage ledger preserves observed
@@ -156,11 +156,23 @@ request counts, original recorded cost and speed evidence remain intact. Ordinar
 requests on the same model, title/cache-warm calls, other purposes and missing purposes keep
 the normal pricing and partial-estimate rules; model names alone never trigger the exclusion.
 
+Oh My Pi image generation through `openai-codex` is outside the text allowance estimate.
+OMP `model_usage` entries with `purpose: "image-gen"` and the exact dedicated
+`gpt-image-2-codex` model are excluded, including old records with that model but no
+purpose. These calls contribute no tokens, requests, cost, or unknown-model markers in
+either display mode. Newly parsed calls are not recorded in the metering ledger; old
+retained facts are left intact but excluded when read. Other sources and OMP text requests
+keep their existing rules.
+
+Refresh Codex after updating to rebuild saved estimates. Old weekly cycles remove dedicated
+image-model tokens only where the original baseline has explicit Oh My Pi attribution.
+An unproven balance remains unattributed and cannot produce a complete estimate.
+
 OMP's separate `usage.orchestration` input, output and cache-read buckets are included in usage.
 An already supplied `totalTokens` is not incremented again. The ledger retains the merged
 token buckets and finite original orchestration evidence, not response text. Malformed or
-unsupported orchestration evidence cannot establish speed or a complete cost estimate for requests
-outside the explicit memory exclusion.
+unsupported orchestration evidence cannot establish speed or a complete cost estimate for
+in-scope requests outside the explicit memory exclusion.
 Estimates cover locally available Codex and same-account Oh My Pi logs, not unrecorded cloud
 activity or actual billed credit deductions.
 

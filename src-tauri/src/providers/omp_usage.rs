@@ -23,8 +23,11 @@ mod session;
 
 use super::log_usage::LogCacheError;
 use session::{
-    merge_session_event, normalize_anonymous_occurrences, parse_jsonl, SessionUsageEvent,
+    merge_session_event, normalize_anonymous_occurrences, parse_session_usage, SessionUsageEvent,
 };
+
+#[cfg(test)]
+use session::parse_jsonl;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OmpUsageError {
@@ -34,6 +37,8 @@ pub enum OmpUsageError {
     LogCache(#[from] LogCacheError),
 }
 
+const OMP_CACHE_KEY: &str = "omp";
+pub(super) const OMP_CODEX_IMAGE_MODEL: &str = "gpt-image-2-codex";
 const WEEKLY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 const ANCHOR_CLUSTER_SECONDS: i64 = 5 * 60;
 
@@ -136,7 +141,7 @@ fn scan_home_into(
         storage,
         SessionSource {
             directory: &home.join("agent").join("sessions"),
-            cache_key: "omp",
+            cache_key: OMP_CACHE_KEY,
             identity_key: &identity_key,
             label: "Oh My Pi",
             allowed_models: &[],
@@ -171,15 +176,17 @@ pub(super) fn scan_sessions_into(
         .checked_sub_days(Days::new(29))
         .unwrap_or(NaiveDate::MIN);
     let paths = discover_files(source.directory);
+    let exclude_image_usage = source.cache_key == OMP_CACHE_KEY;
     let mut events = super::log_usage::retain_log_usage_with_normalization(
         storage,
         source.cache_key,
         source.identity_key,
         "codex",
+        // The event schema is unchanged; compatible caches can still recover text usage.
         11,
         1,
         &paths,
-        parse_jsonl,
+        |content| parse_session_usage(content, exclude_image_usage),
         normalize_anonymous_occurrences,
         |event: &SessionUsageEvent| {
             if let Some(id) = event.response_id.as_deref() {
@@ -203,13 +210,18 @@ pub(super) fn scan_sessions_into(
             }
         },
         |event| {
-            source.allowed_models.is_empty()
-                || source
-                    .allowed_models
-                    .contains(&pricing.display_family(&event.model).as_str())
+            (!exclude_image_usage || !event.is_image_usage())
+                && (source.allowed_models.is_empty()
+                    || source
+                        .allowed_models
+                        .contains(&pricing.display_family(&event.model).as_str()))
         },
         Some(merge_session_event),
     )?;
+    if exclude_image_usage {
+        // Keep existing ledger facts intact without putting them back into metering.
+        events.retain(|event| !event.is_image_usage());
+    }
     events.sort_by_key(|event| event.timestamp);
     // References keep the response identifiers out of an extra allocation per event.
     let mut seen_ids = HashSet::new();
