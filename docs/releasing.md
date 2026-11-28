@@ -1,5 +1,26 @@
 # 发布 / Releasing TokenLedger OMP
 
+## 0.5.18 OMP 会话发现 / OMP session discovery
+
+- Codex 刷新时，先用 OMP 主目录（`OMP_HOME`）现有的活跃 OAuth 账号与 Codex 账号匹配。
+  仅在匹配成功后，才统一计量默认目录、OMP 原生会话指针显式注册的实际本地 `.jsonl` 主日志
+  （可位于自定义目录），以及属于该会话谱系的伴生子代理日志。伴生目录位于主日志旁，
+  目录名为主日志去掉扩展名后的文件名；未注册的自定义目录不作为扫描根。
+- 各来源取文件路径并集，再按既有请求身份去重入账。主目录级的账号匹配不能证明
+  缺少历史归属凭据的单条请求属于当前账号。
+- On Codex refresh, usage is metered only after the active OAuth account for the OMP home
+  (`OMP_HOME`) matches the Codex account. The same metering applies to the default log
+  directory, existing local `.jsonl` main logs explicitly registered by native OMP session
+  pointers (including logs in custom directories), and companion subagent logs in that
+  session lineage. The companion directory is beside the main log and named after its
+  filename without the extension. Unregistered custom directories are not scanned as roots.
+- File paths are combined into one set, and requests are counted once using existing
+  request identities. A home-level account match is not proof of ownership for an
+  individual historical request that lacks attribution evidence.
+
+本节说明发现与归属规则，不作为安装、原生界面或真实账号刷新验收的证据。
+These notes describe discovery and attribution, not installation, native UI, or real-account refresh validation.
+
 ## 0.5.17 OMP 生图统计修复 / OMP image usage fix
 
 - 排除 OMP `openai-codex` 的明确 `image-gen` 用途及专用 `gpt-image-2-codex` 模型；生图不计入文本 Tokens、请求、费用和未知模型标记。已有留存记录不删除，API USD 与购买 credits 都按相同范围重算。
@@ -102,8 +123,7 @@ installer at 10,445,707 bytes with SHA-256
 
 公开版没有在本机安装或启动；未签名（`NotSigned`），updater 仍未配置。
 本次没有因解析修复重跑无关前端全套测试；正式安装包命令执行了必要生产构建。
-去敏命令及包身份收据仅保留在 ignored `.local/luna-20261110/`，
-不把调试工件、数据库、日志或安装包加入源码历史。
+去敏命令及包身份收据仅在本地留存，不把调试工件、数据库、日志或安装包加入源码历史。
 
 ### 源码与公开发行
 
@@ -137,8 +157,7 @@ GitHub 在推送时报告默认分支有 13 项依赖告警（1 critical、5 hig
   现有日／会话／周统计及周期重算路径据此更新。修正后的事实删除源并重开 SQLite 后
   仍保留档位与定价。已删源的旧 unknown 无法证明当时不存在显式非法元数据，
   因此保留 partial，不新增猜测回填／迁移机制。
-- 回归覆盖真实 cache-heavy probe（输入 549、输出 31、缓存读取 60,544、总 61,124，
-  producer Standard 费用 $0.0037312）、Fast 2.5、API／Flex／Ultrafast 错误倍率、
+- 回归覆盖高缓存读取占比的 Standard 请求、Fast 2.5、API／Flex／Ultrafast 错误倍率、
   逐桶／总额冲突、显式非法／冲突、fork 零费用、schema-8 重解析及删源重启留存，
   并检查 API 与独立购买 credits 两种展示基准。
 
@@ -149,14 +168,13 @@ GitHub 在推送时报告默认分支有 13 项依赖告警（1 critical、5 hig
 - 限定四个变更 Rust 文件的 rustfmt check 与 GNU x64 locked lib/tests Clippy 均通过。
 - 独立 CLI 调用生产 `scan_local_usage`，使用隔离的 schema-8 解析缓存和 schema-1
   unknown 留存事实，重解析两条 Terra Standard／Fast 请求。API 与独立购买 credits
-  两种展示基准的 today／30d／session／weekly 均 complete，合计 122,248 tokens、
-  $0.0111936，留存证据为 `omp18132_terra_cost`。Fast 展示倍率为 2，而非用于证明
-  producer 档位的 2.5。
+  两种展示基准的 today／30d／session／weekly 均 complete，留存证据为
+  `omp18132_terra_cost`。Fast 展示倍率为 2，而非用于证明 producer 档位的 2.5。
 - 删除隔离源后，以第二个 CLI 进程重开 SQLite，统计及留存证据保持稳定；
   金额比较容差为 `1e-12`。这证明正常扫描可修正仍有源的旧 unknown，
   不代表已删源的旧 unknown 可以安全回填。
 
-验收证据保存在 `.local/terra-0513/`。临时扫描入口和隔离数据库已清理；
+验收证据在本地留存。临时扫描入口和隔离数据库已清理；
 未生成公开版安装包、未安装。永久最小隔离扫描回归入口：
 `terra_schema_eight_reparse_corrects_retained_facts_and_deleted_source_periods`。
 
@@ -236,7 +254,7 @@ Codex／OMP 正式源发现及 OMP 同账号校验，使用完全隔离的合成
 OMP 模型明细保留 `Oh My Pi` 来源。上述无写／写缓存两组也与私有版相同输入的实际扫描结果一致。
 临时 example 初始直接启动缺动态库，补其 GNU debug 根目录的 `WebView2Loader.dll`
 及 Rust sysroot 运行库搜索路径后闭环；没有改生产源码或全局环境。临时 example 源码已移除。
-去敏命令退出、完整 DTO 和日志仅留在 ignored `.local/terra-0512/`。
+去敏命令退出、完整 DTO 和日志仅在本地留存。
 这些证据不外推原生 UI、真实账号刷新或安装验收；本片未提交／推送、安装或创建 GitHub Release。
 既有 v0.5.8 下载记录在产生新的实际公开发布前保持不变。
 
@@ -253,8 +271,8 @@ OMP 模型明细保留 `Oh My Pi` 来源。上述无写／写缓存两组也与�
   `0.5.12`；应用 PE machine 为 `0x8664`（x64）。NSIS 引导 stub 为 `0x014c`，
   不将它误称为应用架构。
 - 只构建和静态核身份，没有执行公开安装程序／应用、安装、提交／推送或创建 GitHub Release。
-  临时执行器、合成 SQLite／账号元数据及 example 编译工件已清理；精简收据在 ignored
-  `.local/terra-0512/`，旧版本安装包保持不变。
+  临时执行器、合成 SQLite／账号元数据及 example 编译工件已清理；精简收据仅在本地留存，
+  旧版本安装包保持不变。
 
 
 ## 0.5.11 OMP fork 计费证据修复（源码验收）
@@ -263,7 +281,7 @@ OMP 模型明细保留 `Oh My Pi` 来源。上述无写／写缓存两组也与�
 入账现在按整条记录选择原件、来源未知旧事实、已证明继承副本的优先级，不能借另一快照
 的价格配当前 tokens。parser schema 8 重解析现存源并恢复污染事实，不改变请求键、
 首次观察账号或 Fast／Ultrafast 定价。原件显式非法／冲突仍未知；无原件证据不猜 Standard，
-不增加 job-widget 用途兜底，不手改正式账本。公开身份及不包含 QuantLab 的边界不变。
+不增加针对单一用途的兜底，不手改正式账本。公开版应用身份与数据隔离边界不变。
 
 实际 GNU x64 检查均退出 0：
 
@@ -273,33 +291,24 @@ OMP 模型明细保留 `Oh My Pi` 来源。上述无写／写缓存两组也与�
 - 受影响文件 `rustfmt --edition 2021 --check --config skip_children=true`。
 - `corepack pnpm verify:versions`。
 
-临时 ignored 验收直接调用生产 `scan_local_usage`，使用私有真实账本的一致性隔离副本、
-复制的安装定价和真实源发现／同账号校验，固定时间 `2026-10-23T08:21:13.959583300Z`。
-两次完整 usage DTO（含请求数、tokens、历史金额）完全一致，冷／热扫描分别
-229.141／99.702 秒；不是仅凭合成 fixture 或公式。19 条共 87,334 tokens 恢复原件
-费用 $0.1323832，旧 event/cycle 键、token 总量和首账号零丢失／零变更；
-新增入账请求全部晚于固定时间。临时入口已移除。
+临时验收直接调用生产 `scan_local_usage`，在隔离账本副本上使用安装定价和生产源发现／
+同账号校验，固定扫描时间。冷／热扫描的完整 usage DTO 一致；原件费用恢复，旧
+event/cycle 键、token 总量及首次观察账号保持不变。新增入账请求均晚于扫描基准时间。
+临时入口已移除。
 
-当前周 API $420.6539418 → $420.665251，credits USD-equivalent
-$365.1335548 → $365.144864；完整额度恢复为 $1752.77187917／$1521.43693333。
-10 月 20 日开始的历史周期 API $1407.5002506 → $1407.6213246，
-credits $1237.115336，额度分别 $1636.76898209／$1438.50620465，均恢复 complete。
-今日 API $436.487941、昨日 $841.2486922，以及 10 月 20–23 日每日计价恢复完整。
-30 日仍 partial：9 月 24 日及 9 月 27 日至 10 月 10 日的旧 assistant/find 等请求
-缺少可识别档位；10 月 15 日两条 `gpt-5.6-luna` task-completion-probe 为原件，
-虽有正 recorded cost 但 speed 缺失，现有历史推速覆盖 Sol 6.1/Astra，不包含该模型。
-这些不是本次清零 fork 覆盖，不猜档位，也不声称今后绝无恢复可能。公开 30 日 tokens
-比私有少 3,098,097，来自未接入的私有 QuantLab。
+当前及历史周周期的计价和完整额度得到修正，受影响的每日计价也恢复完整。
+最近 30 天仍为 partial：部分旧原始请求缺少可识别档位；即使有正费用，
+没有对应模型的历史推速规则也不能猜档位。这些请求不属于本次 fork 清零修复覆盖范围。
+公开版与另一版本的用量范围不同，未接入的来源不纳入公开统计。
 
-两版证据集中在私有工作区 `.local/fork-pricing-20261023/`，不提交私人账本。
-首次临时 runner 的 SQLite count 使用 `u64` 编译失败，改 `i64` 后通过；私有全仓
-fmt 还指出无关 Cursor/OpenCode 历史格式，未扩大修改，只检查本次 Rust 文件。
+验收证据仅在本地留存，不提交私人账本。首次临时 runner 的 SQLite count 使用
+`u64` 编译失败，改 `i64` 后通过；另有无关历史格式问题，未扩大修改，只检查本次 Rust 文件。
 本次不提交／推送、不建 tag／Release、不打包或安装公开产品；已发布 0.5.8 下载不变。
 
 ## 0.5.10 滚动周期图与用量明细（源码验收）
 
 四处应用版本一致为 0.5.10；保留 TokenLedger OMP 独立产品、数据与凭据边界，不引入
-私有 QuantLab 适配器。本次仍为源码交付，不新建 tag／Release、公开安装包或本机安装；
+私有业务适配器。本次仍为源码交付，不新建 tag／Release、公开安装包或本机安装；
 已有 v0.5.8 下载与历史资产不变。此处不提前声明源码已推送。
 
 - 双图始终只取最近 6 个真实周期，升序、最新在右；不足 6 个不补点。取消分页，
@@ -338,14 +347,12 @@ DTO，不访问 Tauri、真实账号或数据库。两版分别验证 31→32 �
 末窗、最新在右、刷新选择及真实键盘边界；32 条完整历史可滚到 9 月 1 日。
 真实鼠标悬浮今天／昨天／最近 30 天：加权汇总 `1%`，模型及 variant `33.3%`，
 已知零缓存 `0%`；明暗／compact、中文 title、缺失／零分母及 partial 均保留正确语义。
-公开来源行显示 Oh My Pi，不含 QuantLab；私有版保留自己的来源，等价行为不外推身份。
+公开来源行显示 Oh My Pi；两版保留各自来源，等价行为不外推身份。
 320×420 CSS 视口下长模型浮层边界为 x32／y8／right312／bottom412，
 无横向溢出，真实滚轮使 scrollTop 达到 500。沿用的浮层背景 alpha=0.97，
 可轻微透出底层文字，本次未扩大修改。
 
-去敏命令收据、行为值及明确 PNG 截图仅在本地 `.local/cycle-window-20261023/`：
-`cycle-behavior.json`、`cache-behavior.json`、`narrow-behavior.json`、
-`cycles-final-light-320.png`、`cycles-final-dark-320.png` 和 `cache-narrow-scroll.png`。
+去敏命令收据、行为记录及 PNG 截图仅在本地留存。
 早期浏览器 helper 主世界／截图调用失败只作为验收工具问题保留说明，不当作产品失败；
 以最终明确 PNG 为视觉证据。最后消费者结束后，临时挂载页／runner、Vite 与自有浏览器
 已清理。不提交本地证据；这些结果不代表原生宿主、真实日志刷新、安装、推送或发布验收。
@@ -387,7 +394,7 @@ Grok CLI 的 completion／reasoning 日志映射缺少已安装生产者及对�
 场景，覆盖完整、null、缺失、未知、partial，以及有完整额度和 partial 携带 limit 的周期。
 定向 share／cost 回归、Svelte 检查、相关 ESLint／Prettier 与最终 Vite 构建通过。
 两版的共同显示证据共享适用，两库回归与构建分别执行；不将这些证据外推为公开原生安装验收。
-去敏证据保留于本地 `.local/frontend-acceptance-20261022/`，临时页面与进程已清理。
+去敏证据在本地留存，临时页面与进程已清理。
 
 后端使用 Windows GNU target、四个 Cargo jobs，最终 locked all-target Clippy
 （warnings denied）通过；公开版完整 Rust 套件 689 项通过、0 失败。独立只读审查的
@@ -399,8 +406,7 @@ Codex 和 OMP 的 12,000-token 混合 TTL 输入分别得到 API $0.0299、credi
 Claude 200／110-token 副本保留 200／$0.0002，
 request-only 和匿名 advisor 旧身份迁移保留 162／$1.000012、两个事实及旧 Fast 证据。
 重扫、删源重启结果不变，两条 CLI 命令均退出 0。
-临时 example／runner 已删除，去敏 DTO 与命令收据仅留本地
-`.local/backend-acceptance-20261022/`，不提交或公开上传。
+临时 example／runner 已删除，去敏 DTO 与命令收据仅在本地留存，不提交或公开上传。
 此证据覆盖生产解析／账本模块，不代表公开版原生宿主、真实账号网络或安装验收。
 
 两版版本检查及四项前后端契约检查通过；未为验收修改依赖、全局环境、登录或真实账号数据库。
@@ -430,9 +436,8 @@ DTO 导出用的临时测试 stdout／集合已移除，永久回归保留全部
 清理后最终 Rust fmt、all-target Clippy 与该新回归再次通过。
 临时页面、runner、便携工具、隔离 profile／提取 payload 均已退出并清理，仅留去敏证据。
 
-证据在 `.local/sparse-cache-058/` 的检查日志、`production-dto.json`、
-`ui-evidence.json` 及截图；不提交或公开上传。本段证明生产模块／组件路径，
-不代表公开原生宿主、真实账号网络／OAuth 或安装验收。
+检查日志、生产 DTO、界面验收记录及截图仅在本地留存，不提交或公开上传。
+本段证明生产模块／组件路径，不代表公开原生宿主、真实账号网络／OAuth 或安装验收。
 既有 0.5.7 tag／发布资产及本地包保留，不覆盖、不移动；0.5.8 已发布，公开版未在本机安装。
 
 ### 0.5.8 安装包（已发布，未本机安装）
@@ -452,14 +457,13 @@ Vite 217 模块、Rust GNU x64 优化构建及 NSIS 成功，未重跑不受影�
   `2b7c2a02ebf7fb05615f6076eb0775aab1059672b266554842a6eb19ccdf27fb`。
 
 静态构建与身份核验阶段没有执行安装程序或应用；公开版仍未在本机安装。
-构建与包身份收据为 `.local/sparse-cache-058/installer-build.log`、
-`installer-identity.json`；旧 0.5.7 安装包及远程资产未改动。
+构建与包身份收据在本地留存；旧 0.5.7 安装包及远程资产未改动。
 
 2026-10-21，源码提交 `72a21f1604837722f95e064a9baaf77ab1808612` 已推送公开 `main`，
 并发布 [v0.5.8 Release](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.8)；
 tag 精确指向该提交，Release 包含上述安装包与校验文件。
 发布后无认证独立下载两个公开资产，确认安装包大小、SHA-256 及校验文件内容全部一致。
-去敏收据保存在 `.local/publish-public-058/receipt.json`；0.5.7 的 tag／二进制未变，
+去敏收据在本地留存；0.5.7 的 tag／二进制未变，
 旧 Release 说明已指向本补丁。安装包未签名，继续手动下载安装更新。
 
 ## 0.5.7 Cache rate 与用量／凭据修复（已发布）
@@ -524,7 +528,7 @@ partial 零值仍标 partial。首个浏览器 runner 在已完成 28 组边界�
 但原生通知送达／点击、全局快捷键、真实二实例唤醒、WebView2 隐藏／恢复、实际系统钥匙串、
 真实签名更新、账号网络／OAuth 及安装均未验收。
 临时 example、页面、runner、driver、隔离 profile／账本和浏览器／服务均已退出并清理；
-去敏 DTO、截图、成功和失败日志留在 `.local/cache-rate-20261021/`，不提交或公开上传。
+去敏 DTO、截图、成功和失败日志仅在本地留存，不提交或公开上传。
 安装包已构建、完成静态身份核验并公开发布；公开版仍未在本机安装。历史 0.5.6 验收记录不作为 0.5.7 证据。
 
 English: Released 0.5.7 adds weighted cache-read/all-prompt rates to the three daily-range popups,
@@ -554,8 +558,7 @@ signed-update and installation paths remain unverified. The Windows x64 release 
   `f47784ad4b48be8977faeff7576d5d8a0634d9bef1f54207531d60c57eaa4f5b`；
   未修改安装包或原应用，也未忽略其他字节差异。
 
-构建日志与身份收据留在 `.local/cache-rate-20261021/installer-build.log` 及
-`installer-identity.json`。临时打包／检查 runner、便携解包工具和提取 payload 已清理，
+构建日志与身份收据在本地留存。临时打包／检查 runner、便携解包工具和提取 payload 已清理，
 上述静态核验阶段没有运行安装程序或应用；后续远程发布记录见下节。
 仅此静态核验不证明原生宿主、通知、快捷键、WebView2、真实账号或系统凭据行为。
 
@@ -578,7 +581,7 @@ GitHub API 已确认三项均为 `closed`、`merged: true`。
 二进制不加入源码历史，未覆盖旧 tag 或历史资产。
 发布后不携带认证独立下载两个公开资产，核对安装包大小 **10,450,026 bytes**、
 SHA-256 `922c1d03dc7e28edb2a1209972c8494d8b744945c8440990602d096a923151a8`
-及校验文件内容均一致。去敏发布收据保存在 `.local/publish-public-057/receipt.json`。
+及校验文件内容均一致。去敏发布收据在本地留存。
 安装包仍未签名，updater 未配置；继续通过 Release 手动下载安装更新。
 
 ## 0.5.6 低额度刷新、归零周计价与周期图
@@ -602,8 +605,8 @@ SHA-256 `922c1d03dc7e28edb2a1209972c8494d8b744945c8440990602d096a923151a8`
   首次归零截断用例定向补验通过，保留模型／来源金额及全部 variant tokens 断言；
   bins 编译补验通过。不宣称首次全套全绿。
 - 真实生产 scanner、Codex JSONL 与 SQLite 烟测覆盖 API USD／Codex credits：
-  cutoff 同时刻消费仍纳入周费用，晚 1ms 后周费用／额度保持 $3.00，总费用／会话费用
-  增至 $4.50，周期保留 330,000 tokens／3 请求；删源重开结果一致。
+  cutoff 同时刻消费仍纳入周费用，晚 1ms 的消费只增加总费用／会话费用，
+  周费用／额度不变；周期仍保留完整 tokens 和请求数，删源重开结果一致。
   服务测试另覆盖 0%／3% 边界、15 秒与普通频率、重启恢复、新周及账号隔离。
 - Svelte 检查 248 文件、0 错误／警告；首轮定向前端 99 项通过，时钟修复后 App
   定向 60 项通过，8 个受影响文件 ESLint／Prettier 通过。真实 Chromium 中生产组件
@@ -612,7 +615,7 @@ SHA-256 `922c1d03dc7e28edb2a1209972c8494d8b744945c8440990602d096a923151a8`
 
 后端烟测调用真实生产模块，但不是默认账号发现或真实 OAuth／HTTP 验收；前端使用注入 DTO
 与隔离事件桥，不代表原生 Tauri 宿主或安装验收。临时 runner、页面和浏览器均已清理，
-去敏前端证据留在 `.local/cycle-chart-ui-20261018/`；该目录不提交或公开上传。
+去敏前端证据仅在本地留存，不提交或公开上传。
 
 ### 0.5.6 安装包与公开发布
 
@@ -634,8 +637,8 @@ Rust GNU x64 release 构建完成，NSIS 成功生成。构建原名为
   `release/` 二进制按既有忽略约定留本地并作为 Release 资产分发，不加入 Git 源码历史。
 
 发布使用环境提供的认证凭据调用 GitHub REST API，不新增 CI／密钥或改变全局工具配置。
-发布收据在 `.local/publish-public-056/` 留存远端 main／tag 身份、Release 资产大小，
-以及无认证的实际 Release 安装包和校验文件独立下载核对结果；不公开该目录或凭据。
+本地发布收据留存远端 main／tag 身份、Release 资产大小，以及无认证独立下载安装包和校验文件
+的核对结果；不公开本地收据或凭据。
 临时下载与发布 runner 在交付时清理。签名与 updater 均未配置，继续手动下载更新。
 公开版未在用户宿主安装或启动原生 UI；其他平台安装包、真实 OAuth／HTTP 和 CI 亦未验收。
 
@@ -673,19 +676,18 @@ Rust 格式与 Clippy 通过。首次 Rust 运行 628 通过、3 失败：新删
 两版各自真实生产 scanner／SQLite 账本／周期代码导出 DTO，短期 Vite 页面挂载实际
 `UsageMetric`／`CycleUsageDetail`。每版 12 个 Chromium 交互场景覆盖 API／credits、
 当前／删源重开历史、纯 memory／正常同模型 title／额外缺速 title。纯 memory 保留
-848 tokens／2 请求、贡献 0 且不推算零额度；正常调用合计 110,848 tokens／3 请求、
-$0.30／7.5 credits；额外缺速调用合计 110,958 tokens／4 请求，金额仍 partial。
+tokens 和请求数、贡献 0 且不推算零额度；正常调用计入相应 API／credits 费用；
+额外缺速调用保留用量，金额仍为 partial。
 历史 baseline、token、请求数保持，不产生伪 Unattributed；hover、模型展开和 Escape
 关闭通过。此证据证明生产 scanner 加浏览器真实组件，不冒充默认账号发现或原生 Tauri
 桌面验收；未修改用户真实数据库、凭据或配置。
 
 两版共同语义／UI 通过后，`corepack pnpm build:installer` 成功生成 GNU x64 NSIS 包。
-当前本地交付路径为
-`F:/00.My_Pi/TokenLedger-OMP/release/TokenLedger-OMP_0.5.5_x64-setup.exe`，
+仓库内的交付文件为 `release/TokenLedger-OMP_0.5.5_x64-setup.exe`，
 SHA-256：`f72dd693352e95fc36cc575d37c3d16427edd9e8966d32dbcfbbaf8297fddb2a`，
 相邻 `.sha256` 同步写入。版本和产品资源均为 0.5.5／TokenLedger OMP，旧版本安装包保留。
 临时 Rust 导出器及页面源码在打包前已清理，Vite 与独立 Chromium 已退出；
-去敏 DTO、截图、原始检查日志保留在 `.local/memory-exclusion-20261018/`。
+去敏 DTO、截图、原始检查日志仅在本地留存。
 本节构建与浏览器证据不包含安装或原生桌面验收，不沿用下文历史安装记录作为本次证明。
 
 ### 0.5.5 发布交付
@@ -696,7 +698,7 @@ SHA-256：`f72dd693352e95fc36cc575d37c3d16427edd9e8966d32dbcfbbaf8297fddb2a`，
 本次交付目标为 [v0.5.5](https://github.com/vavilonska/tokenledger-omp/releases/tag/v0.5.5)，
 包含 Windows x64 NSIS 安装包及相邻 `.sha256`；发布验收要求 tag 绑定本轮公开源码提交，
 且从 Release 实际下载的安装包 SHA-256 与上述本地包一致。
-仅发布公开源码及这两项资产，不上传 `.local` 证据、用户数据或凭据。
+仅发布公开源码及这两项资产，不上传本地证据、用户数据或凭据。
 继续通过 Releases 手动下载：安装包未做 Authenticode 签名，updater key／endpoints
 保持为空；继承 CI 模板仍未启用，未执行的 CI、签名和安装验收不声明通过。
 

@@ -102,13 +102,27 @@ pub fn scan_local_usage(
     expected_account_id: Option<&str>,
     account_identity: Option<&str>,
 ) -> Result<UsageHistory, CodexError> {
+    let home = home_directory();
+    let configured_home = crate::provider_environment::value("CODEX_HOME");
+    let homes = codex_homes(configured_home.as_deref().map(OsStr::new), &home);
+    // Retained facts are needed even when their source files and recent anchors are gone.
+    let events = scan_codex_events(storage, &homes, NaiveDate::MIN, account_identity)?;
+    // Verify the OMP account and retain its facts only once for both price bases.
+    let omp = omp_usage::retain(storage, now, expected_account_id).unwrap_or_else(|_| {
+        crate::app_warn!(
+            "plugin:omp",
+            "Oh My Pi usage history could not be folded into Codex"
+        );
+        omp_usage::OmpUsage::default()
+    });
     let mut usage = scan_usage_basis(
         storage,
         now,
         pricing,
         quotas,
-        expected_account_id,
         account_identity,
+        &events,
+        &omp,
     )?;
     let mut credit_pricing = ModelPricing::new(
         crate::pricing::PricingSupplement::decode(include_bytes!(
@@ -124,8 +138,9 @@ pub fn scan_local_usage(
         now,
         &credit_pricing,
         quotas,
-        expected_account_id,
         account_identity,
+        &events,
+        &omp,
     )?));
     Ok(usage)
 }
@@ -135,14 +150,10 @@ fn scan_usage_basis(
     now: DateTime<Utc>,
     pricing: &ModelPricing,
     quotas: &[QuotaWindow],
-    expected_account_id: Option<&str>,
     account_identity: Option<&str>,
+    events: &[TokenEvent],
+    omp: &omp_usage::OmpUsage,
 ) -> Result<UsageHistory, CodexError> {
-    let home = home_directory();
-    let configured_home = crate::provider_environment::value("CODEX_HOME");
-    let homes = codex_homes(configured_home.as_deref().map(OsStr::new), &home);
-    // Retained facts are needed even when their source files and recent anchors are gone.
-    let events = scan_codex_events(storage, &homes, NaiveDate::MIN, account_identity)?;
     let persisted_cycles = match account_identity {
         Some(identity) => storage.load_reset_cycles(
             "codex",
@@ -157,33 +168,13 @@ fn scan_usage_basis(
     let mut accumulator = DailyUsageAccumulator::default();
     let mut session_accumulator = DailyUsageAccumulator::default();
     let mut weekly_accumulator = DailyUsageAccumulator::default();
-    let omp_outcome = match omp_usage::scan_into(
-        storage,
-        now,
-        pricing,
-        expected_account_id,
-        session_start,
-        weekly_start,
-        &mut accumulator,
-        &mut session_accumulator,
-        &mut weekly_accumulator,
-    ) {
-        Ok(outcome) => outcome,
-        Err(_) => {
-            crate::app_warn!(
-                "plugin:omp",
-                "Oh My Pi usage history could not be folded into Codex"
-            );
-            omp_usage::OmpScanOutcome::default()
-        }
-    };
-    let mut anchors = omp_outcome.weekly_anchors.clone();
+    let mut anchors = omp.weekly_anchors.clone();
     if let Some(anchor) = current_weekly_anchor(quotas, now) {
         anchors.push(anchor);
     }
     let mut cycle_buckets = restore_cycle_buckets(anchors, &persisted_cycles, now);
     aggregate_into(
-        &events,
+        events,
         now,
         pricing,
         &mut accumulator,
@@ -193,7 +184,26 @@ fn scan_usage_basis(
         &mut weekly_accumulator,
         &mut cycle_buckets,
     );
-    add_omp_cycle_events(&mut cycle_buckets, &omp_outcome.events, pricing);
+    let includes_omp = omp.aggregate_into(
+        now,
+        pricing,
+        session_start,
+        weekly_start,
+        &mut accumulator,
+        &mut session_accumulator,
+        &mut weekly_accumulator,
+        |timestamp, model, tokens, cost, unknown_model| {
+            add_cycle_event(
+                &mut cycle_buckets,
+                timestamp,
+                model,
+                tokens,
+                cost,
+                OMP_USAGE_SOURCE,
+                unknown_model,
+            );
+        },
+    );
     let includes_pi = match pi_usage::scan_into(
         storage,
         now,
@@ -212,7 +222,7 @@ fn scan_usage_basis(
         }
     };
     let mut sources = vec!["Codex"];
-    if omp_outcome.included {
+    if includes_omp {
         sources.push(OMP_USAGE_SOURCE);
     }
     if includes_pi {
@@ -336,23 +346,21 @@ fn corrected_recovery(record: &StoredResetCycle) -> CycleRecovery {
         .iter()
         .flat_map(|breakdown| &breakdown.models)
         .flat_map(|model| {
-            model
-                .variants
-                .iter()
-                .flatten()
-                .filter(move |variant| {
-                    let (model_name, source) = if model.model == "Other" {
-                        let Some(parts) = variant.model.split_once(" · ") else {
-                            return false;
-                        };
-                        parts
-                    } else {
-                        (model.model.as_str(), variant.model.as_str())
+            model.variants.iter().flatten().filter(move |variant| {
+                let (model_name, source) = if model.model == "Other" {
+                    let Some(parts) = variant.model.split_once(" · ") else {
+                        return false;
                     };
-                    model_name == omp_usage::OMP_CODEX_IMAGE_MODEL && source == OMP_USAGE_SOURCE
-                })
+                    parts
+                } else {
+                    (model.model.as_str(), variant.model.as_str())
+                };
+                model_name == omp_usage::OMP_CODEX_IMAGE_MODEL && source == OMP_USAGE_SOURCE
+            })
         })
-        .fold(0_u64, |sum, variant| sum.saturating_add(variant.total_tokens));
+        .fold(0_u64, |sum, variant| {
+            sum.saturating_add(variant.total_tokens)
+        });
     // The stored subtotal may include calls newer than the immutable coverage.
     // At most the excess over the baseline can belong to that newer usage.
     let outside_baseline = record
@@ -445,6 +453,7 @@ fn restore_cycle_buckets(
     buckets
 }
 
+#[cfg(test)]
 fn add_omp_cycle_events(
     buckets: &mut [CycleBucket],
     events: &[omp_usage::PricedOmpEvent],

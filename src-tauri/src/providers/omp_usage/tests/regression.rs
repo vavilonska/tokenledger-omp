@@ -1,4 +1,5 @@
 mod forks;
+mod native_sessions;
 
 use chrono::{DateTime, Days, Local};
 use serde_json::{json, Value};
@@ -901,7 +902,8 @@ fn omp_raw_image_usage_never_enters_retained_facts() {
         assert_eq!(period.tokens, 617);
         assert_eq!(period.unknown_models, [similar_slug]);
     }
-    let retained: Vec<SessionUsageEvent> = storage.load_usage_events("omp", "account-a", 1).unwrap();
+    let retained: Vec<SessionUsageEvent> =
+        storage.load_usage_events("omp", "account-a", 1).unwrap();
     assert_eq!(retained.len(), 3);
     assert!(retained.iter().all(|event| !event.is_image_usage()));
     let path = fs::canonicalize(directory.path().join("agent/sessions/mixed.jsonl")).unwrap();
@@ -965,7 +967,8 @@ fn omp_filters_cached_images_without_deleting_existing_ledger_facts() {
     let live_events = parse_jsonl(&fs::read_to_string(&live_path).unwrap());
     // Re-parsing the raw file cannot recover the title; only the compatible cache can.
     write_session(directory.path(), "live-cache.jsonl", &[]);
-    let fingerprint = LogFileFingerprint::from_metadata(&fs::metadata(&live_path).unwrap()).unwrap();
+    let fingerprint =
+        LogFileFingerprint::from_metadata(&fs::metadata(&live_path).unwrap()).unwrap();
     let live_path = fs::canonicalize(live_path).unwrap();
     storage
         .save_log_events(
@@ -1023,7 +1026,10 @@ fn omp_filters_cached_images_without_deleting_existing_ledger_facts() {
             .filter_map(|event| event.id.as_deref())
             .collect();
         retained_ids.sort_unstable();
-        assert_eq!(retained_ids, ["deleted-title", "ledger-image", "live-title"]);
+        assert_eq!(
+            retained_ids,
+            ["deleted-title", "ledger-image", "live-title"]
+        );
     };
     assert_scan(&storage);
     fs::remove_file(&live_path).unwrap();

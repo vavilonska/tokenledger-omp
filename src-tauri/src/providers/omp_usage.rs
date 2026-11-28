@@ -1,14 +1,12 @@
 use std::{
     collections::HashSet,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use chrono::{DateTime, Days, Local, NaiveDate, Utc};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use serde_json::Value;
-use walkdir::WalkDir;
+use rusqlite::{config::DbConfig, params, Connection, OpenFlags, OptionalExtension};
 
 use crate::{
     pricing::{ModelPricing, TokenBreakdown},
@@ -19,12 +17,17 @@ use crate::{
     storage::Storage,
 };
 
+mod discovery;
 mod session;
 
 use super::log_usage::LogCacheError;
+use discovery::{discover_omp_files, local_directory, local_file_state, LocalFileState};
 use session::{
     merge_session_event, normalize_anonymous_occurrences, parse_session_usage, SessionUsageEvent,
 };
+
+#[cfg(test)]
+use walkdir::WalkDir;
 
 #[cfg(test)]
 use session::parse_jsonl;
@@ -33,6 +36,8 @@ use session::parse_jsonl;
 pub enum OmpUsageError {
     #[error("Oh My Pi usage database is unavailable")]
     Database,
+    #[error("Oh My Pi session files could not be discovered")]
+    Discovery,
     #[error(transparent)]
     LogCache(#[from] LogCacheError),
 }
@@ -43,6 +48,7 @@ const WEEKLY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 const ANCHOR_CLUSTER_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, Default)]
+#[cfg(test)]
 pub struct OmpScanOutcome {
     pub included: bool,
     pub events: Vec<PricedOmpEvent>,
@@ -50,6 +56,7 @@ pub struct OmpScanOutcome {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct PricedOmpEvent {
     pub timestamp: DateTime<Utc>,
     pub model: String,
@@ -65,6 +72,7 @@ pub struct QuotaCycleAnchor {
     pub exhausted_at: Option<DateTime<Utc>>,
 }
 
+#[cfg(test)]
 pub(super) struct SessionSource<'a> {
     pub directory: &'a Path,
     pub cache_key: &'a str,
@@ -74,33 +82,90 @@ pub(super) struct SessionSource<'a> {
     pub allowed_models: &'a [&'a str],
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn scan_into(
-    storage: &Storage,
-    now: DateTime<Utc>,
-    pricing: &ModelPricing,
-    expected_account_id: Option<&str>,
-    session_start: Option<DateTime<Utc>>,
-    weekly_start: Option<DateTime<Utc>>,
-    accumulator: &mut DailyUsageAccumulator,
-    session_accumulator: &mut DailyUsageAccumulator,
-    weekly_accumulator: &mut DailyUsageAccumulator,
-) -> Result<OmpScanOutcome, OmpUsageError> {
-    let home = omp_home();
-    scan_home_into(
-        storage,
-        &home,
-        now,
-        pricing,
-        expected_account_id,
-        session_start,
-        weekly_start,
-        accumulator,
-        session_accumulator,
-        weekly_accumulator,
-    )
+#[derive(Default)]
+pub(super) struct OmpUsage {
+    events: Vec<SessionUsageEvent>,
+    pub weekly_anchors: Vec<QuotaCycleAnchor>,
 }
 
+impl OmpUsage {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn aggregate_into(
+        &self,
+        now: DateTime<Utc>,
+        pricing: &ModelPricing,
+        session_start: Option<DateTime<Utc>>,
+        weekly_start: Option<DateTime<Utc>>,
+        accumulator: &mut DailyUsageAccumulator,
+        session_accumulator: &mut DailyUsageAccumulator,
+        weekly_accumulator: &mut DailyUsageAccumulator,
+        add_cycle_event: impl FnMut(DateTime<Utc>, &str, u64, Option<f64>, bool),
+    ) -> bool {
+        aggregate_session_events(
+            &self.events,
+            "Oh My Pi",
+            now,
+            pricing,
+            session_start,
+            weekly_start,
+            accumulator,
+            session_accumulator,
+            weekly_accumulator,
+            add_cycle_event,
+        )
+    }
+}
+
+pub(super) fn retain(
+    storage: &Storage,
+    now: DateTime<Utc>,
+    expected_account_id: Option<&str>,
+) -> Result<OmpUsage, OmpUsageError> {
+    retain_home(storage, &omp_home(), now, expected_account_id)
+}
+
+fn retain_home(
+    storage: &Storage,
+    home: &Path,
+    now: DateTime<Utc>,
+    expected_account_id: Option<&str>,
+) -> Result<OmpUsage, OmpUsageError> {
+    let Some(weekly_anchors) = read_profile(home, expected_account_id, now)? else {
+        crate::app_warn!(
+            "plugin:omp",
+            "Oh My Pi Codex usage skipped because its OAuth account could not be matched to Codex"
+        );
+        return Ok(OmpUsage::default());
+    };
+
+    // Keep ownership under the original, untrimmed Codex identity key.
+    let identity_key =
+        crate::hashing::sha256_hex(expected_account_id.unwrap_or_default().as_bytes());
+    let discovered = discover_omp_files(home, &[]).map_err(|_| OmpUsageError::Discovery)?;
+    let discovery_complete = discovered.is_complete();
+    if !discovery_complete {
+        crate::app_warn!(
+            "plugin:omp",
+            "An Oh My Pi session could not be verified; cached sessions will not be pruned"
+        );
+    }
+    let events = retain_session_events(
+        storage,
+        OMP_CACHE_KEY,
+        &identity_key,
+        discovered.paths(),
+        |path| discovered.open(path),
+        |path| discovered.accepts_legacy_path(path),
+        discovery_complete,
+        |_| true,
+    )?;
+    Ok(OmpUsage {
+        events: select_session_events(events, now, true),
+        weekly_anchors,
+    })
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn scan_home_into(
     storage: &Storage,
@@ -114,38 +179,10 @@ fn scan_home_into(
     session_accumulator: &mut DailyUsageAccumulator,
     weekly_accumulator: &mut DailyUsageAccumulator,
 ) -> Result<OmpScanOutcome, OmpUsageError> {
-    if !same_codex_account(home, expected_account_id)? {
-        crate::app_warn!(
-            "plugin:omp",
-            "Oh My Pi Codex usage skipped because its OAuth account does not match Codex"
-        );
-        return Ok(OmpScanOutcome::default());
-    }
-
-    let weekly_anchors = read_weekly_anchors(
-        &home.join("agent").join("agent.db"),
-        expected_account_id,
-        now,
-    )
-    .unwrap_or_else(|error| {
-        crate::app_warn!(
-            "plugin:omp",
-            "Oh My Pi weekly quota anchors are unavailable; continuing with session token usage: {error}"
-        );
-        Vec::new()
-    });
-
-    let identity_key =
-        crate::hashing::sha256_hex(expected_account_id.unwrap_or_default().as_bytes());
-    let mut outcome = scan_sessions_into(
-        storage,
-        SessionSource {
-            directory: &home.join("agent").join("sessions"),
-            cache_key: OMP_CACHE_KEY,
-            identity_key: &identity_key,
-            label: "Oh My Pi",
-            allowed_models: &[],
-        },
+    let usage = retain_home(storage, home, now, expected_account_id)?;
+    let mut outcome = collect_priced_events(
+        &usage.events,
+        "Oh My Pi",
         now,
         pricing,
         session_start,
@@ -153,11 +190,12 @@ fn scan_home_into(
         accumulator,
         session_accumulator,
         weekly_accumulator,
-    )?;
-    outcome.weekly_anchors = weekly_anchors;
+    );
+    outcome.weekly_anchors = usage.weekly_anchors;
     Ok(outcome)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn scan_sessions_into(
     storage: &Storage,
@@ -170,22 +208,93 @@ pub(super) fn scan_sessions_into(
     session_accumulator: &mut DailyUsageAccumulator,
     weekly_accumulator: &mut DailyUsageAccumulator,
 ) -> Result<OmpScanOutcome, LogCacheError> {
-    let since_date = now
-        .with_timezone(&Local)
-        .date_naive()
-        .checked_sub_days(Days::new(29))
-        .unwrap_or(NaiveDate::MIN);
-    let paths = discover_files(source.directory);
-    let exclude_image_usage = source.cache_key == OMP_CACHE_KEY;
-    let mut events = super::log_usage::retain_log_usage_with_normalization(
+    let directory =
+        fs::canonicalize(source.directory).unwrap_or_else(|_| source.directory.to_path_buf());
+    let paths = discover_files(&directory);
+    let events = retain_session_events(
         storage,
         source.cache_key,
         source.identity_key,
+        &paths,
+        |path| {
+            #[cfg(test)]
+            if source.cache_key == OMP_CACHE_KEY {
+                return match local_file_state(path)? {
+                    LocalFileState::Present(file) => Ok(Some(file)),
+                    LocalFileState::Missing => Ok(None),
+                    LocalFileState::Rejected => Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid local log path",
+                    )),
+                };
+            }
+            // Recovery can visit an old path that is no longer a regular log.
+            // Do not block by opening a FIFO or device in the independent source.
+            match fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "local log path is not a regular file",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            }
+            match fs::File::open(path) {
+                Ok(file) => Ok(Some(file)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        },
+        |path| path.starts_with(&directory) || path.starts_with(source.directory),
+        true,
+        |event| {
+            source.allowed_models.is_empty()
+                || source
+                    .allowed_models
+                    .contains(&pricing.display_family(&event.model).as_str())
+        },
+    )?;
+    let events = select_session_events(events, now, source.cache_key == OMP_CACHE_KEY);
+    Ok(collect_priced_events(
+        &events,
+        source.label,
+        now,
+        pricing,
+        session_start,
+        weekly_start,
+        accumulator,
+        session_accumulator,
+        weekly_accumulator,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_session_events(
+    storage: &Storage,
+    cache_key: &str,
+    identity_key: &str,
+    paths: &[PathBuf],
+    opener: impl Fn(&Path) -> io::Result<Option<fs::File>>,
+    accepts_legacy_path: impl Fn(&Path) -> bool,
+    discovery_complete: bool,
+    include: impl Fn(&SessionUsageEvent) -> bool,
+) -> Result<Vec<SessionUsageEvent>, LogCacheError> {
+    let exclude_image_usage = cache_key == OMP_CACHE_KEY;
+    super::log_usage::retain_log_usage_with_normalization(
+        storage,
+        cache_key,
+        identity_key,
         "codex",
         // The event schema is unchanged; compatible caches can still recover text usage.
         11,
         1,
-        &paths,
+        paths,
+        opener,
+        accepts_legacy_path,
+        exclude_image_usage,
+        discovery_complete,
         |content| parse_session_usage(content, exclude_image_usage),
         normalize_anonymous_occurrences,
         |event: &SessionUsageEvent| {
@@ -209,38 +318,35 @@ pub(super) fn scan_sessions_into(
                 ))
             }
         },
-        |event| {
-            (!exclude_image_usage || !event.is_image_usage())
-                && (source.allowed_models.is_empty()
-                    || source
-                        .allowed_models
-                        .contains(&pricing.display_family(&event.model).as_str()))
-        },
+        |event| (!exclude_image_usage || !event.is_image_usage()) && include(event),
         Some(merge_session_event),
-    )?;
-    if exclude_image_usage {
-        // Keep existing ledger facts intact without putting them back into metering.
-        events.retain(|event| !event.is_image_usage());
-    }
+    )
+}
+
+fn select_session_events(
+    mut events: Vec<SessionUsageEvent>,
+    now: DateTime<Utc>,
+    exclude_image_usage: bool,
+) -> Vec<SessionUsageEvent> {
+    // Keep previously ledgered images intact without putting them back into metering.
+    // Cancelled/error replies with no usage cannot make a priced period partial.
+    events.retain(|event| {
+        event.timestamp <= now
+            && (!exclude_image_usage || !event.is_image_usage())
+            && (event.total != 0
+                || event.input != 0
+                || event.output != 0
+                || event.cache_read != 0
+                || event.cache_write != 0
+                || event.cache_write_1h != 0
+                || event.cache_write_12h != 0)
+    });
     events.sort_by_key(|event| event.timestamp);
     // References keep the response identifiers out of an extra allocation per event.
     let mut seen_ids = HashSet::new();
     let mut seen_responses = HashSet::new();
-    let mut included = false;
-    let mut priced_events = Vec::new();
-
-    for event in events.iter().filter(|event| event.timestamp <= now) {
-        // Cancelled/error replies with no usage cannot make a priced period partial.
-        if event.total == 0
-            && event.input == 0
-            && event.output == 0
-            && event.cache_read == 0
-            && event.cache_write == 0
-            && event.cache_write_1h == 0
-            && event.cache_write_12h == 0
-        {
-            continue;
-        }
+    let mut duplicates = Vec::new();
+    for (index, event) in events.iter().enumerate() {
         // Entry IDs are only eight hex characters. A fork inherits the timestamp and
         // model too, while an unrelated request may legitimately reuse the short ID.
         let duplicate_id = event
@@ -252,12 +358,84 @@ pub(super) fn scan_sessions_into(
             .as_deref()
             .is_some_and(|id| !seen_responses.insert(id));
         if duplicate_id || duplicate_response {
-            continue;
+            duplicates.push(index);
         }
+    }
+    if !duplicates.is_empty() {
+        let mut duplicates = duplicates.into_iter().peekable();
+        let mut index = 0;
+        events.retain(|_| {
+            let keep = duplicates.next_if_eq(&index).is_none();
+            index += 1;
+            keep
+        });
+    }
+    events
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn collect_priced_events(
+    events: &[SessionUsageEvent],
+    label: &str,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    session_start: Option<DateTime<Utc>>,
+    weekly_start: Option<DateTime<Utc>>,
+    accumulator: &mut DailyUsageAccumulator,
+    session_accumulator: &mut DailyUsageAccumulator,
+    weekly_accumulator: &mut DailyUsageAccumulator,
+) -> OmpScanOutcome {
+    let mut priced = Vec::with_capacity(events.len());
+    let included = aggregate_session_events(
+        events,
+        label,
+        now,
+        pricing,
+        session_start,
+        weekly_start,
+        accumulator,
+        session_accumulator,
+        weekly_accumulator,
+        |timestamp, model, total, cost, _| {
+            priced.push(PricedOmpEvent {
+                timestamp,
+                model: model.to_owned(),
+                total,
+                cost,
+            });
+        },
+    );
+    OmpScanOutcome {
+        included,
+        events: priced,
+        weekly_anchors: Vec::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn aggregate_session_events(
+    events: &[SessionUsageEvent],
+    label: &str,
+    now: DateTime<Utc>,
+    pricing: &ModelPricing,
+    session_start: Option<DateTime<Utc>>,
+    weekly_start: Option<DateTime<Utc>>,
+    accumulator: &mut DailyUsageAccumulator,
+    session_accumulator: &mut DailyUsageAccumulator,
+    weekly_accumulator: &mut DailyUsageAccumulator,
+    mut add_cycle_event: impl FnMut(DateTime<Utc>, &str, u64, Option<f64>, bool),
+) -> bool {
+    let since_date = now
+        .with_timezone(&Local)
+        .date_naive()
+        .checked_sub_days(Days::new(29))
+        .unwrap_or(NaiveDate::MIN);
+    for event in events {
         let cost = if event.entry_kind.as_deref() == Some("model_usage")
             && event.purpose.as_deref() == Some("memory")
         {
-            // Exclude memory's estimate contribution, not its usage or original cost evidence.
+            // Exclude memory from display estimates, not from retained usage or requests.
             Some(0.0)
         } else {
             event
@@ -283,15 +461,23 @@ pub(super) fn scan_sessions_into(
                     )
                 })
         };
+        let unknown_model =
+            cost.is_none() && !model_has_rates(&event.timestamp, &event.model, pricing);
+        add_cycle_event(
+            event.timestamp,
+            &event.model,
+            event.total,
+            cost,
+            unknown_model,
+        );
+        let date = event.timestamp.with_timezone(&Local).date_naive();
         let Some(cost) = cost else {
-            let date = event.timestamp.with_timezone(&Local).date_naive();
-            let unknown_model = !model_has_rates(&event.timestamp, &event.model, pricing);
             if date >= since_date {
                 accumulator.add_unpriced_variant(
                     date,
                     event.total,
                     &event.model,
-                    source.label,
+                    label,
                     event.cache_usage,
                 );
                 if unknown_model {
@@ -303,7 +489,7 @@ pub(super) fn scan_sessions_into(
                     date,
                     event.total,
                     &event.model,
-                    source.label,
+                    label,
                     event.cache_usage,
                 );
                 if unknown_model {
@@ -315,67 +501,51 @@ pub(super) fn scan_sessions_into(
                     date,
                     event.total,
                     &event.model,
-                    source.label,
+                    label,
                     event.cache_usage,
                 );
                 if unknown_model {
                     weekly_accumulator.add_unknown_model(date, &event.model);
                 }
             }
-            priced_events.push(PricedOmpEvent {
-                timestamp: event.timestamp,
-                model: event.model.clone(),
-                total: event.total,
-                cost: None,
-            });
-            included = true;
             continue;
         };
-        let date = event.timestamp.with_timezone(&Local).date_naive();
         if date >= since_date {
-            add_event(accumulator, date, event, cost, source.label);
+            add_event(accumulator, date, event, cost, label);
         }
         if session_start.is_some_and(|start| event.timestamp >= start) {
-            add_event(session_accumulator, date, event, cost, source.label);
+            add_event(session_accumulator, date, event, cost, label);
         }
         if weekly_start.is_some_and(|start| event.timestamp >= start) {
-            add_event(weekly_accumulator, date, event, cost, source.label);
+            add_event(weekly_accumulator, date, event, cost, label);
         }
-        priced_events.push(PricedOmpEvent {
-            timestamp: event.timestamp,
-            model: event.model.clone(),
-            total: event.total,
-            cost: Some(cost),
-        });
-        included = true;
     }
 
-    Ok(OmpScanOutcome {
-        included,
-        events: priced_events,
-        weekly_anchors: Vec::new(),
-    })
+    !events.is_empty()
 }
 
 fn read_weekly_anchors(
-    path: &Path,
-    expected_account_id: Option<&str>,
+    connection: &Connection,
+    account_id: &str,
     now: DateTime<Utc>,
 ) -> Result<Vec<QuotaCycleAnchor>, OmpUsageError> {
-    let Some(account_id) = expected_account_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(Vec::new());
-    };
-    if !path.is_file() {
+    // Older profiles may not have this optional table. Fail on other read errors.
+    let has_history: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema
+                           WHERE name = 'usage_history' COLLATE NOCASE
+                             AND type IN ('table', 'view'))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| OmpUsageError::Database)?;
+    if !has_history {
         return Ok(Vec::new());
     }
-    let connection = open_read_only(path)?;
     let mut statement = connection
         .prepare(
             "SELECT resets_at, COALESCE(used_fraction, 0.0), recorded_at
-             FROM usage_history
+             FROM main.usage_history
              WHERE provider = 'openai-codex' AND label = '7 days'
                AND account_id = ?1 AND resets_at IS NOT NULL AND recorded_at <= ?2
              ORDER BY resets_at ASC",
@@ -389,12 +559,11 @@ fn read_weekly_anchors(
                 row.get::<_, i64>(2)?,
             ))
         })
-        .map_err(|_| OmpUsageError::Database)?
-        .collect::<Result<Vec<_>, _>>()
         .map_err(|_| OmpUsageError::Database)?;
 
     let mut clustered: Vec<(i64, f64, Option<DateTime<Utc>>)> = Vec::new();
-    for (reset_ms, used_fraction, recorded_ms) in rows {
+    for row in rows {
+        let (reset_ms, used_fraction, recorded_ms) = row.map_err(|_| OmpUsageError::Database)?;
         let exhausted_at = (used_fraction >= 1.0)
             .then(|| DateTime::from_timestamp_millis(recorded_ms))
             .flatten();
@@ -443,8 +612,8 @@ fn add_event(
     );
 }
 
+#[cfg(test)]
 fn discover_files(directory: &Path) -> Vec<PathBuf> {
-    let directory = fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
     let mut paths = WalkDir::new(directory)
         .follow_links(false)
         .into_iter()
@@ -460,54 +629,95 @@ fn discover_files(directory: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn same_codex_account(
+fn read_profile(
     home: &Path,
     expected_account_id: Option<&str>,
-) -> Result<bool, OmpUsageError> {
-    let Some(expected) = expected_account_id
+    now: DateTime<Utc>,
+) -> Result<Option<Vec<QuotaCycleAnchor>>, OmpUsageError> {
+    let Some(account_id) = expected_account_id
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|id| !id.is_empty())
     else {
-        return Ok(false);
+        return Ok(None);
     };
-    let database = home.join("agent").join("agent.db");
-    if !database.is_file() {
-        return Ok(false);
-    }
-    let connection = open_read_only(&database)?;
-    let data = connection
-        .query_row(
-            "SELECT data FROM auth_credentials \
-             WHERE provider = 'openai-codex' AND credential_type = 'oauth' \
-               AND disabled_cause IS NULL \
-             ORDER BY updated_at DESC LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
+    let Some(mut connection) = open_profile_db(home)? else {
+        return Ok(None);
+    };
+    // Keep the account check and anchor reads in the same SQLite read snapshot.
+    let transaction = connection
+        .transaction()
         .map_err(|_| OmpUsageError::Database)?;
-    let account_id = data
-        .as_deref()
-        .and_then(|text| serde_json::from_str::<Value>(text).ok())
-        .and_then(|document| {
-            document
-                .get("accountId")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
-    Ok(account_id.as_deref() == Some(expected))
+    if !same_codex_account(&transaction, account_id)? {
+        return Ok(None);
+    }
+    match read_weekly_anchors(&transaction, account_id, now) {
+        Ok(anchors) => {
+            transaction.commit().map_err(|_| OmpUsageError::Database)?;
+            Ok(Some(anchors))
+        }
+        Err(_) => {
+            crate::app_warn!("plugin:omp", "Oh My Pi weekly usage history is unavailable");
+            Ok(Some(Vec::new()))
+        }
+    }
 }
 
-fn open_read_only(path: &Path) -> Result<Connection, OmpUsageError> {
+fn same_codex_account(connection: &Connection, expected: &str) -> Result<bool, OmpUsageError> {
+    connection
+        .query_row(
+            "SELECT CASE WHEN typeof(data) = 'text' AND json_valid(data) THEN
+                       CASE WHEN json_type(data, '$.accountId') = 'text'
+                            THEN json_extract(data, '$.accountId') = ?1
+                            ELSE 0 END
+                    ELSE 0 END
+             FROM main.auth_credentials
+             WHERE provider = 'openai-codex' AND credential_type = 'oauth'
+               AND disabled_cause IS NULL
+             ORDER BY updated_at DESC LIMIT 1",
+            [expected],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()
+        .map(|matched| matched.unwrap_or(false))
+        .map_err(|_| OmpUsageError::Database)
+}
+
+fn open_profile_db(home: &Path) -> Result<Option<Connection>, OmpUsageError> {
+    let Some(agent) = local_directory(&home.join("agent")).map_err(|_| OmpUsageError::Database)?
+    else {
+        return Ok(None);
+    };
+    let path = agent.join("agent.db");
+    match local_file_state(&path).map_err(|_| OmpUsageError::Database)? {
+        LocalFileState::Missing => return Ok(None),
+        LocalFileState::Rejected => return Err(OmpUsageError::Database),
+        LocalFileState::Present(_) => {}
+    }
+    // SQLite opens the paths itself, and its Windows VFS may not honor NOFOLLOW.
+    // This rejects static redirects but is not atomic with SQLite's later opens.
+    for name in ["agent.db-wal", "agent.db-shm", "agent.db-journal"] {
+        match local_file_state(&agent.join(name)).map_err(|_| OmpUsageError::Database)? {
+            LocalFileState::Missing | LocalFileState::Present(_) => {}
+            LocalFileState::Rejected => return Err(OmpUsageError::Database),
+        }
+    }
     let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| OmpUsageError::Database)?;
     connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)
+        .map_err(|_| OmpUsageError::Database)?;
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_VIEW, false)
+        .map_err(|_| OmpUsageError::Database)?;
+    connection
         .busy_timeout(Duration::from_millis(750))
         .map_err(|_| OmpUsageError::Database)?;
-    Ok(connection)
+    Ok(Some(connection))
 }
 
 fn omp_home() -> PathBuf {
@@ -532,10 +742,17 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use rusqlite::Connection;
+    #[cfg(not(target_os = "macos"))]
     use tempfile::tempdir;
 
+    #[cfg(target_os = "macos")]
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        // The system temp directory may be under /var, a symlink to /private/var.
+        tempfile::tempdir_in(std::env::temp_dir().canonicalize()?)
+    }
+
     use super::{
-        parse_jsonl, read_weekly_anchors, same_codex_account, scan_home_into, scan_sessions_into,
+        parse_jsonl, read_profile, read_weekly_anchors, scan_home_into, scan_sessions_into,
         OmpScanOutcome, SessionSource,
     };
     use crate::{
@@ -584,9 +801,14 @@ mod tests {
     fn oauth_account_must_match_without_exposing_credentials() {
         let directory = tempdir().unwrap();
         create_databases(directory.path(), "account-a");
-        assert!(same_codex_account(directory.path(), Some("account-a")).unwrap());
-        assert!(!same_codex_account(directory.path(), Some("account-b")).unwrap());
-        assert!(!same_codex_account(directory.path(), None).unwrap());
+        let now = Utc.with_ymd_and_hms(2026, 7, 12, 14, 0, 0).unwrap();
+        assert!(read_profile(directory.path(), Some("account-a"), now)
+            .unwrap()
+            .is_some());
+        assert!(read_profile(directory.path(), Some("account-b"), now)
+            .unwrap()
+            .is_none());
+        assert!(read_profile(directory.path(), None, now).unwrap().is_none());
     }
 
     #[test]
@@ -594,12 +816,9 @@ mod tests {
         let directory = tempdir().unwrap();
         create_databases(directory.path(), "account-a");
         let now = Utc.with_ymd_and_hms(2026, 7, 12, 14, 0, 0).unwrap();
-        let anchors = read_weekly_anchors(
-            &directory.path().join("agent").join("agent.db"),
-            Some("account-a"),
-            now,
-        )
-        .unwrap();
+        let anchors = read_profile(directory.path(), Some("account-a"), now)
+            .unwrap()
+            .unwrap();
         assert_eq!(anchors.len(), 1);
         assert_eq!(anchors[0].used_percent, 20.0);
         assert_eq!(anchors[0].exhausted_at, None);
@@ -652,20 +871,19 @@ mod tests {
                 )
                 .unwrap();
         }
-        let anchors = read_weekly_anchors(&path, Some("account-a"), now).unwrap();
+        let anchors = read_weekly_anchors(&connection, "account-a", now).unwrap();
         assert_eq!(anchors.len(), 2);
         assert_eq!(anchors[0].scheduled_reset_at.timestamp_millis(), reset);
         assert_eq!(anchors[0].used_percent, 100.0);
         assert_eq!(anchors[0].exhausted_at, Some(earliest));
         assert_eq!(anchors[1].exhausted_at, None);
         assert_eq!(anchors[1].used_percent, 25.0);
-        let other = read_weekly_anchors(&path, Some("account-b"), now).unwrap();
+        let other = read_weekly_anchors(&connection, "account-b", now).unwrap();
         assert_eq!(other.len(), 1);
         assert_eq!(
             other[0].exhausted_at,
             Some(earliest - chrono::Duration::minutes(2))
         );
-        assert!(read_weekly_anchors(&path, None, now).unwrap().is_empty());
     }
 
     fn message(id: &str, timestamp: &str) -> serde_json::Value {
@@ -860,18 +1078,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_quota_history_does_not_block_session_tokens() {
+    fn missing_or_unreadable_quota_history_does_not_block_session_tokens() {
         let directory = tempdir().unwrap();
         create_databases(directory.path(), "account-a");
         let storage = Storage::open(&directory.path().join("cache.db")).unwrap();
-        Connection::open(directory.path().join("agent/agent.db"))
-            .unwrap()
-            .execute_batch("DROP TABLE usage_history")
-            .unwrap();
-        let outcome = scan(&storage, directory.path(), "account-a");
-        assert!(outcome.included);
-        assert_eq!(outcome.events[0].total, 180);
-        assert!(outcome.weekly_anchors.is_empty());
+        let profile = Connection::open(directory.path().join("agent/agent.db")).unwrap();
+        for ddl in [
+            "DROP TABLE usage_history",
+            "CREATE TABLE usage_history (unexpected_column INTEGER)",
+        ] {
+            profile.execute_batch(ddl).unwrap();
+            let outcome = scan(&storage, directory.path(), "account-a");
+            assert!(outcome.included);
+            assert_eq!(outcome.events[0].total, 180);
+            assert!(outcome.weekly_anchors.is_empty());
+        }
     }
 
     #[test]

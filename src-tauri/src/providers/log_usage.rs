@@ -1,5 +1,7 @@
 use std::{
-    fs::{self, Metadata},
+    collections::HashSet,
+    fs::{self, File, Metadata},
+    io::{self, Read},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -40,12 +42,15 @@ pub enum LogCacheError {
 #[derive(Deserialize)]
 struct CachedLogEvents<T> {
     schema_version: u8,
+    identity_hash: Option<String>,
     events: Vec<T>,
 }
 
 #[derive(Serialize)]
 struct CachedLogEventsRef<'a, T> {
     schema_version: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_hash: Option<&'a str>,
     events: &'a [T],
 }
 
@@ -109,6 +114,7 @@ where
     let events = parse(&content);
     let json = serde_json::to_string(&CachedLogEventsRef {
         schema_version,
+        identity_hash: None,
         events: &events,
     })?;
     storage.save_log_events(
@@ -144,57 +150,9 @@ pub fn retain_log_usage<T>(
 where
     T: Serialize + DeserializeOwned,
 {
-    retain_log_usage_with_normalization(
-        storage,
-        provider_id,
-        identity_key,
-        identity_provider,
-        schema_version,
-        oldest_cache_schema,
-        paths,
-        parse,
-        |_| {},
-        event_key,
-        include,
-        None,
-    )
-}
-
-/// Normalizes source identities in both freshly parsed events and compatible legacy caches.
-#[allow(clippy::too_many_arguments)]
-pub fn retain_log_usage_with_normalization<T>(
-    storage: &Storage,
-    provider_id: &str,
-    identity_key: &str,
-    identity_provider: &str,
-    schema_version: u8,
-    oldest_cache_schema: u8,
-    paths: &[std::path::PathBuf],
-    parse: impl Fn(&str) -> Vec<T>,
-    normalize: impl Fn(&mut [T]),
-    event_key: impl Fn(&T) -> Result<String, serde_json::Error>,
-    include: impl Fn(&T) -> bool,
-    merge: Option<fn(&T, &T) -> T>,
-) -> Result<Vec<T>, LogCacheError>
-where
-    T: Serialize + DeserializeOwned,
-{
-    let record = |events: &[T]| {
-        if let Some(merge) = merge {
-            storage.record_usage_events_with_reconciliation(
-                provider_id,
-                identity_key,
-                1,
-                events,
-                &event_key,
-                &event_key,
-                |_| Ok(None),
-                |_, _| None,
-                merge,
-            )
-        } else {
-            storage.record_usage_events(provider_id, identity_key, 1, events, &event_key)
-        }
+    let record = |mut events: Vec<T>| {
+        events.retain(&include);
+        storage.record_usage_events(provider_id, identity_key, 1, &events, &event_key)
     };
     for (path, json) in
         storage.recoverable_log_events(provider_id, identity_key, identity_provider)?
@@ -205,26 +163,225 @@ where
         let Ok(cached) = serde_json::from_str::<CachedLogEvents<T>>(&json) else {
             continue;
         };
-        if !(oldest_cache_schema..=schema_version).contains(&cached.schema_version) {
-            continue;
+        if (oldest_cache_schema..=schema_version).contains(&cached.schema_version) {
+            record(cached.events)?;
         }
-        let mut events = cached.events;
-        normalize(&mut events);
-        events.retain(&include);
-        record(&events)?;
     }
     for path in paths {
-        if let Some(mut events) =
-            load_or_parse_log(storage, provider_id, path, schema_version, &parse)?
+        if let Some(events) = load_or_parse_log(storage, provider_id, path, schema_version, &parse)?
         {
-            normalize(&mut events);
-            events.retain(&include);
-            record(&events)?;
+            record(events)?;
         }
     }
     storage.prune_log_events(provider_id, &paths.iter().cloned().collect())?;
+    Ok(storage.load_usage_events(provider_id, identity_key, 1)?)
+}
+
+/// Retains guarded logs and normalizes both newly parsed and recovered events. The opener must
+/// return a readable file positioned at its start, or `Ok(None)` only for a proven missing path.
+/// An untrusted path or a read error must return `Err`.
+/// Unstamped OMP parser caches v1–11 remain recoverable only for a proven legacy path and owner
+/// (matching snapshot or explicitly unscoped). A live cache hit also requires the current parser
+/// schema. Stamped caches carry their own owner proof and are written only after retention.
+#[allow(clippy::too_many_arguments)]
+pub fn retain_log_usage_with_normalization<T>(
+    storage: &Storage,
+    provider_id: &str,
+    identity_key: &str,
+    identity_provider: &str,
+    schema_version: u8,
+    oldest_cache_schema: u8,
+    paths: &[std::path::PathBuf],
+    opener: impl Fn(&Path) -> io::Result<Option<File>>,
+    accept_legacy_path: impl Fn(&Path) -> bool,
+    prune_unlisted_stamped: bool,
+    discovery_complete: bool,
+    parse: impl Fn(&str) -> Vec<T>,
+    normalize: impl Fn(&mut [T]),
+    event_key: impl Fn(&T) -> Result<String, serde_json::Error>,
+    include: impl Fn(&T) -> bool,
+    merge: Option<fn(&T, &T) -> T>,
+) -> Result<Vec<T>, LogCacheError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let record = |mut events: Vec<T>| {
+        normalize(&mut events);
+        events.retain(&include);
+        if let Some(merge) = merge {
+            storage.record_usage_events_with_reconciliation(
+                provider_id,
+                identity_key,
+                1,
+                &events,
+                &event_key,
+                &event_key,
+                |_| Ok(None),
+                |_, _| None,
+                merge,
+            )
+        } else {
+            storage.record_usage_events(provider_id, identity_key, 1, &events, &event_key)
+        }
+    };
+    let identity_hash = crate::hashing::sha256_hex(identity_key.as_bytes());
+    let schema_range = oldest_cache_schema..=schema_version;
+    let current: HashSet<&Path> = paths.iter().map(|path| path.as_path()).collect();
+    let (legacy_owner, candidates) =
+        storage.guarded_log_recovery(provider_id, identity_key, identity_provider, &current)?;
+    let legacy = |path: &Path| legacy_owner && accept_legacy_path(path);
+    let mut complete = discovery_complete;
+    let mut prunable = Vec::new();
+    for (path, json) in candidates {
+        let Ok(cached) = serde_json::from_str::<CachedLogEvents<T>>(&json) else {
+            continue;
+        };
+        if !schema_range.contains(&cached.schema_version)
+            || !cache_owner_matches(&cached, &identity_hash, || legacy(&path))
+        {
+            continue;
+        }
+        if prune_unlisted_stamped && cached.identity_hash.is_some() && !accept_legacy_path(&path) {
+            // A retired registration no longer authorizes opening this path. Its stamped
+            // parser cache is disposable because the usage facts were already retained.
+            prunable.push((path, json));
+            continue;
+        }
+        match opener(&path) {
+            Ok(None) => {
+                record(cached.events)?;
+                crate::logging::local_usage_file_recovered(provider_id, &path);
+                prunable.push((path, json));
+            }
+            Ok(Some(_)) => {}
+            Err(_) => {
+                crate::logging::local_usage_file_failed(provider_id, &path);
+                complete = false;
+            }
+        }
+    }
+    for path in paths {
+        let retained = match opener(path) {
+            Ok(Some(file)) => retain_guarded_log(
+                storage,
+                provider_id,
+                path,
+                file,
+                schema_version,
+                &identity_hash,
+                || legacy(path),
+                &parse,
+                record,
+            )?,
+            _ => false,
+        };
+        if retained {
+            crate::logging::local_usage_file_recovered(provider_id, path);
+            continue;
+        }
+        // Discovery overlapped a removal or a file could not be read as a single snapshot.
+        // Keep its older cache and defer all pruning until a complete scan.
+        crate::logging::local_usage_file_failed(provider_id, path);
+        complete = false;
+    }
+    if complete {
+        storage.prune_recovered_log_events(provider_id, &prunable)?;
+    }
     // Parser-cache versions can change independently of the durable usage-fact schema.
     Ok(storage.load_usage_events(provider_id, identity_key, 1)?)
+}
+
+fn cache_owner_matches<T>(
+    cached: &CachedLogEvents<T>,
+    identity_hash: &str,
+    legacy: impl FnOnce() -> bool,
+) -> bool {
+    cached
+        .identity_hash
+        .as_deref()
+        .map_or_else(legacy, |owner| owner == identity_hash)
+}
+
+fn guarded_fingerprint(file: &File) -> Option<LogFileFingerprint> {
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    LogFileFingerprint::from_metadata(&metadata)
+}
+
+/// All checks and content reads use the caller's already opened regular file, never its path.
+#[allow(clippy::too_many_arguments)]
+fn retain_guarded_log<T>(
+    storage: &Storage,
+    provider_id: &str,
+    path: &Path,
+    mut file: File,
+    schema_version: u8,
+    identity_hash: &str,
+    legacy: impl FnOnce() -> bool,
+    parse: impl FnOnce(&str) -> Vec<T>,
+    record: impl FnOnce(Vec<T>) -> Result<(), StorageError>,
+) -> Result<bool, LogCacheError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let Some(fingerprint) = guarded_fingerprint(&file) else {
+        return Ok(false);
+    };
+    let cached = storage
+        .load_log_events(
+            provider_id,
+            path,
+            fingerprint.size,
+            fingerprint.modified_nanos,
+        )?
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<CachedLogEvents<T>>(json).ok())
+        .filter(|cached| {
+            cached.schema_version == schema_version
+                && cache_owner_matches(cached, identity_hash, legacy)
+        });
+    let events = if let Some(cached) = cached {
+        if guarded_fingerprint(&file) != Some(fingerprint) {
+            return Ok(false);
+        }
+        crate::app_debug!("cache", "local usage cache hit for {provider_id}");
+        if cached.identity_hash.is_some() {
+            record(cached.events)?;
+            return Ok(true);
+        }
+        // A compatible, proven live legacy hit can be stamped without rereading the log.
+        cached.events
+    } else {
+        let mut content = String::new();
+        let read = (&mut file)
+            .take(fingerprint.size.saturating_add(1))
+            .read_to_string(&mut content);
+        if !matches!(read, Ok(bytes) if bytes as u64 == fingerprint.size)
+            || guarded_fingerprint(&file) != Some(fingerprint)
+        {
+            return Ok(false);
+        }
+        crate::app_debug!("cache", "local usage cache miss for {provider_id}");
+        parse(&content)
+    };
+    let json = serde_json::to_string(&CachedLogEventsRef {
+        schema_version,
+        identity_hash: Some(identity_hash),
+        events: &events,
+    })?;
+    // Commit the facts before publishing the disposable cache. If this write fails, a
+    // subsequent scan can safely reparse; a stamp must never be the only copy of the facts.
+    record(events)?;
+    storage.save_log_events(
+        provider_id,
+        path,
+        fingerprint.size,
+        fingerprint.modified_nanos,
+        &json,
+    )?;
+    Ok(true)
 }
 
 /// Opt-in merge before any durable key can overwrite a fuller log copy.
@@ -464,6 +621,55 @@ mod tests {
         assert_eq!(parses.get(), 1);
         load_or_parse_log(&storage, "test", &path, 2, parse).unwrap();
         assert_eq!(parses.get(), 2);
+    }
+
+    #[test]
+    fn guarded_cache_stamp_requires_committed_usage_facts() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("ledger.db");
+        let storage = Storage::open(&database).unwrap();
+        let conn = rusqlite::Connection::open(database).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_test_fact BEFORE INSERT ON local_usage_events
+             BEGIN SELECT RAISE(ABORT, 'test retention failure'); END;",
+        )
+        .unwrap();
+        let path = directory.path().join("guarded.jsonl");
+        fs::write(&path, "new").unwrap();
+        let fingerprint = LogFileFingerprint::from_metadata(&fs::metadata(&path).unwrap()).unwrap();
+        let read_cache = || {
+            storage
+                .load_log_events("test", &path, fingerprint.size, fingerprint.modified_nanos)
+                .unwrap()
+        };
+        for previous in [None, Some(r#"{"schema_version":1,"events":["legacy"]}"#)] {
+            if let Some(legacy) = previous {
+                storage
+                    .save_log_events(
+                        "test",
+                        &path,
+                        fingerprint.size,
+                        fingerprint.modified_nanos,
+                        legacy,
+                    )
+                    .unwrap();
+            }
+            let result = super::retain_guarded_log(
+                &storage,
+                "test",
+                &path,
+                fs::File::open(&path).unwrap(),
+                1,
+                "stamp",
+                || true,
+                |content| vec![content.to_owned()],
+                |events| {
+                    storage.record_usage_events("test", "owner", 1, &events, super::usage_event_key)
+                },
+            );
+            assert!(matches!(result, Err(super::LogCacheError::Storage(_))));
+            assert_eq!(read_cache().as_deref(), previous);
+        }
     }
 
     #[test]

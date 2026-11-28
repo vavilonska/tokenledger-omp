@@ -10,10 +10,23 @@ if (!cargoPackage) {
   throw new Error('Could not read the package version from src-tauri/Cargo.toml.');
 }
 
+const cargoLock = fs.readFileSync(new URL('src-tauri/Cargo.lock', root), 'utf8');
+const lockedApp = cargoLock
+  .split(/^\[\[package\]\]\r?$/m)
+  .find(
+    (entry) =>
+      entry.match(/^name = "([^"]+)"/m)?.[1] === packageJson.name && !/^source = /m.test(entry),
+  );
+const lockedVersion = lockedApp?.match(/^version = "([^"]+)"/m)?.[1];
+if (!lockedVersion) {
+  throw new Error(`Could not find the local ${packageJson.name} package in src-tauri/Cargo.lock.`);
+}
+
 const versions = {
   package: packageJson.version,
   tauri: tauriConfig.version,
   cargo: cargoPackage[1],
+  cargoLock: lockedVersion,
 };
 const uniqueVersions = new Set(Object.values(versions));
 

@@ -29,6 +29,8 @@ pub struct Storage {
     connection: Mutex<Connection>,
 }
 
+type LogCacheRows = Vec<(PathBuf, String)>;
+
 // Recovery evidence is storage-only; it is never part of the frontend DTO.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CycleRecovery {
@@ -500,27 +502,96 @@ impl Storage {
         identity_provider: &str,
     ) -> Result<Vec<(PathBuf, String)>, StorageError> {
         let connection = self.connection()?;
-        if !identity_key.is_empty() {
-            let prior: Option<String> = connection
-                .query_row(
-                    "SELECT identity_key FROM provider_snapshots WHERE provider_id = ?1",
-                    [identity_provider],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
-            if prior.as_deref() != Some(identity_key) {
-                return Ok(Vec::new());
-            }
+        if !Self::log_cache_matches_identity(&connection, identity_key, identity_provider)? {
+            return Ok(Vec::new());
         }
+        Self::log_cache_rows(&connection, provider_id, |_| false)
+    }
+
+    /// Guarded envelopes carry their own provenance. The snapshot only attests to unstamped
+    /// legacy rows; exclude current paths so their cache payloads are read just once.
+    pub(crate) fn guarded_log_recovery(
+        &self,
+        provider_id: &str,
+        identity_key: &str,
+        identity_provider: &str,
+        current: &HashSet<&Path>,
+    ) -> Result<(bool, LogCacheRows), StorageError> {
+        let connection = self.connection()?;
+        let legacy_owner =
+            Self::log_cache_matches_identity(&connection, identity_key, identity_provider)?;
+        let rows = Self::log_cache_rows(&connection, provider_id, |path| current.contains(path))?;
+        Ok((legacy_owner, rows))
+    }
+
+    fn log_cache_matches_identity(
+        connection: &Connection,
+        identity_key: &str,
+        identity_provider: &str,
+    ) -> Result<bool, StorageError> {
+        if identity_key.is_empty() {
+            return Ok(true);
+        }
+        let prior: Option<String> = connection
+            .query_row(
+                "SELECT identity_key FROM provider_snapshots WHERE provider_id = ?1",
+                [identity_provider],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(prior.as_deref() == Some(identity_key))
+    }
+
+    fn log_cache_rows(
+        connection: &Connection,
+        provider_id: &str,
+        skip: impl Fn(&Path) -> bool,
+    ) -> Result<LogCacheRows, StorageError> {
         let mut statement = connection.prepare(
             "SELECT path, events_json FROM log_file_cache WHERE provider_id = ?1 ORDER BY path",
         )?;
         let rows = statement.query_map([provider_id], |row| {
-            Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?))
+            let path = Path::new(row.get_ref(0)?.as_str().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?);
+            if skip(path) {
+                return Ok(None);
+            }
+            Ok(Some((path.to_path_buf(), row.get(1)?)))
         })?;
-        rows.collect::<Result<Vec<_>, _>>()
+        rows.filter_map(Result::transpose)
+            .collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
+    }
+
+    /// Prune only the exact cache payloads retired by a complete guarded scan; a concurrent
+    /// refresh's replacement (including one stamped for a different identity) stays intact.
+    pub(crate) fn prune_recovered_log_events(
+        &self,
+        provider_id: &str,
+        recovered: &[(PathBuf, String)],
+    ) -> Result<(), StorageError> {
+        if recovered.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        {
+            let mut delete = transaction.prepare(
+                "DELETE FROM log_file_cache
+                 WHERE provider_id = ?1 AND path = ?2 AND events_json = ?3",
+            )?;
+            for (path, json) in recovered {
+                delete.execute(params![provider_id, path.to_string_lossy(), json])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn load_log_events(
